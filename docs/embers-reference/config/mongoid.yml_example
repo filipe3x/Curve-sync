@@ -16,7 +16,7 @@ production:
       hosts:
         - 127.0.0.1:27017
       username: admin
-      password: ****password6618
+      password: YOUR_MONGODB_PASSWORD
       options:
         auth_source: admin
         use_utc: true
