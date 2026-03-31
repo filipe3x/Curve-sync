@@ -6,18 +6,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Curve Sync is a standalone service (Vite + React frontend, Express/Fastify backend, MongoDB) that automates expense tracking by parsing Curve Card email receipts. It shares the same MongoDB instance as the Embers platform but runs independently.
 
-## Target Stack
+## Commands
+
+```bash
+npm run install:all    # Install all deps (root + client + server)
+npm run dev            # Start both client (Vite :5173) and server (Express :3001)
+npm run dev:client     # Frontend only
+npm run dev:server     # Backend only
+npm run build          # Production build (client)
+npm run start          # Start server in production mode
+```
+
+Server env: copy `server/.env.example` to `server/.env` and set `MONGODB_URI`.
+
+## Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Vite + React |
-| Backend | Express or Fastify (Node.js) |
+| Frontend | Vite + React + Tailwind CSS |
+| Backend | Express (Node.js) |
 | Database | MongoDB (shared with Embers) |
 | ODM | Mongoose |
 | Email parsing | cheerio (port of Python BeautifulSoup logic) |
-| Filesystem/Email | fs/promises or direct IMAP (imapclient) |
 | Scheduler | node-cron |
 | Hashing | Node.js native `crypto` (SHA-256) |
+| CSS | Tailwind with custom `curve` (red-brown) and `sand` (warm grey) palettes |
 
 ## Architecture
 
@@ -53,6 +66,24 @@ Weekly budget = EUR 295/4. Score formula: `score = (log(weekly_savings + 1) / lo
 ### Email Parsing Pipeline
 
 The original `curve.py` (in `docs/embers-reference/`) extracts fields from Curve Card HTML emails using CSS selectors: `entity` from `td.u-bold`, `amount` (EUR) from second `td.u-bold`, `date` from `td.u-greySmaller.u-padding__top--half`, `card` from penultimate `td.u-padding__top--half`. The standalone version should port this to cheerio with fallback selectors for resilience.
+
+## Project Structure
+
+```
+client/                 # Vite + React + Tailwind frontend
+  src/
+    components/layout/  # Shell, Sidebar, Icons
+    components/common/  # PageHeader, StatCard, EmptyState
+    pages/              # DashboardPage, ExpensesPage, CurveConfigPage, CurveLogsPage
+    services/api.js     # All API calls (fetch wrapper)
+server/                 # Express backend
+  src/
+    models/             # Mongoose: Expense, Category, User (RO), CurveConfig, CurveLog
+    routes/             # expenses, categories, curve, autocomplete
+    services/           # expense.js (digest, auto-category)
+    config/db.js        # MongoDB connection
+docs/                   # Architecture docs + read-only Embers reference
+```
 
 ## Reference Files
 
