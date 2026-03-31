@@ -1,0 +1,23 @@
+development:
+  clients:
+    default:
+      database: embers_db_dev
+      hosts:
+        - 127.0.0.1:27017
+      options:
+        auth_source: admin
+        use_utc: true
+        use_activesupport_time_zone: true
+
+production:
+  clients:
+    default:
+      database: embers_db
+      hosts:
+        - 127.0.0.1:27017
+      username: admin
+      password: ****password6618
+      options:
+        auth_source: admin
+        use_utc: true
+        use_activesupport_time_zone: true
