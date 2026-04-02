@@ -1,68 +1,130 @@
-# Curve Sync Standalone - Reference Package
+# Curve Sync
 
-Este directorio contem todos os ficheiros de referencia necessarios para construir o servico standalone Curve Sync (Vite + Express + MongoDB), totalmente independente do Embers mas partilhando a mesma base de dados MongoDB.
+Serviço standalone para importação automática de despesas a partir de emails do Curve Card. Frontend em Vite + React + Tailwind, backend em Express + Mongoose, partilhando a mesma instância MongoDB do Embers.
 
-## Estrutura
+## Pré-requisitos
 
-```
-standalone-reference/
-├── README.md                              # Este ficheiro
-├── docs/
-│   ├── MONGODB_SCHEMA.md                  # Schema MongoDB completo com Mongoose equivalents,
-│   │                                      # mapa de relacoes, API endpoints, regras de consistencia
-│   ├── expense-tracking.md                # Documentacao completa do sistema de despesas,
-│   │                                      # cronjob, TODOs, arquitectura standalone
-│   └── embers-reference/                  # Ficheiros originais do Embers (READ-ONLY reference)
-│       ├── CLAUDE.md                      # Visao geral da plataforma Embers
-│       ├── curve.py                       # Parser original (logica a portar para JS/cheerio)
-│       ├── models/
-│       │   ├── expense.rb                 # Schema Expense (Mongoid) — source of truth
-│       │   ├── category.rb                # Schema Category (Mongoid) — entidades + icon
-│       │   └── user.rb                    # Schema User (Mongoid) — auth + relacoes
-│       ├── controllers/
-│       │   ├── expenses_controller.rb     # Logica: add_expense, savings_score, monthly, autocomplete
-│       │   └── categories_controller.rb   # CRUD categorias (referencia)
-│       ├── frontend/
-│       │   ├── services/
-│       │   │   ├── expense.js             # API calls do frontend Embers (contract reference)
-│       │   │   └── category.js            # API calls categorias
-│       │   └── components/
-│       │       ├── expenses/
-│       │       │   ├── index.js           # Listagem: tabela, filtros, paginacao, savings score
-│       │       │   ├── form.js            # Formulario: autocomplete, digest SHA-256, datepicker
-│       │       │   └── show.js            # Vista detalhada de uma despesa
-│       │       └── curve/
-│       │           └── index.js           # Componente Curve actual (a redesenhar)
-│       └── config/
-│           ├── mongoid.yml_example        # DB names: embers_db (prod), embers_db_dev (dev)
-│           └── routes.rb                  # Rotas Rails existentes (para nao colidir)
+- **Node.js** >= 18
+- **npm** >= 9
+- **MongoDB** >= 5.0 (a mesma instância usada pelo Embers)
+
+## Instalação
+
+```bash
+# 1. Clonar o repositório
+git clone https://github.com/filipe3x/Curve-sync.git
+cd Curve-sync
+
+# 2. Instalar todas as dependências (root + client + server)
+npm run install:all
+
+# 3. Configurar variáveis de ambiente do servidor
+cp server/.env.example server/.env
 ```
 
-## Como Usar
+Editar `server/.env` com os valores correctos:
 
-1. **Ler `docs/MONGODB_SCHEMA.md`** primeiro — contem o schema completo, Mongoose equivalents, mapa de relacoes, e regras de consistencia
-2. **Ler `docs/expense-tracking.md`** — documentacao detalhada do sistema, cronjob de producao, TODOs priorizados, e proposta de arquitectura standalone
-3. **Consultar `docs/embers-reference/`** quando precisar de ver a implementacao original de qualquer funcionalidade
+```env
+PORT=3001
+MONGODB_URI=mongodb://localhost:27017/embers_db
+NODE_ENV=development
+```
 
-## Stack Alvo
+> **Nota:** A `MONGODB_URI` deve apontar para a mesma base de dados do Embers (`embers_db` em produção, `embers_db_dev` em desenvolvimento). Ver `docs/embers-reference/config/mongoid.yml_example` para os nomes exactos.
 
-| Camada | Tech |
-|--------|------|
-| Frontend | Vite + React |
-| Backend | Express/Fastify (Node.js) |
-| Database | MongoDB (mesma instancia do Embers) |
-| ODM | Mongoose |
-| Email parsing | cheerio (equivalente BeautifulSoup) |
-| Filesystem read | fs/promises (ler Maildir) |
-| Scheduler | node-cron |
-| Hash/digest | crypto (nativo Node.js) |
+## Executar
 
-## Collections MongoDB
+```bash
+# Desenvolvimento — arranca client (Vite :5173) e server (Express :3001) em paralelo
+npm run dev
 
-| Collection | Owner | Acesso do Standalone |
-|---|---|---|
-| `users` | Embers | READ-ONLY |
-| `categories` | Embers | READ-ONLY |
-| `expenses` | Embers | READ + INSERT |
-| `curve_configs` | **Standalone** | CRUD completo |
-| `curve_logs` | **Standalone** | INSERT + READ |
+# Apenas o frontend
+npm run dev:client
+
+# Apenas o backend
+npm run dev:server
+```
+
+O Vite faz proxy automático de `/api/*` para `http://localhost:3001`, por isso em desenvolvimento basta abrir `http://localhost:5173`.
+
+## Build de produção
+
+```bash
+# Compilar o frontend (output em client/dist/)
+npm run build
+
+# Arrancar o servidor (serve a API, o frontend estático deve ser servido à parte ou via reverse proxy)
+npm run start
+```
+
+## Estrutura do Projecto
+
+```
+Curve-sync/
+├── client/                     # Frontend — Vite + React + Tailwind
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── layout/         # Shell, Sidebar, Icons
+│   │   │   └── common/         # PageHeader, StatCard, EmptyState
+│   │   ├── pages/              # Dashboard, Expenses, CurveConfig, CurveLogs
+│   │   └── services/api.js     # Todas as chamadas HTTP ao backend
+│   ├── tailwind.config.js      # Paletas custom (curve, sand)
+│   └── vite.config.js          # Proxy /api → :3001
+│
+├── server/                     # Backend — Express + Mongoose
+│   ├── src/
+│   │   ├── config/db.js        # Ligação MongoDB
+│   │   ├── models/             # Expense, Category, User (RO), CurveConfig, CurveLog
+│   │   ├── routes/             # expenses, categories, curve, autocomplete
+│   │   └── services/           # expense.js (digest SHA-256, auto-category)
+│   └── .env.example
+│
+├── docs/                       # Documentação e referências
+│   ├── MONGODB_SCHEMA.md       # Schema completo com regras de consistência
+│   ├── expense-tracking.md     # Documentação do sistema de despesas
+│   └── embers-reference/       # Ficheiros originais do Embers (READ-ONLY)
+│
+├── CLAUDE.md                   # Instruções para o Claude Code
+├── ROADMAP.md                  # TODOs e plano de evolução
+└── package.json                # Scripts raiz (dev, build, install:all)
+```
+
+## Acesso à Base de Dados
+
+Este serviço partilha o MongoDB com o Embers. As regras de acesso são rigorosas:
+
+| Collection      | Dono          | Acesso do Curve Sync       |
+|-----------------|---------------|----------------------------|
+| `users`         | Embers        | READ-ONLY                  |
+| `categories`    | Embers        | READ-ONLY                  |
+| `expenses`      | Embers        | READ + INSERT (nunca UPDATE/DELETE) |
+| `curve_configs` | **Curve Sync** | CRUD completo              |
+| `curve_logs`    | **Curve Sync** | INSERT + READ (TTL 90 dias)|
+
+## API
+
+| Método | Rota                        | Descrição                          |
+|--------|-----------------------------|------------------------------------|
+| GET    | `/api/expenses`             | Listar despesas (filtros, paginação) |
+| POST   | `/api/expenses`             | Criar despesa                      |
+| GET    | `/api/categories`           | Listar categorias (read-only)      |
+| GET    | `/api/curve/config`         | Ver configuração IMAP              |
+| PUT    | `/api/curve/config`         | Actualizar configuração IMAP       |
+| POST   | `/api/curve/sync`           | Forçar sincronização manual        |
+| POST   | `/api/curve/test-connection`| Testar ligação IMAP                |
+| GET    | `/api/curve/logs`           | Histórico de processamento         |
+| GET    | `/api/autocomplete/:field`  | Valores distintos (entity, card)   |
+| GET    | `/api/health`               | Health check                       |
+
+## Design
+
+Interface inspirada no Curve.com — sóbria, monocromática, com cantos arredondados e animações subtis de fade. Paleta de cores:
+
+- **`curve`** — tons de vermelho escuro/castanho (#a03d27 → #3b160f)
+- **`sand`** — cinzentos quentes (#faf9f7 → #2f2a24)
+
+## Documentação adicional
+
+- [`docs/MONGODB_SCHEMA.md`](docs/MONGODB_SCHEMA.md) — Schema MongoDB completo
+- [`docs/expense-tracking.md`](docs/expense-tracking.md) — Sistema de despesas, savings score, ciclo mensal
+- [`ROADMAP.md`](ROADMAP.md) — Plano de evolução e TODOs

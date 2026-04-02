@@ -1,0 +1,22 @@
+{
+  "name": "curve-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Curve Sync service — Vite + Express + MongoDB",
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:client": "npm run dev --prefix client",
+    "dev:server": "npm run dev --prefix server",
+    "build": "npm run build --prefix client",
+    "start": "npm run start --prefix server",
+    "install:all": "npm install --prefix client && npm install --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:42379/git/filipe3x/Curve-sync"
+  },
+  "license": "ISC"
+}
