@@ -203,3 +203,134 @@ Erro:    bg-red-50 text-curve-700
 - **Grid gap:** `gap-4` entre stat cards
 - **Section gap:** `mt-8` entre secções da página
 - **Header margin-bottom:** `mb-8`
+
+---
+
+## 10. Loading States
+
+**Spinner central:** Usado nas páginas Despesas e Logs enquanto os dados carregam.
+```
+Container: flex items-center justify-center py-20
+Spinner:   h-6 w-6 animate-spin rounded-full
+           border-2 border-curve-300 border-t-curve-700
+```
+A técnica `border-t` cria o arco visível que roda sobre o anel `curve-300` mais claro.
+
+**Botões com estado de loading:** Os botões primário e secundário suportam `disabled` nativo. O texto muda para indicar a acção em curso, mantendo o ícone (ex: `ArrowPathIcon` ganha `animate-spin`):
+
+| Botão | Estado normal | Estado loading |
+|-------|-------------|----------------|
+| Sync (Dashboard) | "Sincronizar agora" | "A sincronizar..." + ícone spin |
+| Guardar (Config) | "Guardar" | "A guardar..." |
+| Testar (Config) | "Testar ligação" | "A testar..." |
+
+Padrão: o state `syncing`/`saving`/`testing` controla o `disabled` e o texto. Não há overlay — o botão simplesmente fica inerte e o label muda.
+
+---
+
+## 11. Localização
+
+Toda a interface está em **Português Europeu** (pt-PT).
+
+- **Labels de navegação:** Dashboard, Despesas, Configuração, Logs
+- **Headers de tabela:** Entidade, Montante, Data, Cartão, Categoria, Estado, Digest
+- **Placeholders:** "Pesquisar por entidade, cartão...", "imap.outlook.com", "email@example.com"
+- **Mensagens de feedback:** "Configuração guardada.", "Ligação bem-sucedida.", "Não foi possível carregar dados."
+- **Empty states:** "Sem despesas", "Sem resultados", "Sem logs"
+- **Formatação:** Datas com `toLocaleString('pt-PT')`, montantes com prefixo `€` (ex: `€12.50`)
+- **Pluralização:** `despesa/despesas`, `log/logs` (condicional com `total !== 1`)
+
+> **Nota:** O `<html lang="pt">` deve estar definido no `index.html` raiz. Textos do sistema (console, API errors) permanecem em inglês — apenas a camada de apresentação é localizada.
+
+---
+
+## 12. Responsividade
+
+### Breakpoints activos
+
+| Breakpoint | Tailwind | Onde é usado |
+|------------|----------|--------------|
+| Default (mobile-first) | — | Layout base: sidebar fixa, `px-6 py-8` |
+| `sm` (640px) | `sm:grid-cols-2` | Stat cards: 2 colunas em tablet |
+| `lg` (1024px) | `lg:grid-cols-4`, `lg:px-10` | Stat cards: 4 colunas em desktop, padding lateral maior |
+
+### Limitações actuais
+- A sidebar é fixa `w-64` sem comportamento de drawer/collapse em mobile
+- Tabelas não têm scroll horizontal ou layout alternativo em ecrãs pequenos
+- O formulário de config usa `max-w-xl` que se adapta naturalmente
+
+### Roadmap (Fase 3.1)
+Sidebar responsiva com drawer mobile e hamburger menu está prevista. O layout `flex min-h-screen` actual suporta a adição de toggle sem refactoring estrutural.
+
+---
+
+## 13. Focus & Acessibilidade
+
+### Focus States
+Os inputs têm um focus state explícito e visível:
+```
+focus:border-curve-500 focus:outline-none focus:ring-2 focus:ring-curve-500/20
+```
+O `outline-none` remove o default do browser e substitui por um `ring` com 20% de opacidade da cor primária — subtil mas claramente visível sobre o fundo sand.
+
+### Disabled States
+- **Botões:** O atributo `disabled` nativo é usado; Tailwind não aplica estilos custom de disabled nos botões (dependem do browser default de redução de opacidade)
+- **Paginação:** Setas com `disabled:opacity-30` para indicar limites de navegação
+- **Checkbox:** Usa classes nativas do browser com `text-curve-700 focus:ring-curve-500`
+
+### Hierarquia de Headings
+Cada página segue uma estrutura semântica consistente:
+- `<h1>` — Título da página (via `PageHeader`, `text-2xl`)
+- `<h2>` — Títulos de secção (ex: "Despesas recentes" no Dashboard, `text-lg`)
+- Sem `<h3>`+ actualmente — a hierarquia é plana por design (ecrãs simples)
+
+### Navegação
+- Links da sidebar usam `<NavLink>` do React Router com `end` prop para matching exacto
+- Ícones SVG são decorativos (sem `aria-label`) — o texto do link fornece o contexto
+
+---
+
+## 14. Dark Mode
+
+**Estado actual:** Não implementado. A UI usa valores de cor fixos (`bg-white`, `bg-sand-50`, `text-sand-950`).
+
+**Roadmap (Fase 3.3):** Previsto como feature futura. A paleta monocromática warm adapta-se naturalmente a uma inversão dark:
+
+| Light | Dark (proposta) |
+|-------|----------------|
+| `sand-50` (bg) | `sand-950` |
+| `white` (cards) | `sand-900` |
+| `sand-950` (texto) | `sand-50` |
+| `sand-200` (borders) | `sand-800` |
+| `curve-700` (primária) | `curve-500` (mais claro para contraste) |
+
+A estrutura Tailwind já está preparada — basta adicionar `darkMode: 'class'` ao config e classes `dark:` aos componentes.
+
+---
+
+## 15. Search Pattern
+
+Usado na página de Despesas — input com ícone posicionado à esquerda:
+
+```
+Container: relative flex-1
+Ícone:     absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-sand-400
+Input:     .input pl-10  (padding-left extra para não sobrepor o ícone)
+```
+
+O `MagnifyingGlassIcon` fica fixo visualmente dentro do campo. O `pl-10` (2.5rem) no input compensa o espaço do ícone (left-3 = 0.75rem + w-4 = 1rem + margem). O form usa `onSubmit` — o botão "Pesquisar" (`btn-secondary`) submete a pesquisa; não há pesquisa em tempo real (debounce) actualmente.
+
+---
+
+## 16. Futuro: Sistema de Toasts (Roadmap 3.2)
+
+A animação `slide-in-right` (0.4s, translateX 16px → 0) está **reservada** para o sistema de notificações toast.
+
+**Comportamento previsto:**
+- Toasts aparecem no canto superior-direito com `slide-in-right`
+- Auto-dismiss após ~4s com fade-out
+- Tipos: sucesso (emerald), erro (curve-700), info (sand)
+- Substituirá os `/* toast later */` comments no código actual (ex: `DashboardPage` sync error)
+- As mensagens inline do `CurveConfigPage` poderão coexistir ou migrar para toasts
+
+**Nota:** Actualmente os erros de sync são silenciados (`catch { /* toast later */ }`) — o toast system é a peça que falta para feedback completo ao utilizador.
