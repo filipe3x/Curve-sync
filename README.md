@@ -123,6 +123,45 @@ Interface inspirada no Curve.com — sóbria, monocromática, com cantos arredon
 - **`curve`** — tons de vermelho escuro/castanho (#a03d27 → #3b160f)
 - **`sand`** — cinzentos quentes (#faf9f7 → #2f2a24)
 
+## Raspberry Pi / Deployment
+
+O projecto funciona num Raspberry Pi 5 (ARM64) com Node.js >= 18 e MongoDB >= 5.0. Existem scripts de verificação na pasta `scripts/`:
+
+```bash
+# Verificar se tudo está instalado e que versões correm (não instala nada)
+./scripts/setup-pi.sh
+
+# Verificar se MongoDB (e opcionalmente Embers Rails) estão a correr
+./scripts/check-services.sh
+./scripts/check-services.sh --with-embers
+
+# Verificar serviços + lançar dev (MongoDB tem de estar a correr)
+./scripts/dev.sh
+./scripts/dev.sh --with-embers      # também verifica Embers Rails
+./scripts/dev.sh --server-only      # só backend
+./scripts/dev.sh --client-only      # só frontend
+```
+
+### Pré-requisitos no Pi
+
+1. **Node.js 20 LTS** — `curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs`
+2. **MongoDB 7.0** — [Instruções ARM64](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-on-debian/)
+3. **Ruby + Rails** (opcional) — Só necessário se executares o Embers localmente
+
+### Embers Rails (opcional)
+
+Se quiseres correr o Embers Rails ao lado do Curve Sync:
+
+```bash
+cd /path/to/embers
+cp config/mongoid.yml_example config/mongoid.yml
+cp config/application.yml_example config/application.yml
+bundle install
+bundle exec rails server -p 3000
+```
+
+O `check-services.sh --with-embers` procura o Embers em `../embers`, `../Embers`, `~/embers`, ou `~/Embers`. Para um caminho diferente, usa `EMBERS_PATH=/custom/path ./scripts/check-services.sh --with-embers`.
+
 ## Documentação adicional
 
 - [`docs/MONGODB_SCHEMA.md`](docs/MONGODB_SCHEMA.md) — Schema MongoDB completo
