@@ -95,6 +95,7 @@ All files under `docs/embers-reference/` are **read-only references** from the E
 - `frontend/` — React components and API service layer from Embers
 
 Key documentation:
+- `docs/EMAIL.md` — **Email pipeline implementation guide**: current state, TODOs, dev strategy, reference selectors, architecture diagram
 - `docs/MONGODB_SCHEMA.md` — Complete schema with Mongoose equivalents, relationships, indexes, and consistency rules
 - `docs/expense-tracking.md` — Full system documentation including savings score, monthly cycle logic, TODOs, and proposed standalone architecture
 
