@@ -246,6 +246,13 @@ fi
 echo ""
 echo -e "${BLUE}--- Project ---${NC}"
 
+if [[ -d "$PROJECT_DIR/node_modules" ]]; then
+  success "root node_modules exists (concurrently)"
+else
+  fail "root node_modules missing — run: npm run install:all"
+  ERRORS=$((ERRORS + 1))
+fi
+
 if [[ -d "$PROJECT_DIR/client/node_modules" ]]; then
   success "client/node_modules exists"
 else

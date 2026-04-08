@@ -99,6 +99,11 @@ fi
 # ------------------------------------------------------------------
 NEEDS_INSTALL=false
 
+if [[ ! -d "$PROJECT_DIR/node_modules" ]]; then
+  warn "root node_modules missing (concurrently)"
+  NEEDS_INSTALL=true
+fi
+
 if [[ ! -d "$PROJECT_DIR/client/node_modules" ]]; then
   warn "client/node_modules missing"
   NEEDS_INSTALL=true
@@ -112,7 +117,6 @@ fi
 if [[ "$NEEDS_INSTALL" == true ]]; then
   info "Installing dependencies..."
   cd "$PROJECT_DIR"
-  npm install 2>/dev/null || true
   npm run install:all
   success "Dependencies installed"
 fi
