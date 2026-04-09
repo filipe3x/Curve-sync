@@ -3,10 +3,19 @@ import PageHeader from '../components/common/PageHeader';
 import * as api from '../services/api';
 
 const FIELDS = [
-  { key: 'imap_server', label: 'Servidor IMAP', placeholder: 'imap.outlook.com' },
+  { key: 'imap_server', label: 'Servidor IMAP', placeholder: 'outlook.office365.com' },
   { key: 'imap_port', label: 'Porta', placeholder: '993', type: 'number' },
   { key: 'imap_username', label: 'Utilizador', placeholder: 'email@example.com' },
-  { key: 'imap_password', label: 'Password', placeholder: '••••••••', type: 'password' },
+  {
+    key: 'imap_password',
+    label: 'App Password',
+    placeholder: '••••••••',
+    type: 'password',
+    help:
+      'Não é a password da conta — é uma App Password gerada separadamente. ' +
+      'Outlook/M365: activa MFA em account.microsoft.com → Security → Advanced ' +
+      'security options → App passwords. Gmail: myaccount.google.com/apppasswords.',
+  },
   { key: 'imap_folder', label: 'Pasta IMAP', placeholder: 'INBOX/Curve Receipts' },
   { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number' },
 ];
@@ -59,8 +68,16 @@ export default function CurveConfigPage() {
       />
 
       <form onSubmit={handleSave} className="card max-w-xl animate-fade-in-up">
+        <div className="mb-5 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-800">
+          <strong className="font-semibold">Importante:</strong> Outlook, Microsoft 365
+          e Gmail já não aceitam a password normal da conta para acesso IMAP.
+          Tens de gerar uma <em>App Password</em> (requer MFA / 2-step verification
+          activada) e colar aqui no campo abaixo. Ver ajuda no campo{' '}
+          <em>App Password</em>.
+        </div>
+
         <div className="grid gap-5">
-          {FIELDS.map(({ key, label, placeholder, type }) => (
+          {FIELDS.map(({ key, label, placeholder, type, help }) => (
             <label key={key} className="block">
               <span className="mb-1.5 block text-xs font-medium text-sand-500">
                 {label}
@@ -72,6 +89,11 @@ export default function CurveConfigPage() {
                 placeholder={placeholder}
                 className="input"
               />
+              {help && (
+                <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
+                  {help}
+                </span>
+              )}
             </label>
           ))}
 

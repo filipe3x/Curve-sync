@@ -79,6 +79,103 @@ Known issues with this approach: no error recovery, no logging, offlineimap can 
 
 ---
 
+## Outlook365 / Microsoft 365 Authentication
+
+**This is the single biggest constraint on Phase 2.** The dev mailbox for
+Curve receipts lives on Outlook / Microsoft 365, which no longer accepts
+plain IMAP passwords for most accounts.
+
+### What Embers did (and why it broke)
+
+The legacy Embers pipeline used `offlineimap` (external tool, cron every
+minute) to mirror the `Curve Receipts` folder to disk, then piped each
+file into `curve.py`. The IMAP credentials lived in `~/.offlineimaprc`
+outside the Embers repo — **no trace of them exists in the
+`docs/embers-reference/` tree**, which is why grep for `oauth`, `client_id`,
+`tenant_id`, etc. returns nothing.
+
+The comment at `docs/EMAIL.md:78` — *"OAuth token expiry causes silent
+failures"* — is the tell: offlineimap was configured with XOAUTH2 (refresh
+token flow against Azure AD). When the refresh token expired, offlineimap
+kept running silently, the cron kept piping zero new emails, and expenses
+stopped flowing without any log trace. That single failure mode is the
+main reason Curve Sync exists as a standalone service.
+
+### Microsoft's current stance
+
+- **Basic Authentication for IMAP/POP is disabled by default since
+  October 2022** for almost every Microsoft 365 tenant. Personal
+  outlook.com accounts had it disabled in September 2024.
+- There are only two supported mechanisms for IMAP access today:
+  1. **App Passwords** — a secondary 16-character credential that
+     bypasses MFA for legacy protocols. Requires MFA / 2-step verification
+     to be ENABLED on the account first (counterintuitively: no MFA → no
+     app passwords). Generated at <https://account.microsoft.com/security>
+     → Advanced security options → App passwords.
+  2. **OAuth2 (XOAUTH2 / Modern Auth)** — requires registering an Azure AD
+     application, obtaining `client_id` / `tenant_id`, running a one-time
+     consent flow to get a refresh token, then exchanging that refresh
+     token for short-lived access tokens on every IMAP connect.
+
+### Curve Sync's chosen approach
+
+**Phase 2 ships with App Password support only. OAuth2 is a later
+upgrade.**
+
+Rationale:
+
+| Criterion | App Password | OAuth2 |
+|---|---|---|
+| Setup time | 2 minutes in MS account UI | Azure AD app registration, consent flow, token endpoint |
+| Day-1 usability | Works immediately | Requires additional cloud setup the user doesn't need yet |
+| Schema changes | None (reuse `imap_password`) | New fields: `oauth_tenant_id`, `oauth_client_id`, `oauth_refresh_token`, `oauth_access_token`, `oauth_expires_at` |
+| Silent failure mode | App password revoked → hard 535 auth error (visible in logs) | Refresh token expires → silent, exactly what killed Embers |
+| MFA requirement | Must be enabled (hard requirement) | Not required (app is the principal) |
+
+The existing `CurveConfig` schema already stores a plain `imap_password`
+string. For App Passwords this is sufficient — the user just pastes the
+16-character generated password into that field instead of their real
+account password. **No schema migration needed for Phase 2.**
+
+Phase 6 (security) will add AES-256 encryption at rest for that field so
+the app password isn't stored in plaintext in MongoDB.
+
+### Frontend guidance
+
+The `/curve/config` page must make this obvious to the user: the
+"Password" field is NOT the Outlook account password, it is an App
+Password. Current UX updates (committed alongside Phase 2 prep):
+
+- Label changed to **"App Password"** (not "Password")
+- Help text under the field explaining the two requirements:
+  1. MFA / 2-step verification must be on
+  2. Generate at account.microsoft.com → Security → App passwords
+- Banner at the top of the form pointing Outlook/Microsoft 365 users to
+  the App Password flow, with a note that Gmail users follow the same
+  App Password flow at <https://myaccount.google.com/apppasswords>
+
+### What happens later (OAuth2, Phase 7+)
+
+When OAuth2 becomes necessary (e.g., if Microsoft disables App Passwords
+too, or for multi-user deployments where each user shouldn't have to
+enable MFA):
+
+- `CurveConfig` schema gets new fields listed above
+- `imapReader.js` gains a branch: if `oauth_refresh_token` set, perform
+  `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` to
+  mint an access token, then authenticate IMAP with XOAUTH2
+- Frontend adds a toggle: "Auth mode: App Password | OAuth2"
+- A new route `GET /api/curve/oauth/callback` handles the consent flow
+- A background refresh job re-mints access tokens before they expire, and
+  **loudly errors** if the refresh token is dead — no more silent-failure
+  Embers repeat
+
+Do NOT add this until a concrete need exists. Over-engineering the auth
+layer before the rest of the pipeline works is exactly how Phase 2 ships
+late.
+
+---
+
 ## Dependencies to Install
 
 ```bash
