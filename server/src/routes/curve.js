@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
+import { testConnection, ImapError } from '../services/imapReader.js';
 
 const router = Router();
 
@@ -46,9 +47,30 @@ router.post('/sync', async (_req, res) => {
 });
 
 // POST /api/curve/test-connection
+// Reads the stored CurveConfig, attempts an IMAP connect + folder list,
+// and returns the folder paths so the user can verify the `imap_folder`
+// value. Maps ImapError.code → HTTP status for nicer UX on the frontend.
 router.post('/test-connection', async (_req, res) => {
-  // TODO: implement IMAP connection test
-  res.json({ message: 'Connection test (not yet implemented).' });
+  try {
+    const config = await CurveConfig.findOne().lean();
+    if (!config) {
+      return res.status(404).json({
+        error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
+      });
+    }
+    const { folders } = await testConnection(config);
+    res.json({
+      message: `Ligação OK. ${folders.length} pastas disponíveis no servidor.`,
+      folders,
+    });
+  } catch (err) {
+    if (err instanceof ImapError) {
+      const status =
+        { CONFIG: 400, AUTH: 401, CONNECT: 503, FOLDER: 404 }[err.code] ?? 500;
+      return res.status(status).json({ error: err.message, code: err.code });
+    }
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/curve/logs

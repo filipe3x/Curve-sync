@@ -24,12 +24,12 @@ This document covers everything needed to implement the core feature of Curve Sy
 |-----------|----------------|--------|
 | Email HTML parser (cheerio) | `server/src/services/emailParser.js` | Done (Phase 1) |
 | `cheerio` dependency | `server/package.json` | Installed |
-| IMAP reader | `server/src/services/imapReader.js` | **Not started** |
+| IMAP reader | `server/src/services/imapReader.js` | Done (Phase 2) |
+| `imapflow` dependency | `server/package.json` | Installed |
+| `POST /api/curve/test-connection` | `server/src/routes/curve.js` | Done (Phase 2) |
 | Sync orchestrator | `server/src/services/syncOrchestrator.js` | **Not started** |
 | Scheduler (node-cron) | `server/src/services/scheduler.js` | **Not started** |
 | `POST /api/curve/sync` | `server/src/routes/curve.js` | Placeholder only |
-| `POST /api/curve/test-connection` | `server/src/routes/curve.js` | Placeholder only |
-| `imapflow` dependency | `server/package.json` | **Not installed** |
 
 ---
 
@@ -251,17 +251,40 @@ Implemented at `server/src/services/emailParser.js`. Key design decisions:
   `validate-fixtures.js` (the zero-dep ground truth). Both currently
   produce identical digests for the 5 real fixtures on disk.
 
-### Phase 2 — IMAP Reader (`imapReader.js`)
+### Phase 2 — IMAP Reader (`imapReader.js`) — DONE
 
-- [ ] Create `server/src/services/imapReader.js`
-- [ ] Connect using credentials from `CurveConfig` model
-- [ ] Open configured IMAP folder (e.g., `Curve Receipts`)
-- [ ] Fetch `UNSEEN` emails only
-- [ ] Extract HTML body from each email (imapflow handles MIME decoding)
-- [ ] Return array of `{ uid, html }` objects
-- [ ] Mark emails as `\Seen` only after successful processing (not before)
-- [ ] Handle connection errors, timeouts, auth failures gracefully
-- [ ] Close connection properly in all code paths (try/finally)
+Implemented at `server/src/services/imapReader.js`. Key points:
+
+- **Class-based `ImapReader`** with explicit `connect()` → `openFolder()`
+  → `fetchUnseen()` → `markSeen(uid)` → `close()` lifecycle. The
+  orchestrator (Phase 3) drives this step-by-step so it can decide
+  per-email whether to mark seen based on insert success.
+- **Basic auth only** (App Password). User pastes a 16-char App Password
+  into `CurveConfig.imap_password`. No XOAUTH2 yet — see Outlook365
+  section above for why and for the future migration plan.
+- **`ImapError` with `code`** — `CONFIG`, `AUTH`, `CONNECT`, `FOLDER`,
+  `FETCH`, `FLAG`, `UNKNOWN`. The route layer maps these to HTTP status
+  codes so the frontend can surface a useful hint (e.g., 401 for AUTH).
+- **`fetchUnseen()` returns raw email source as a `latin1` string** —
+  same byte-preserving convention as `validate-fixtures.js` uses for
+  on-disk fixtures, so `emailParser.extractHtml()` can run its
+  quoted-printable decoder on the result unchanged. The parser and
+  reader share no state besides that string contract.
+- **`markSeen(uid)` is only called by the orchestrator on success** (or
+  confirmed duplicate). Parse errors leave the email UNSEEN, so the next
+  sync retries it automatically — this is how one bad email fails
+  gracefully without losing ground.
+- **`close()` is best-effort** (swallows logout errors). Orchestrator
+  wraps everything in `try/finally`.
+- **`testConnection(config)` convenience function** — one-shot
+  connect → list folders → disconnect, used by `POST /api/curve/test-connection`.
+
+**Wired route:** `POST /api/curve/test-connection` now reads the stored
+`CurveConfig`, attempts a connection via `testConnection()`, and returns
+the folder list on success. The "Testar ligação" button in
+`/curve/config` calls this end to end. Error responses map `ImapError.code`
+to HTTP status so the UI shows distinct messages for wrong-host (503),
+wrong-password (401), wrong-folder (404), and missing-config (400).
 
 ### Phase 3 — Sync Orchestrator (`syncOrchestrator.js`)
 
