@@ -4,6 +4,16 @@ import * as api from '../services/api';
 
 const FIELDS = [
   {
+    key: 'user_email',
+    label: 'Email Embers',
+    placeholder: 'email@example.com',
+    type: 'email',
+    help:
+      'Email da conta Embers (NÃO é o email associado ao Curve Pay). ' +
+      'O backend procura o utilizador Embers pelo email (que é único) ' +
+      'e liga o CurveConfig ao respectivo user_id.',
+  },
+  {
     key: 'imap_server',
     label: 'Servidor IMAP',
     placeholder: 'outlook.office365.com  ou  127.0.0.1',
@@ -46,8 +56,15 @@ export default function CurveConfigPage() {
 
   const handleSave = async (e) => {
     e.preventDefault();
-    setSaving(true);
     setMessage(null);
+    // Guard: the backend requires user_email to resolve the user_id that
+    // scopes this config. Catch the empty case client-side so we don't
+    // round-trip just to get a 400.
+    if (!form.user_email?.trim()) {
+      setMessage({ type: 'error', text: 'Preenche o campo "Email Embers" antes de guardar.' });
+      return;
+    }
+    setSaving(true);
     try {
       await api.updateCurveConfig(form);
       setMessage({ type: 'ok', text: 'Configuração guardada.' });
