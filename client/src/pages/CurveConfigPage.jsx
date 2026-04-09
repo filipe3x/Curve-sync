@@ -4,7 +4,7 @@ import * as api from '../services/api';
 
 const FIELDS = [
   {
-    key: 'user_email',
+    key: 'email',
     label: 'Email Embers',
     placeholder: 'email@example.com',
     type: 'email',
@@ -57,10 +57,10 @@ export default function CurveConfigPage() {
   const handleSave = async (e) => {
     e.preventDefault();
     setMessage(null);
-    // Guard: the backend requires user_email to resolve the user_id that
+    // Guard: the backend requires `email` to resolve the user_id that
     // scopes this config. Catch the empty case client-side so we don't
     // round-trip just to get a 400.
-    if (!form.user_email?.trim()) {
+    if (!form.email?.trim()) {
       setMessage({ type: 'error', text: 'Preenche o campo "Email Embers" antes de guardar.' });
       return;
     }

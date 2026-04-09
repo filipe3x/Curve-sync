@@ -19,47 +19,50 @@ function escapeRegex(s) {
 }
 
 // GET /api/curve/config
-// Returns the singleton CurveConfig plus a synthetic `user_email` field
-// resolved from `user_id`. The frontend uses `user_email` to pre-fill the
-// "Email Embers" input — the raw `user_id` ObjectId is never shown.
+// Returns the singleton CurveConfig plus a synthetic `email` field
+// resolved from `user_id` (matches the Embers User collection's field
+// name). The frontend uses `email` to pre-fill the "Email Embers" input
+// — the raw `user_id` ObjectId is never shown.
 router.get('/config', async (req, res) => {
   try {
     // For now return the first config (single-user). TODO: auth + user scoping.
     const data = await CurveConfig.findOne().lean();
     if (!data) return res.json({ data: {} });
 
-    let user_email = null;
+    let email = null;
     if (data.user_id) {
       const user = await User.findById(data.user_id).select('email').lean();
-      user_email = user?.email ?? null;
+      email = user?.email ?? null;
     }
-    res.json({ data: { ...data, user_email } });
+    res.json({ data: { ...data, email } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // PUT /api/curve/config
-// The client sends `user_email` instead of `user_id`. We look up the User
-// by email (case-insensitive exact match) and set `user_id` from the
+// The client sends `email` (the Embers user's email — same field name as
+// the Embers User collection) instead of `user_id`. We look up the User
+// by that email (case-insensitive exact match) and set `user_id` from the
 // lookup result. This is the ONLY path that writes `user_id` — we never
 // trust a client-supplied ObjectId for multi-user scoping.
 router.put('/config', async (req, res) => {
   try {
     const {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
-      imap_folder, sync_enabled, sync_interval_minutes, user_email,
+      imap_folder, sync_enabled, sync_interval_minutes, email,
     } = req.body;
 
-    const emailTrimmed = typeof user_email === 'string' ? user_email.trim() : '';
+    const emailTrimmed = typeof email === 'string' ? email.trim() : '';
     if (!emailTrimmed) {
       return res.status(400).json({
         error: 'Email do utilizador Embers é obrigatório.',
       });
     }
 
-    // Embers stores emails lowercase but we use a case-insensitive exact
-    // match so casing typos in the admin UI don't cause a false negative.
+    // Embers stores emails lowercase (downcase_email before_validation)
+    // but we use a case-insensitive exact match so casing typos in the
+    // admin UI don't cause a false negative.
     const user = await User.findOne({
       email: { $regex: `^${escapeRegex(emailTrimmed)}$`, $options: 'i' },
     })
