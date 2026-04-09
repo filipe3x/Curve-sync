@@ -96,20 +96,28 @@ cd server && npm install cheerio imapflow
 
 ## Implementation TODOs
 
-### Phase 0 — Standalone Validation Script (PRIORITY)
+### Phase 0 — Standalone Validation Script (DONE)
 
-**Goal**: Before implementing the production parser, create a throwaway CLI script that reads the raw email fixtures, extracts `entity / amount / date / card` using the same logic as `curve.py`, and prints the results to the terminal. This gives us a **ground truth** to compare against once `emailParser.js` is written — we run both on the same fixtures and assert identical output.
+**Goal**: Ground-truth CLI tool to verify email parsing against real fixtures before (and after) implementing the production parser.
 
-- [ ] Create `server/scripts/validate-fixtures.js` (or `.mjs`)
-- [ ] Accept a directory path argument (default: `server/test/fixtures/emails/`)
-- [ ] Iterate over every file in the directory
-- [ ] For each file: read raw content, find `<!doctype html>` marker, decode quoted-printable, parse with cheerio using the exact same selectors as `curve.py`
-- [ ] Print a clean table to stdout: `filename | entity | amount | date | card | digest`
-- [ ] Handle parse failures gracefully (print the filename + error, continue with next)
-- [ ] Run it manually: `node server/scripts/validate-fixtures.js` → visually verify all values are correct
-- [ ] Keep the script around as a regression tool — once `emailParser.js` exists, both should produce identical output for the same fixtures
+**Status**: Implemented at `server/scripts/validate-fixtures.js` — **zero dependencies** (pure Node.js stdlib: `fs`, `path`, `crypto`). No `npm install` needed.
 
-**Note**: This script can also double as a `curve.py` verification tool — pipe an email through `python curve.py` and compare with the JS output to confirm the port is 1:1 accurate.
+**How to run**:
+
+```bash
+# Default path: server/test/fixtures/emails/
+node server/scripts/validate-fixtures.js
+
+# Or pass a custom directory
+node server/scripts/validate-fixtures.js /path/to/emails
+```
+
+**Output format**: For each fixture, prints `entity / amount / date / card / digest` or a `[FAIL]` line with the error message. Exits with code 1 if any fixture fails.
+
+**Implementation notes**:
+- Mirrors `curve.py` exactly: finds `<!doctype html>` marker, decodes quoted-printable to UTF-8, applies identical CSS selector logic
+- Uses regex + minimal HTML entity decoder instead of cheerio (sufficient for known Curve email templates)
+- Will serve as regression tool once `emailParser.js` exists — both should produce identical output for the same inputs
 
 ### Phase 1 — Email Parser (`emailParser.js`)
 
