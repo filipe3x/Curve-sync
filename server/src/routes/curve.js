@@ -51,6 +51,11 @@ router.put('/config', async (req, res) => {
     const {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes, email,
+      // `confirm_folder: true` is sent by the frontend folder picker
+      // (auto-save on dropdown change) and by the "Manter INBOX"
+      // dismiss button. It's the ONLY way to set imap_folder_confirmed_at
+      // — we don't let the client forge the timestamp directly.
+      confirm_folder,
     } = req.body;
 
     const emailTrimmed = typeof email === 'string' ? email.trim() : '';
@@ -74,13 +79,18 @@ router.put('/config', async (req, res) => {
       });
     }
 
+    const update = {
+      imap_server, imap_port, imap_username, imap_password, imap_tls,
+      imap_folder, sync_enabled, sync_interval_minutes,
+      user_id: user._id,
+    };
+    if (confirm_folder === true) {
+      update.imap_folder_confirmed_at = new Date();
+    }
+
     const data = await CurveConfig.findOneAndUpdate(
       {},
-      {
-        imap_server, imap_port, imap_username, imap_password, imap_tls,
-        imap_folder, sync_enabled, sync_interval_minutes,
-        user_id: user._id,
-      },
+      update,
       { upsert: true, new: true, runValidators: true },
     );
 

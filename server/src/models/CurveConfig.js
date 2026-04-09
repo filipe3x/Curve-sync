@@ -11,6 +11,15 @@ const curveConfigSchema = new mongoose.Schema(
     // email-oauth2-proxy on 127.0.0.1:1993). See docs/EMAIL.md.
     imap_tls: { type: Boolean, default: true },
     imap_folder: { type: String, default: 'INBOX' },
+    // Timestamp of the last time the user explicitly confirmed the
+    // folder pick (either by choosing a folder from the loaded list or
+    // by clicking "Manter INBOX" in the confirmation banner). `null`
+    // means "not confirmed since the picker UX shipped" — the frontend
+    // shows a confirmation banner until this is set, and the sync
+    // orchestrator clears it back to `null` if a run fails with
+    // code=FOLDER, forcing the user to re-confirm. See docs/EMAIL.md →
+    // Config UX for the full state machine and rollout rationale.
+    imap_folder_confirmed_at: { type: Date, default: null },
     sync_enabled: { type: Boolean, default: false },
     sync_interval_minutes: { type: Number, default: 5 },
     last_sync_at: { type: Date },

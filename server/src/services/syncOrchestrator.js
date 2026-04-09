@@ -477,6 +477,15 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       if (sawRealOk && shouldUpdateCanary) {
         update.$set.last_email_at = new Date();
       }
+      // Folder auto-invalidation: if the run aborted specifically
+      // because the configured folder is missing from the server,
+      // clear the confirmation timestamp so the frontend re-raises
+      // the banner on the next visit to /curve/config. This is what
+      // makes the folder picker self-healing after a rename on the
+      // mail provider side. See docs/EMAIL.md → Config UX.
+      if (runError?.code === 'FOLDER') {
+        update.$set.imap_folder_confirmed_at = null;
+      }
       try {
         await CurveConfig.updateOne({ _id: config._id }, update);
       } catch (e) {
