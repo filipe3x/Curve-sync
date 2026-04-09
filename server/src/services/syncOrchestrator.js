@@ -208,6 +208,11 @@ export async function syncEmails({ config, reader, dryRun = false }) {
     halted: false,
     dryRun,
     durationMs: 0,
+    // Human-readable aborted-run error message + classified code. `null`
+    // on clean runs. Surfaced in the POST /sync response so curl / the
+    // dashboard can show the real reason without grepping CurveLog.
+    error: null,
+    errorCode: null,
   };
 
   // Circuit-breaker state: counter of consecutive parse errors since
@@ -422,6 +427,12 @@ export async function syncEmails({ config, reader, dryRun = false }) {
     // anything reaching here is a whole-run problem.
     runError = e;
     summary.errors += 1;
+    // Surface the failure on the summary object so the route layer
+    // can return it to the frontend / curl without a CurveLog lookup.
+    // `e.code` is the ImapError classification (FOLDER, AUTH, etc.)
+    // when the reader is ImapReader — other readers just return null.
+    summary.error = e?.message ?? String(e);
+    summary.errorCode = e?.code ?? null;
     try {
       await writeLog({
         config,
@@ -538,4 +549,6 @@ async function safeMarkSeen(reader, uid) {
  * @property {boolean} halted        true iff the circuit breaker fired
  * @property {boolean} dryRun
  * @property {number}  durationMs
+ * @property {?string} error         human-readable reason the run aborted, or null
+ * @property {?string} errorCode     ImapError classification (FOLDER, AUTH, ...) or null
  */

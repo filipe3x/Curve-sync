@@ -120,12 +120,22 @@ router.post('/sync', async (req, res) => {
       reader,
       dryRun,
     });
-    return res.json({
-      message: summary.halted
-        ? `Sync abortada pelo circuit breaker após ${summary.parseErrors} parse errors consecutivos.`
-        : `Sync OK. ${summary.ok} novos, ${summary.duplicates} duplicados, ${summary.parseErrors} parse errors, ${summary.errors} erros.`,
-      summary,
-    });
+    // Build a human-readable message in priority order:
+    //   1. Hard abort via circuit breaker
+    //   2. Whole-run failure surfaced on summary.error (folder not found,
+    //      auth rejected, connect timeout, etc.) — include the classified
+    //      code so curl / the dashboard don't have to grep CurveLog
+    //   3. Normal outcome counts
+    let message;
+    if (summary.halted) {
+      message = `Sync abortada pelo circuit breaker após ${summary.parseErrors} parse errors consecutivos.`;
+    } else if (summary.error) {
+      const codeSuffix = summary.errorCode ? ` (${summary.errorCode})` : '';
+      message = `Sync falhou${codeSuffix}: ${summary.error}`;
+    } else {
+      message = `Sync OK. ${summary.ok} novos, ${summary.duplicates} duplicados, ${summary.parseErrors} parse errors, ${summary.errors} erros.`;
+    }
+    return res.json({ message, summary });
   } catch (err) {
     if (err instanceof SyncConflictError) {
       return res.status(409).json({ error: err.message });

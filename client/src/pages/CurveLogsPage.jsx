@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import { ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
@@ -62,34 +62,52 @@ export default function CurveLogsPage() {
               </tr>
             </thead>
             <tbody>
-              {logs.map((log, i) => (
-                <tr
-                  key={log._id ?? i}
-                  className="border-b border-sand-50 transition-colors duration-150 hover:bg-sand-50"
-                >
-                  <td className="px-5 py-3 text-sand-500">
-                    {log.created_at
-                      ? new Date(log.created_at).toLocaleString('pt-PT')
-                      : '—'}
-                  </td>
-                  <td className="px-5 py-3">
-                    <span className={STATUS_CLASSES[log.status] ?? 'badge bg-sand-100 text-sand-600'}>
-                      {log.status}
-                    </span>
-                  </td>
-                  <td className="px-5 py-3 font-medium text-sand-900">
-                    {log.entity ?? '—'}
-                  </td>
-                  <td className="px-5 py-3 text-sand-600">
-                    {log.amount != null ? `€${Number(log.amount).toFixed(2)}` : '—'}
-                  </td>
-                  <td className="px-5 py-3">
-                    <code className="rounded bg-sand-100 px-2 py-0.5 text-xs text-sand-500">
-                      {log.digest ? log.digest.slice(0, 12) + '…' : '—'}
-                    </code>
-                  </td>
-                </tr>
-              ))}
+              {logs.map((log, i) => {
+                const isErrorRow =
+                  (log.status === 'error' || log.status === 'parse_error') &&
+                  log.error_detail;
+                return (
+                  <Fragment key={log._id ?? i}>
+                    <tr
+                      className={`transition-colors duration-150 hover:bg-sand-50 ${
+                        isErrorRow ? 'border-t border-sand-50' : 'border-b border-sand-50'
+                      }`}
+                    >
+                      <td className="px-5 py-3 text-sand-500">
+                        {log.created_at
+                          ? new Date(log.created_at).toLocaleString('pt-PT')
+                          : '—'}
+                      </td>
+                      <td className="px-5 py-3">
+                        <span className={STATUS_CLASSES[log.status] ?? 'badge bg-sand-100 text-sand-600'}>
+                          {log.status}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 font-medium text-sand-900">
+                        {log.entity ?? '—'}
+                      </td>
+                      <td className="px-5 py-3 text-sand-600">
+                        {log.amount != null ? `€${Number(log.amount).toFixed(2)}` : '—'}
+                      </td>
+                      <td className="px-5 py-3">
+                        <code className="rounded bg-sand-100 px-2 py-0.5 text-xs text-sand-500">
+                          {log.digest ? log.digest.slice(0, 12) + '…' : '—'}
+                        </code>
+                      </td>
+                    </tr>
+                    {isErrorRow && (
+                      <tr className="border-b border-sand-50 bg-red-50/40">
+                        <td className="px-5 pb-3 text-xs text-red-700" colSpan={5}>
+                          <span className="font-medium uppercase tracking-wide text-red-500">
+                            detalhe:
+                          </span>{' '}
+                          <span className="font-mono break-all">{log.error_detail}</span>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
 

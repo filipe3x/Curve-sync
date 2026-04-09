@@ -122,7 +122,17 @@ function classifyError(e) {
       cause: e,
     });
   }
-  if (/NONEXISTENT|Mailbox doesn't exist|does not exist|folder/i.test(msg)) {
+  // Folder-not-found errors vary wildly by provider:
+  //   Outlook365: `"INBOX/Curve Receipts" doesn't exist.`
+  //   Gmail:      `[NONEXISTENT] Unknown Mailbox: Curve`
+  //   Dovecot:    `Mailbox doesn't exist: Curve`
+  //   Fastmail:   `[TRYCREATE] Mailbox does not exist`
+  // Match on the stable signals rather than a specific vendor string.
+  if (
+    /NONEXISTENT|TRYCREATE|doesn'?t exist|does not exist|no such (mailbox|folder)|unknown mailbox/i.test(
+      msg,
+    )
+  ) {
     return new ImapError(`folder not found on server: ${msg}`, {
       code: 'FOLDER',
       cause: e,

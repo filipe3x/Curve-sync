@@ -1028,6 +1028,70 @@ and verify the folder exists on save. Rejected:
    and the dashboard surfaces it (see flow 4 above). The recovery UX
    is the same whether we validated on save or not.
 
+### Migration — existing configs from before the dropdown
+
+The rollout is deliberately **zero-migration**. No backfill script,
+no one-off mongosh command, no data surgery.
+
+1. **Schema change is purely additive.** `imap_folder_confirmed_at`
+   lands with `default: null`. Every existing `CurveConfig` document
+   implicitly gets `imap_folder_confirmed_at = null` on the next read
+   — Mongoose inserts the default transparently, the server restart
+   does NOT need to touch the collection.
+
+2. **All pre-existing configs land in the needs-re-confirmation
+   state.** Because `imap_folder_confirmed_at === null`, the banner
+   fires on the next visit to `/curve/config` regardless of what the
+   stored `imap_folder` value is (even if it's literally `INBOX`).
+   The user clicks **Testar ligação**, the dropdown appears, they
+   either keep INBOX (dismiss button writes `confirmed_at = now`) or
+   pick a new folder (auto-save writes `confirmed_at = now` as a side
+   effect of the same PUT). Either way the config leaves the
+   unconfirmed state through the user's explicit action, not via a
+   silent migration.
+
+3. **Stored value not in the loaded list.** This is the
+   `INBOX/Curve Receipts` case that started this whole thread — the
+   stored folder literally doesn't exist on the server. When the
+   dropdown is populated from a successful `testConnection`, we
+   compute `const isStale = !folderOptions.includes(form.imap_folder)`
+   and, if true, inject a **pinned synthetic disabled `<option>`** at
+   the top:
+
+   ```jsx
+   {isStale && (
+     <option value={form.imap_folder} disabled className="text-red-600">
+       {form.imap_folder} (não existe — escolha outra)
+     </option>
+   )}
+   {folderOptions.map((f) => (
+     <option key={f} value={f}>{f}</option>
+   ))}
+   ```
+
+   The banner text also flips from amber ("confirme a pasta") to red
+   ("a pasta actualmente configurada («INBOX/Curve Receipts») não
+   existe no servidor — escolha outra"). No extra state needed — the
+   staleness is derived from `form.imap_folder` + `folderOptions` on
+   every render.
+
+4. **Recovery path is the same as the happy path.** The user picks a
+   valid folder from the list, auto-save fires, the PUT writes both
+   `imap_folder` and `imap_folder_confirmed_at = new Date()`, the
+   synthetic option disappears on the next render because the stored
+   value is now in the list. Zero-touch cleanup.
+
+5. **Silent-failure-free fallback.** If the user ignores the banner
+   entirely and triggers a sync, the orchestrator hits the now-fixed
+   `classifyError` regex, emits `code=FOLDER`, the finally block
+   resets `imap_folder_confirmed_at = null` (which is already null
+   anyway in this state), and the frontend banner stays red on the
+   next visit. The only way out of the state is to pick a valid
+   folder — which is what we want.
+
+No timestamps are forged, no defaults are guessed, no folders are
+renamed. The migration is the user clicking one button.
+
 ### Why `INBOX` as the single hardcoded default
 
 - It's the **only** universal folder across every IMAP provider
