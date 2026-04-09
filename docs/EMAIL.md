@@ -398,14 +398,340 @@ wrong-password (401), wrong-folder (404), and missing-config (400).
 
 ### Phase 3 — Sync Orchestrator (`syncOrchestrator.js`)
 
+Coordinates parser + IMAP reader + Mongo inserts + logging. The bullet
+list at the bottom of this section is the actual implementation TODO;
+everything above it is design rationale captured during
+pre-implementation analysis so a future reader can understand *why*
+the orchestrator is shaped the way it is — all the tripwires we hit on
+paper before writing any code.
+
+#### Signature and multi-user scoping (decided: day 1)
+
+```js
+syncEmails({ config, reader, dryRun = false }) → Promise<Summary>
+```
+
+- Takes a full `CurveConfig` document, NOT a `configId` or `userId`.
+  The orchestrator does zero `findOne()` calls — the caller (route
+  handler, scheduler) is responsible for picking the right config.
+  This makes multi-user scoping a non-event: just pick a different
+  config in the caller.
+- Every write to `Expense` and `CurveLog` uses `config.user_id`
+  directly — both schemas require it.
+- Also takes a `reader` (see next section) — dependency injection, not
+  constructed internally.
+
+#### Reader abstraction (decided: dev-mode safety)
+
+The orchestrator does NOT construct an `ImapReader` itself. It accepts
+a reader object implementing this contract:
+
+```js
+interface EmailReader {
+  connect(): Promise<void>
+  fetchUnseen(): AsyncIterable<{uid, source}>   // async generator
+  markSeen(uid): Promise<void>
+  close(): Promise<void>
+}
+```
+
+Two implementations ship in Phase 3:
+
+1. **`ImapReader`** (existing, Phase 2) — talks to real IMAP. Used in
+   production sync and for realistic end-to-end tests.
+2. **`FixtureReader`** (new, Phase 3) — reads raw `.eml`-style files
+   from `server/test/fixtures/emails/`, yields them as
+   `{uid: <index>, source: <latin1 string>}`, and `markSeen` is a
+   no-op. Zero IMAP traffic.
+
+This DI pattern is the clean answer to *"dev on the Pi must not touch
+production emails"*. There is no `dev_mode` flag, no environment
+branching inside the orchestrator — the same function runs everywhere;
+only the reader changes.
+
+**Dev workflows (all risk-free against production mailbox):**
+
+- **Primary: fixtures loop.** Caller instantiates
+  `FixtureReader('server/test/fixtures/emails/')` and passes it to
+  `syncEmails()`. Zero IMAP traffic. First run inserts the fixtures
+  as real expenses in Mongo; subsequent runs hit the digest unique
+  index and fall into the `duplicate` path. This exercises parser +
+  digest + dedup + insert + log + summary contract in a deterministic
+  loop. No production emails touched because there's no connection to
+  Outlook at all.
+- **Secondary: Outlook sandbox folder.** When you genuinely need to
+  test `ImapReader` itself (auth, folder open, streaming fetch,
+  markSeen round-trip), create a subfolder `Curve Receipts/dev-sandbox`
+  in Outlook, copy a handful of historical Curve emails into it, mark
+  them unread. Create a second `CurveConfig` row with
+  `imap_folder = 'Curve Receipts/dev-sandbox'` and
+  `sync_enabled: false` (so the scheduler ignores it). Trigger the run
+  manually with `POST /api/curve/sync?config_id=<devConfigId>`.
+  `markSeen` only touches the sandbox subfolder — production
+  `Curve Receipts` is never opened by that run.
+- **Tertiary: `dry_run` against production.** Read-only pass through
+  the real mailbox. Never writes to Mongo, never marks anything seen.
+  Useful as a sanity check right before enabling the scheduler for the
+  first time.
+
+#### Per-email pipeline (in order)
+
+For each `{uid, source}` yielded by the reader:
+
+1. `parseEmail(source)` — may throw `ParseError`. Caught → log
+   `parse_error`, increment the in-run consecutive-parse-error counter,
+   **do not markSeen** (so next sync retries automatically once the
+   parser is fixed). See "Circuit breaker" below for the escape hatch.
+2. `computeDigest({entity, amount, date, card})` — operates on raw
+   strings (with `€` stripped from amount) to match `curve.py`
+   bit-for-bit. Embers and Curve Sync inserting the same email produce
+   the same digest, so the unique index de-dupes across both ingestion
+   paths.
+3. `assignCategoryFromList(entity, categoriesCache)` — uses an
+   in-memory array of categories loaded **once** at sync start.
+4. `Expense.create({ ..., user_id: config.user_id, category_id })` —
+   may throw `MongoServerError` with `code: 11000`.
+5. **Duplicate detection trap**: if `err.code === 11000`, check
+   `err.keyPattern?.digest` is set before classifying as duplicate.
+   A collision on any *other* future unique index must NOT be silently
+   treated as a duplicate. If it's the digest index → log `duplicate`,
+   markSeen, continue. If it's another index → log `error`, do NOT
+   markSeen.
+6. On unexpected error (not 11000): log `error` with truncated
+   `error_detail`, do NOT markSeen. Next sync retries.
+7. On successful insert: log `ok` with the `expense_id`, update the
+   in-run "saw an OK" flag (resets the parse-error streak), then
+   `reader.markSeen(uid)`. **Critical recovery invariant**: if
+   markSeen itself fails, the email stays UNSEEN → next sync
+   reprocesses it → the insert hits the digest unique index → the
+   duplicate path (step 5) retries markSeen. This is the mechanism
+   that heals half-applied writes. Do NOT "optimize" the duplicate
+   path to skip markSeen — that would break recovery.
+
+#### Circuit breaker for parse errors (decided: A+C)
+
+If the orchestrator sees **≥10 consecutive `parse_error` with 0 `ok`**
+in the same run, it halts immediately:
+
+- Writes `CurveConfig.last_sync_status = 'error'`
+- Writes a summary `CurveLog` entry with
+  `error_detail: 'circuit breaker: 10 consecutive parse errors without
+  a successful parse — halting to avoid retry storm'`
+- Returns a partial summary with `halted: true`
+
+No persistent state — the counter is per-run, reset every invocation.
+Next sync tries again from scratch, which is the right behaviour if
+the parser was just fixed between runs. The dashboard shows
+`last_sync_status = 'error'` loudly, which is the user-visible signal
+to investigate. The streak counter resets to zero on any `ok`, so a
+single good email mid-run keeps the sync going.
+
+#### Silent-failure canary (decided: `last_email_at` + 3-day red)
+
+The failure mode we're guarding against: sync runs look healthy
+(`last_sync_status = 'ok'`), but the mailbox is returning zero new
+emails because of an upstream problem (OAuth token silently expired
+in email-oauth2-proxy; the Curve Receipts folder rule broke; Microsoft
+changed something). This is the Embers failure mode that motivates
+Curve Sync's existence.
+
+**Schema addition (`CurveConfig`):**
+
+```js
+last_email_at: { type: Date },
+```
+
+Updated whenever a sync produces a `status: 'ok'` log entry (i.e. a
+genuinely new expense). Duplicates do NOT update it — they do not
+represent new traffic.
+
+**Dashboard rule (frontend):**
+
+- Green / normal if `last_email_at` is within the last 3 days.
+- **Red / warning** if `last_email_at` is older than 3 days AND
+  `last_sync_at` is recent (≤1 day). This is the tell: syncs are
+  happening but they're not finding anything, which is exactly the
+  silent-failure mode.
+- Neutral if both are stale (sync is off) or both are fresh (healthy).
+
+The 3-day threshold is a frontend constant (`STALE_EMAIL_DAYS = 3`) so
+it can be tuned without a backend change. Tests that run against
+fixtures will not update `last_email_at` because `FixtureReader`-driven
+syncs should not poison the canary — the orchestrator only updates
+`last_email_at` when the reader is an `ImapReader`. (Alternative:
+update it always, document that the dev config is expected to show a
+misleading-recent value. I prefer the first: `FixtureReader` is
+side-effect-free in every direction, including stats.)
+
+#### `dry_run` mode
+
+Disables all side effects but preserves full pipeline visibility:
+
+- Parser runs normally.
+- Digest is computed normally.
+- Duplicate check runs as a read-only query (`Expense.exists({ digest })`),
+  no insert.
+- **No `Expense.create`** — nothing written to `expenses`.
+- **No `reader.markSeen`** — emails stay UNSEEN.
+- `CurveLog` entries ARE created, with a new `dry_run: Boolean` field
+  on the schema, so dry-run logs are auditable but filterable in the
+  UI.
+- `CurveConfig` stats (`last_sync_at`, `last_sync_status`,
+  `emails_processed_total`, `last_email_at`, `is_syncing`) are NOT
+  updated. Dry runs are invisible to the dashboard except via the
+  filtered log view.
+
+Response summary from `POST /api/curve/sync` carries `dryRun: true` so
+the frontend can render a "simulated" badge on the result.
+
+#### Concurrency lock (interim, pre-Phase 5)
+
+Single-process in-memory lock:
+
+```js
+let running = false
+export function isSyncing() { return running }
+export async function syncEmails(args) {
+  if (running) throw new SyncConflictError('sync already in progress')
+  running = true
+  try { /* ... */ } finally { running = false }
+}
+```
+
+The route handler catches `SyncConflictError` and returns **409
+Conflict** with a helpful message. Phase 5 either promotes this to a
+Mongo-level lock (for multi-process deployments) or leans on node-cron's
+single-process guarantee if we stay single-process. Either way, this
+in-memory flag has to exist now so that `POST /api/curve/sync` while
+the scheduler is mid-run can't accidentally open a second IMAP session.
+
+#### New schema fields landing in Phase 3
+
+**`CurveConfig`** gains:
+
+- `last_email_at: { type: Date }` — silent-failure canary (see above).
+- `is_syncing: { type: Boolean, default: false }` — UI hint for "a
+  sincronizar agora" badge. NOT the authoritative lock (the in-memory
+  flag is). Kept as a separate field instead of adding `'running'` to
+  the `last_sync_status` enum, because `last_sync_status` is about the
+  outcome of the *last completed* sync, not the current one.
+
+**`CurveLog`** gains:
+
+- `dry_run: { type: Boolean, default: false }` — filter flag for
+  audit UI.
+
+#### Performance / resource pitfalls addressed
+
+- **Reader streaming (required change to `imapReader.js`):**
+  `fetchUnseen()` must become an `async *fetchUnseen()` generator,
+  yielding `{uid, source}` one at a time instead of returning an
+  array. Current implementation collects every message into an array
+  before returning → a first sync against a mailbox with 5000 unseen
+  emails holds ~250 MB of latin1 strings in memory on the Pi (more
+  than half its RAM). Generator-style means the parser + insert +
+  markSeen runs fully on message N before message N+1 is fetched.
+- **Category cache:** `assignCategory(entity)` today does a full
+  `Category.find()` per call. The orchestrator loads categories once
+  at the start of a run and passes the array to a new
+  `assignCategoryFromList(entity, categories)`. Reduces N queries to
+  1 per sync. The existing `assignCategory()` stays as-is (it's used
+  by the one-off `POST /api/expenses` route).
+- **`emails_processed_total`:** cumulative counter, must be updated
+  with `$inc: { emails_processed_total: syncedCount }`, not `set`.
+  Trivial but easy to get wrong with `findOneAndUpdate`.
+- **`close()` timeout:** `imapReader.close()` currently awaits
+  `logout()` best-effort with no timeout. If the server doesn't
+  respond, the orchestrator hangs indefinitely in the `finally` block.
+  Wrap in `Promise.race([logout(), setTimeout(5000)])` so the
+  orchestrator always returns.
+- **`error_detail` truncation:** truncate to 2000 chars before writing
+  to `CurveLog`. A verbose stack trace with `cause` chains can easily
+  be 5 KB; multiplied over the 90-day TTL and a flaky week, the
+  collection bloats. Utility helper in the orchestrator module.
+- **Per-email parse timeout:** wrap `parseEmail()` in
+  `Promise.race([parseEmail(source), timeout(10_000)])`. Defence
+  against a pathological input triggering a catastrophic regex
+  backtrack in cheerio or the fallback regexes. Over-engineering
+  today, cheap insurance for later.
+
+#### Deliberately deferred
+
+- **`Expense.date` is a `String`, not a `Date`** — bit-for-bit
+  compatibility with `curve.py`, which never parsed the date. This
+  means lexicographic ordering over `"22 Mar 2026 14:03:21"` does NOT
+  produce chronological order (Apr < Mar alphabetically). The
+  orchestrator does not solve this; the dashboard will need its own
+  parser once it does month-by-month rendering. **Do NOT change the
+  schema** — Embers' parallel ingestion inserts with the same format.
+- **Multi-process sync lock** — deferred to Phase 5. In-memory flag
+  is enough while Curve Sync runs as a single Node process.
+- **Canary enforcement beyond dashboard colouring** — the Phase 3
+  orchestrator only writes `last_email_at` and the frontend only
+  colours it. Any stronger action (email alert, auto-disable sync
+  after N days, SMS) is deferred.
+- **Poison-pill persistence** — the circuit breaker is per-run. If a
+  persistently broken email keeps re-triggering the breaker on every
+  run, that's still visible in the dashboard (`last_sync_status =
+  'error'` every sync, `parseErrors` counter growing in logs). We
+  accept the noise in exchange for not tracking per-UID state on
+  disk.
+
+#### Summary contract
+
+The orchestrator returns:
+
+```js
+{
+  total: number,              // emails fetched by the reader
+  ok: number,                 // new expenses inserted (or would-insert if dryRun)
+  duplicates: number,         // dedup hits (not errors)
+  parseErrors: number,
+  errors: number,             // everything else
+  halted: boolean,            // true if circuit breaker fired
+  dryRun: boolean,
+  durationMs: number,
+}
+```
+
+The route serializes this verbatim. The dashboard renders a
+per-category breakdown; if `halted === true`, it switches to a warning
+style and links to the latest CurveLog entries for triage.
+
+#### Implementation checklist
+
+Schema groundwork first (small, safe diffs):
+
+- [ ] Add `last_email_at: Date` and `is_syncing: Boolean` to
+      `CurveConfig.js`
+- [ ] Add `dry_run: Boolean` to `CurveLog.js`
+- [ ] Convert `imapReader.fetchUnseen()` to an `async *` generator
+- [ ] Add 5-second timeout to `imapReader.close()`
+- [ ] Extract `assignCategoryFromList(entity, categories)` in
+      `services/expense.js` alongside the existing `assignCategory`
+
+Then the orchestrator module itself:
+
 - [ ] Create `server/src/services/syncOrchestrator.js`
-- [ ] Main function: `syncEmails(configId)` or `syncEmails(userId)`
-- [ ] Pipeline per email: parse HTML -> compute digest -> check duplicate -> insert expense -> create log entry -> mark seen
-- [ ] Per-email error handling (one failure doesn't block others)
-- [ ] Create `CurveLog` entry for every email (status: `ok`, `duplicate`, `parse_error`, `error`)
-- [ ] Update `CurveConfig.last_sync_at`, `last_sync_status`, `emails_processed_total`
-- [ ] Return summary: `{ synced, duplicates, parseErrors, errors, total }`
-- [ ] Support `dry_run` flag (logs everything but skips DB insert + mark seen)
+- [ ] Define and document the `EmailReader` contract
+- [ ] Implement `FixtureReader` for dev / tests
+- [ ] Implement `syncEmails({ config, reader, dryRun })`
+- [ ] Per-email pipeline with duplicate 11000 + `keyPattern.digest`
+      check
+- [ ] Circuit breaker (≥10 consecutive parse_errors with 0 ok)
+- [ ] In-memory sync lock + exported `isSyncing()`
+- [ ] Category cache loaded once per run
+- [ ] `error_detail` truncation helper
+- [ ] Per-email `parseEmail` timeout wrapper
+- [ ] Canary update (`last_email_at`) only when reader is `ImapReader`
+
+And the glue (overlaps with Phase 4):
+
+- [ ] Wire `POST /api/curve/sync` to the orchestrator, handling
+      `SyncConflictError` → 409
+- [ ] Dev test: run `syncEmails()` with `FixtureReader` against a
+      clean Mongo, then again, and assert the second run is all
+      `duplicates`
 
 ### Phase 4 — Wire Up Routes
 
