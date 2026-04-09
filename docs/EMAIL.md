@@ -186,6 +186,15 @@ regardless of which path is used — the field holds a secret either way
 
 ### Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)
 
+**Status: validated on 2026-04-09.** `email-oauth2-proxy` is running on
+the production Pi (`raspberrypi.local`), a live IMAP client session was
+successfully authenticated end-to-end (proxy log shows
+`Successfully authenticated IMAP connection - releasing session`), and
+the proxy re-keyed the stored tokens on first use (`Rotating stored
+secrets ... to use new cryptographic parameters`). The current
+`emailproxy.config` on the Pi has therefore diverged from the brasume
+copy — treat the Pi version as authoritative from now on.
+
 Prereq: a working `emailproxy.config` (already containing the encrypted
 refresh token) from another host, and the encryption password that was
 used to create it.
