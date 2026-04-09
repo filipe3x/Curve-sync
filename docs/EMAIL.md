@@ -808,39 +808,58 @@ Free-text entry is a footgun for this field:
 1. User opens `/curve/config` with no existing config.
 2. Form shows all credential fields plus `imap_folder` as a **disabled
    `<select>`** with a single option `INBOX` selected. Sub-label:
-   *"Guarda as credenciais e depois escolhe a pasta correcta."*
+   *"Guarda as credenciais, depois clica **Testar ligação** para
+   carregares a lista de pastas."*
 3. User fills email + credentials, clicks **Guardar**.
 4. `PUT /api/curve/config` succeeds (`user_id` resolved from email),
-   config upserted with `imap_folder: 'INBOX'`.
-5. Frontend chains a silent `POST /api/curve/test-connection` request.
-6. On success, the dropdown transitions to `loaded` state:
-   - Enables and populates with the `folders[]` array from the response.
-   - A prominent banner appears above it:
-     > *"Credenciais guardadas. Escolhe agora a pasta onde estão os
-     > recibos Curve (actualmente a ler de `INBOX`)."*
-7. User opens the dropdown, picks `Curve Receipts`.
-8. Change **auto-saves** in the background (re-`PUT /config` with the
-   full form payload, debounced 300ms).
-9. Brief toast: *"Pasta actualizada para «Curve Receipts»."*
-10. Banner disappears. Config is done. User can now trigger a sync.
+   config upserted with `imap_folder: 'INBOX'` and
+   `imap_folder_confirmed_at: null`.
+5. A prominent banner appears below the form:
+   > *"Credenciais guardadas. Clica **Testar ligação** para
+   > carregar a lista de pastas e escolheres a pasta correcta."*
+6. User clicks **Testar ligação** (the existing button, which already
+   returns `folders[]` from `POST /api/curve/test-connection` — we
+   reuse it as the single entry point for loading the folder list).
+7. On success, dropdown transitions to `loaded`:
+   - Enables and populates with the `folders[]` array.
+   - Banner morphs to:
+     > *"Escolhe agora a pasta onde estão os recibos Curve (actualmente
+     > a ler de `INBOX`). Ou clica **Manter INBOX** se é mesmo essa que
+     > queres."*
+8. User picks `Curve Receipts` from the dropdown (or clicks
+   **Manter INBOX**).
+9. Change auto-saves via `PUT /config`, writing both `imap_folder`
+   and `imap_folder_confirmed_at: Date.now()` (see the "Persistent
+   confirmation" section below).
+10. Brief toast: *"Pasta confirmada: «Curve Receipts»."*
+11. Banner disappears (`imap_folder_confirmed_at` is now set). Config
+    is complete — user can trigger a sync.
 
 ### UX flow — returning user (existing config)
 
 1. User opens `/curve/config`.
 2. Form loads from `GET /config`. Dropdown state: `stale`, options =
-   `[storedFolder]` (single-item list, pre-selected).
-3. Frontend auto-fires `POST /test-connection` in the background if
-   `form.imap_server && form.imap_username && form.imap_password` are
-   all truthy.
-4. On success: options replace with the live list, stored folder
-   stays selected. State: `loaded`. No banner (everything is fine).
-5. User can freely open the dropdown and pick a different folder —
-   auto-save handles the rest.
-6. On background failure: subtle inline warning under the dropdown
-   *"Não foi possível carregar a lista actualizada de pastas."* plus a
-   "Recarregar pastas" link. Dropdown stays at single-item `stored`
-   state. The user can still save unrelated field changes; they just
-   can't re-pick the folder until the list reloads.
+   `[storedFolder]` (single-item list, pre-selected). No banner if
+   `imap_folder_confirmed_at` is set — happy path for a returning
+   user whose folder is already confirmed.
+3. **No background IMAP traffic on mount.** If the user just wants to
+   toggle `sync_enabled` or read the current settings, we don't open
+   an IMAP connection to Outlook on every page load — that's extra
+   load on the proxy, extra OAuth2 token cycling, and a visible
+   2-5 second delay for no reason. The user must click
+   **Testar ligação** explicitly if they want to re-pick a folder.
+4. When the user clicks **Testar ligação**:
+   - State transitions `stale → loading → loaded` (or `error`).
+   - Dropdown options replace with the live list.
+   - Stored folder stays selected if still present on the server.
+     Otherwise the sync-failure flow takes over (section below).
+5. With a loaded list, the user can freely open the dropdown and pick
+   a different folder. Auto-save handles the rest (writes a fresh
+   `imap_folder_confirmed_at` alongside the new `imap_folder`).
+6. On `testConnection` failure: inline warning + Retry button under
+   the dropdown. The user can still save unrelated field changes via
+   the main **Guardar** button; they just can't re-pick the folder
+   until a new `testConnection` attempt succeeds.
 
 ### UX flow — credentials changed mid-session
 
@@ -850,45 +869,55 @@ Free-text entry is a footgun for this field:
    - `folderListState` → `stale`
    - `folderOptions` → `[form.imap_folder]` (whatever's currently in
      form state, even if still unsaved)
-   - Dropdown sub-label becomes *"Credenciais alteradas — guarda para
-     recarregar as pastas."*
-3. On next successful `Guardar`, the auto-fetch runs again and
-   repopulates. Normal flow resumes.
+   - Dropdown sub-label becomes *"Credenciais alteradas — guarda e
+     clica **Testar ligação** para recarregar as pastas."*
+3. User clicks **Guardar** (to persist the new credentials), then
+   **Testar ligação** (to refresh the folder list against the new
+   server). Two explicit clicks, zero background traffic.
+4. Normal flow resumes once `testConnection` succeeds.
 
 ### UX flow — sync failure with FOLDER error
 
 1. `syncEmails()` catches an `ImapError` with `code === 'FOLDER'`.
-2. `POST /api/curve/sync` response includes `summary.error` containing
-   the classified message (e.g. *"folder not found on server:
-   «Curve Receipts» doesn't exist"*).
-3. `DashboardPage` shows a red card: *"A sincronização falhou: a pasta
-   configurada já não existe no servidor. Actualiza a configuração."*
-   with a link to `/curve/config`.
-4. On arrival at the config page, the folder dropdown gets a red
-   border (`aria-invalid`), the first-time-setup banner reappears
-   with adapted text, and the auto-fetch runs to show a fresh list
-   from which to re-pick.
+2. **The orchestrator resets `imap_folder_confirmed_at` to `null`**
+   as part of the same `updateOne` that writes
+   `last_sync_status='error'`. The previous confirmation is no
+   longer trustworthy because the folder it points to is gone.
+3. `POST /api/curve/sync` response includes `summary.error` with the
+   classified message (e.g. *"folder not found on server: «Curve
+   Receipts» doesn't exist"*).
+4. `DashboardPage` shows a red card: *"A sincronização falhou: a
+   pasta configurada já não existe no servidor. Actualiza a
+   configuração."* with a link to `/curve/config`.
+5. On arrival at the config page, the folder dropdown gets a red
+   border (`aria-invalid`). The banner reappears automatically —
+   no special logic needed because `imap_folder_confirmed_at` is
+   null again. The user clicks **Testar ligação** to reload the
+   list and pick a replacement folder.
 
 ### State machine
 
+States:
+
 ```
-                  credential field edited
-   ┌──────────────────────────────────────────────┐
-   ▼                                              │
-[idle]  ───── user clicks Save ─────▶ [loading]   │
- (first                                   │       │
-  visit,                                  ├── ok ─┼──▶ [loaded]
-  empty                                   │       │       │
-  dropdown)                               └── err─┼──▶ [error]
-                                                  │       │
-[stale]  ◀──── credential field edit ─────────────┘       │
- (returning user,                                         │
-  single-item                                             │
-  dropdown)                                               │
-   │                                                      │
-   └────── user clicks "Recarregar pastas" ──▶ [loading]  │
-                                                          │
-[loaded]/[error] ◀─── background fetch on mount ──────────┘
+idle    — no credentials saved yet; Testar ligação disabled
+stale   — credentials present but folder list not yet loaded
+          (returning user on first visit, or credentials just changed)
+loading — testConnection call in flight
+loaded  — folder list populated; user can pick from the dropdown
+error   — last testConnection failed; Retry button visible
+```
+
+Transitions (ALL explicit — zero background fetches):
+
+```
+idle    →  stale    : user fills credentials and clicks Guardar
+stale   →  loading  : user clicks Testar ligação
+loading →  loaded   : testConnection succeeds
+loading →  error    : testConnection fails
+loaded  →  stale    : user edits any credential field
+loaded  →  (loaded) : user picks a folder (auto-save; no state change)
+error   →  loading  : user clicks Retry (re-triggers Testar ligação)
 ```
 
 Implemented as three coupled React state slots:
@@ -916,6 +945,69 @@ Rationale: the user's mental model of picking a folder from a dropdown
 is "click and it's done", not "click and then click Save again". The
 explicit Save is reserved for the credentials/password flow, where
 optimistic saves would be dangerous.
+
+### Persistent confirmation of the folder pick
+
+The banner must disappear after the user makes an explicit choice
+(pick a folder OR confirm the `INBOX` default) AND must stay hidden
+across page reloads — otherwise a user who legitimately wants
+`INBOX` as their Curve folder would see the same prompt every time.
+
+The state is stored in a new `CurveConfig` field:
+
+```js
+imap_folder_confirmed_at: { type: Date, default: null }
+```
+
+Lifecycle:
+
+- **`null`** (default for new configs) → banner visible when the list
+  is `loaded` AND `folderOptions.length > 1`.
+- **Set to `Date.now()`** by any of:
+  1. User picks a new folder from the dropdown. Auto-save writes
+     `{ imap_folder, imap_folder_confirmed_at: Date.now() }` in a
+     single `PUT /config`.
+  2. User clicks the **Manter INBOX** dismiss button on the banner.
+     This writes only `{ imap_folder_confirmed_at: Date.now() }` to
+     `PUT /config` — no folder change.
+- **Reset to `null`** by `syncEmails()` when it catches a run-level
+  error with `err?.code === 'FOLDER'`. The existing confirmation is
+  now stale because the folder it trusted is gone, so the user has
+  to re-confirm after re-picking.
+
+This design pattern (confirmed-at timestamp + auto-invalidation on
+failure) is cleaner than a plain boolean because:
+
+- Timestamp gives us a debugging datapoint ("when was this last
+  confirmed?") at zero extra cost.
+- A plain boolean would need an extra "I dismissed this already"
+  field — one column does both jobs.
+- Auto-invalidation on FOLDER failure means we never have to track
+  "did the user dismiss the banner for a folder that no longer
+  exists" — the next sync failure implicitly re-arms the prompt.
+
+### Audit trail scope — why config changes don't land in `curve_logs`
+
+`CurveLog` is strictly an **email-level audit trail**. Every entry
+either describes a specific email being processed (`ok`, `duplicate`,
+`parse_error`) or a run-level abort during fetch/parse (`error`).
+Config changes — including the user picking a new folder — do NOT
+fit this schema: there's no email, no digest, no entity, no amount.
+Pushing them in would pollute the per-email signal the dashboard
+relies on (counters, failure rates, stale-email canary).
+
+Config-level observability is handled elsewhere:
+
+- **`CurveConfig.updated_at`** (already maintained by Mongoose via
+  `timestamps`) answers "when did the user last change config?".
+- **stdout / journalctl** via `console.log('[config] imap_folder
+  changed from X to Y')` inside `PUT /config` can be added if we
+  ever need more granular visibility — 2 lines of code, zero
+  schema change, visible in `journalctl -u curve-sync -f`.
+- **A dedicated `curve_config_audit` collection** is only worth
+  building when this service goes multi-user AND we need to answer
+  questions like "which admin changed my sync schedule?". Until
+  then it's overkill.
 
 ### Why client-side validation only
 
@@ -967,32 +1059,68 @@ and verify the folder exists on save. Rejected:
 - ❌ **A separate `/api/curve/folders` endpoint.** `POST /test-connection`
   already returns the list; a dedicated endpoint adds surface area
   for nothing.
+- ❌ **Auto-fetch the folder list on page mount.** Every visit to
+  `/curve/config` would open an IMAP connection to Outlook via the
+  proxy, even when the user is just toggling `sync_enabled` or
+  reading the current value. That's unnecessary load on the proxy,
+  unnecessary OAuth2 token cycling, and a visible 2-5 second delay
+  on every page load. Explicit click on **Testar ligação** only.
+- ❌ **Log folder changes to `curve_logs`.** `CurveLog` is the
+  email-level audit trail; config changes belong in `updated_at` or
+  `console.log`, not in the table the dashboard uses to count
+  `ok` / `duplicate` / `parse_error` outcomes.
+- ❌ **A plain boolean `folder_confirmed` flag.** A timestamp gives
+  the same UX for free plus a debugging datapoint ("last confirmed
+  at") plus a clean auto-invalidation pattern on FOLDER failure.
+  One column does the job of two.
 
 ### Implementation checklist (frontend)
 
-- [ ] Convert `imap_folder` input → `<select>` in `FIELDS` or as a
-      standalone control (since it has custom state, standalone is
-      probably cleaner)
+- [ ] Convert `imap_folder` input → standalone `<select>` component
+      (has custom state, doesn't fit the existing `FIELDS` array loop)
 - [ ] Add state slots: `folderListState`, `folderOptions`,
       `folderListError`
 - [ ] `loadFolders()` helper calling `api.testConnection()` with
-      transitions `loading → loaded | error`
-- [ ] `useEffect` on credential fields → reset to `stale`
-- [ ] `useEffect` on mount with credentials present → auto-fetch
-- [ ] `handleSave` success path → trigger `loadFolders()` + show
-      banner
+      transitions `loading → loaded | error`; reuse the existing
+      `handleTest` handler as the single entry point (double duty:
+      connectivity smoke-test AND populate the dropdown)
+- [ ] `useEffect` on credential fields (`imap_server`, `imap_port`,
+      `imap_username`, `imap_password`, `imap_tls`) → reset picker
+      to `stale`
+- [ ] **NO auto-fetch on mount.** Only on explicit button click.
+- [ ] After a successful first `handleSave` (transition `idle → stale`),
+      show the banner prompting the user to click **Testar ligação**
+- [ ] Banner component rendered when `folderListState === 'loaded'`
+      AND `form.imap_folder_confirmed_at == null` AND
+      `folderOptions.length > 1`
+- [ ] Banner has two CTAs:
+  - Dropdown value change → auto-save writes both `imap_folder` and
+    `imap_folder_confirmed_at: new Date().toISOString()`
+  - **Manter INBOX** button → calls `api.updateCurveConfig({ ...form,
+    imap_folder_confirmed_at: new Date().toISOString() })` with no
+    folder change
 - [ ] Debounced auto-save (300 ms) when dropdown value changes while
-      `loaded`
-- [ ] Banner component shown when `form.imap_folder === 'INBOX'` AND
-      `folderListState === 'loaded'` AND `folderOptions.length > 1`
-- [ ] Red-bordered error state when arriving from a sync failure
-      with `code=FOLDER` (read from dashboard / query string)
+      `folderListState === 'loaded'`
+- [ ] Red-bordered error state when arriving at config after a sync
+      failure (read `imap_folder_confirmed_at == null` combined with
+      `last_sync_status === 'error'` as the "just failed" signal)
 
 ### Implementation checklist (backend)
 
-None. `POST /api/curve/test-connection` already returns
-`{ folders: string[] }`. The folder picker is a pure frontend feature
-once that endpoint is in place.
+- [ ] Add `imap_folder_confirmed_at: { type: Date, default: null }`
+      to `CurveConfig` schema (`server/src/models/CurveConfig.js`)
+- [ ] Allow `PUT /api/curve/config` to accept and persist
+      `imap_folder_confirmed_at` (pass-through — no validation; the
+      frontend owns the timing semantics)
+- [ ] The `GET /api/curve/config` response already includes any
+      schema field via `.lean()`, so no changes needed there beyond
+      verifying the new field is present on the returned object
+- [ ] In `syncEmails()` (`server/src/services/syncOrchestrator.js`),
+      when the finally-block writes `last_sync_status`, also reset
+      `imap_folder_confirmed_at: null` iff `runError?.code === 'FOLDER'`.
+      Same `updateOne` — no extra round trip
+- [ ] `POST /api/curve/test-connection` already returns
+      `{ folders: string[] }` — no changes needed there
 
 ### Related unrelated fixes shipping alongside
 
