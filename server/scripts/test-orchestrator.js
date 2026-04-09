@@ -76,6 +76,19 @@ function assertEq(label, actual, expected) {
   }
 }
 
+// Mongoose returns `undefined` (not `null`) for schema fields that have
+// no explicit default and were never set — `last_email_at` follows the
+// same pattern as `last_sync_at`. Use this helper for "this field must
+// remain unset" checks so the test accepts both null and undefined.
+function assertNullish(label, actual) {
+  if (actual != null) {
+    console.error(`  FAIL ${label}: expected null/undefined, got ${actual}`);
+    process.exitCode = 1;
+  } else {
+    console.log(`  ok   ${label}: ${actual}`);
+  }
+}
+
 async function main() {
   console.log(`Connecting to ${MONGODB_URI}...`);
   await mongoose.connect(MONGODB_URI);
@@ -158,8 +171,10 @@ async function main() {
   console.log(`  is_syncing:              ${after.is_syncing}`);
   assertEq('last_sync_status', after.last_sync_status, 'ok');
   assertEq('is_syncing', after.is_syncing, false);
-  // Canary stays null because FixtureReader is not an ImapReader.
-  assertEq('last_email_at (should stay null)', after.last_email_at, null);
+  // Canary stays unset because FixtureReader is not an ImapReader.
+  // Mongoose returns `undefined` for never-set Date fields with no
+  // default, so this must accept both null and undefined.
+  assertNullish('last_email_at (should stay unset)', after.last_email_at);
 
   await mongoose.disconnect();
   console.log(
