@@ -757,6 +757,267 @@ And the glue (overlaps with Phase 4):
 
 ---
 
+## Config UX — Folder Picker
+
+### Problem statement
+
+The first real run of `POST /api/curve/sync` against Outlook via Caminho B
+failed with:
+
+```
+"INBOX/Curve Receipts" doesn't exist. (code=UNKNOWN)
+```
+
+Root cause: `CurveConfigPage.jsx` exposes `imap_folder` as a free-text
+input. The user typed `INBOX/Curve Receipts`, but the actual folder on
+Outlook365 is `Curve Receipts` at root level (confirmed via
+`POST /api/curve/test-connection`, which returned 14 folders including
+`INBOX`, `Sent`, `Arquivo`, `Continente`, `Curve Receipts`, `FlixBus`,
+`Formações`, `Notes`, ...).
+
+Free-text entry is a footgun for this field:
+
+- Any typo, wrong separator (`/` vs `\` vs `.`), or wrong case gives a
+  runtime failure invisible until the next sync.
+- Different IMAP servers expose the folder hierarchy differently: some
+  put everything under `INBOX.*`, others at root, others use quoted
+  paths with spaces.
+- The user has no way to discover the correct path without reading
+  server logs or shelling into mongosh.
+
+### Design constraints
+
+1. **No hardcoding beyond `INBOX` as the universal starting default.**
+   The picker must NOT know about provider-specific folder names
+   (`Curve Receipts`, `[Gmail]/All Mail`, etc.) — that's user data, not
+   configuration.
+2. **The user MUST pick a folder from their own server's folder list.**
+   Free-text entry is disallowed. The list comes exclusively from the
+   live `testConnection` response.
+3. **Seamless and natural.** No multi-step wizards, no separate forms
+   for credentials vs folder, no modal dialogs. A single page with a
+   state-aware dropdown.
+4. **Resilient to credential changes.** If the user updates the
+   server/password/port, the cached folder list is stale and must be
+   reloaded before a new pick is valid.
+5. **Backend trusts the client.** No server-side IMAP validation on
+   `PUT /api/curve/config` — see rationale below.
+
+### UX flow — first-time setup
+
+1. User opens `/curve/config` with no existing config.
+2. Form shows all credential fields plus `imap_folder` as a **disabled
+   `<select>`** with a single option `INBOX` selected. Sub-label:
+   *"Guarda as credenciais e depois escolhe a pasta correcta."*
+3. User fills email + credentials, clicks **Guardar**.
+4. `PUT /api/curve/config` succeeds (`user_id` resolved from email),
+   config upserted with `imap_folder: 'INBOX'`.
+5. Frontend chains a silent `POST /api/curve/test-connection` request.
+6. On success, the dropdown transitions to `loaded` state:
+   - Enables and populates with the `folders[]` array from the response.
+   - A prominent banner appears above it:
+     > *"Credenciais guardadas. Escolhe agora a pasta onde estão os
+     > recibos Curve (actualmente a ler de `INBOX`)."*
+7. User opens the dropdown, picks `Curve Receipts`.
+8. Change **auto-saves** in the background (re-`PUT /config` with the
+   full form payload, debounced 300ms).
+9. Brief toast: *"Pasta actualizada para «Curve Receipts»."*
+10. Banner disappears. Config is done. User can now trigger a sync.
+
+### UX flow — returning user (existing config)
+
+1. User opens `/curve/config`.
+2. Form loads from `GET /config`. Dropdown state: `stale`, options =
+   `[storedFolder]` (single-item list, pre-selected).
+3. Frontend auto-fires `POST /test-connection` in the background if
+   `form.imap_server && form.imap_username && form.imap_password` are
+   all truthy.
+4. On success: options replace with the live list, stored folder
+   stays selected. State: `loaded`. No banner (everything is fine).
+5. User can freely open the dropdown and pick a different folder —
+   auto-save handles the rest.
+6. On background failure: subtle inline warning under the dropdown
+   *"Não foi possível carregar a lista actualizada de pastas."* plus a
+   "Recarregar pastas" link. Dropdown stays at single-item `stored`
+   state. The user can still save unrelated field changes; they just
+   can't re-pick the folder until the list reloads.
+
+### UX flow — credentials changed mid-session
+
+1. User edits any of `imap_server`, `imap_port`, `imap_username`,
+   `imap_password`, `imap_tls`.
+2. `useEffect` on those fields fires and resets the picker:
+   - `folderListState` → `stale`
+   - `folderOptions` → `[form.imap_folder]` (whatever's currently in
+     form state, even if still unsaved)
+   - Dropdown sub-label becomes *"Credenciais alteradas — guarda para
+     recarregar as pastas."*
+3. On next successful `Guardar`, the auto-fetch runs again and
+   repopulates. Normal flow resumes.
+
+### UX flow — sync failure with FOLDER error
+
+1. `syncEmails()` catches an `ImapError` with `code === 'FOLDER'`.
+2. `POST /api/curve/sync` response includes `summary.error` containing
+   the classified message (e.g. *"folder not found on server:
+   «Curve Receipts» doesn't exist"*).
+3. `DashboardPage` shows a red card: *"A sincronização falhou: a pasta
+   configurada já não existe no servidor. Actualiza a configuração."*
+   with a link to `/curve/config`.
+4. On arrival at the config page, the folder dropdown gets a red
+   border (`aria-invalid`), the first-time-setup banner reappears
+   with adapted text, and the auto-fetch runs to show a fresh list
+   from which to re-pick.
+
+### State machine
+
+```
+                  credential field edited
+   ┌──────────────────────────────────────────────┐
+   ▼                                              │
+[idle]  ───── user clicks Save ─────▶ [loading]   │
+ (first                                   │       │
+  visit,                                  ├── ok ─┼──▶ [loaded]
+  empty                                   │       │       │
+  dropdown)                               └── err─┼──▶ [error]
+                                                  │       │
+[stale]  ◀──── credential field edit ─────────────┘       │
+ (returning user,                                         │
+  single-item                                             │
+  dropdown)                                               │
+   │                                                      │
+   └────── user clicks "Recarregar pastas" ──▶ [loading]  │
+                                                          │
+[loaded]/[error] ◀─── background fetch on mount ──────────┘
+```
+
+Implemented as three coupled React state slots:
+
+- `folderListState: 'idle' | 'stale' | 'loading' | 'loaded' | 'error'`
+- `folderOptions: string[]`
+- `folderListError: string | null`
+
+### Auto-save semantics (folder dropdown ONLY)
+
+When the dropdown's value changes AND `folderListState === 'loaded'`:
+
+1. Optimistic UI: update `form.imap_folder` immediately.
+2. Debounce 300 ms to collapse rapid toggles.
+3. Fire `PUT /api/curve/config` with the full form payload.
+4. On success: toast *"Pasta actualizada para «X»"*.
+5. On error: revert to the previous value + error toast.
+
+The main **Guardar** button still saves all fields in one shot —
+auto-save is a convenience layered on top of the dropdown specifically,
+not a replacement for the explicit button. All other fields continue
+to require an explicit Save click.
+
+Rationale: the user's mental model of picking a folder from a dropdown
+is "click and it's done", not "click and then click Save again". The
+explicit Save is reserved for the credentials/password flow, where
+optimistic saves would be dangerous.
+
+### Why client-side validation only
+
+We considered having `PUT /api/curve/config` open an IMAP connection
+and verify the folder exists on save. Rejected:
+
+1. **Latency.** A cold IMAP connect + login + list takes 2-5 seconds
+   on the Pi via Caminho B. That penalty applies to every config save,
+   even ones that don't touch the folder (e.g. toggling `sync_enabled`).
+2. **Availability coupling.** A transient proxy outage would block
+   unrelated config updates.
+3. **Redundancy.** The client ALREADY has the authoritative list from
+   the most recent `testConnection` call. Saving any folder outside
+   that list requires bypassing the UI, at which point the user has
+   bigger problems.
+4. **Sync is the source of truth anyway.** If the folder disappears
+   between save and sync, the run fails gracefully with `code=FOLDER`
+   and the dashboard surfaces it (see flow 4 above). The recovery UX
+   is the same whether we validated on save or not.
+
+### Why `INBOX` as the single hardcoded default
+
+- It's the **only** universal folder across every IMAP provider
+  (Gmail, Outlook365, Fastmail, Fastmail, Yahoo, ProtonBridge, ...).
+  The IMAP spec guarantees it exists.
+- Safe fallback semantics: if the user somehow skips the picker flow
+  and runs a sync against `INBOX`, the parser rejects non-Curve emails
+  as `parse_error`. Noisy in `curve_logs`, but not broken — the
+  circuit breaker (10 consecutive parse errors) halts the run before
+  real damage accumulates.
+- Keeps the codebase free of provider-specific logic. We never ship
+  a list like `['Curve Receipts', 'Curve', 'Receipts/Curve']` — that's
+  user data.
+
+### Anti-patterns rejected
+
+- ❌ **Auto-detect the Curve folder by name heuristic.** Fails for
+  localized installs (`Recibos Curve`), fails for renamed folders,
+  fails for users who keep Curve emails under a parent like
+  `Finance/Curve`. Hardcoded heuristics are brittle.
+- ❌ **Two-step wizard (credentials page → folder page).** Over-
+  engineered for a 6-field form, doubles the save friction.
+- ❌ **Free-text input with `<datalist>` hints.** Still permits typos,
+  which is the whole bug we're fixing.
+- ❌ **Blocking the first Save until a non-default folder is picked.**
+  Chicken-and-egg: can't list folders without saved credentials.
+- ❌ **Server-side `mailboxOpen` check on every save.** Latency, see
+  above.
+- ❌ **A separate `/api/curve/folders` endpoint.** `POST /test-connection`
+  already returns the list; a dedicated endpoint adds surface area
+  for nothing.
+
+### Implementation checklist (frontend)
+
+- [ ] Convert `imap_folder` input → `<select>` in `FIELDS` or as a
+      standalone control (since it has custom state, standalone is
+      probably cleaner)
+- [ ] Add state slots: `folderListState`, `folderOptions`,
+      `folderListError`
+- [ ] `loadFolders()` helper calling `api.testConnection()` with
+      transitions `loading → loaded | error`
+- [ ] `useEffect` on credential fields → reset to `stale`
+- [ ] `useEffect` on mount with credentials present → auto-fetch
+- [ ] `handleSave` success path → trigger `loadFolders()` + show
+      banner
+- [ ] Debounced auto-save (300 ms) when dropdown value changes while
+      `loaded`
+- [ ] Banner component shown when `form.imap_folder === 'INBOX'` AND
+      `folderListState === 'loaded'` AND `folderOptions.length > 1`
+- [ ] Red-bordered error state when arriving from a sync failure
+      with `code=FOLDER` (read from dashboard / query string)
+
+### Implementation checklist (backend)
+
+None. `POST /api/curve/test-connection` already returns
+`{ folders: string[] }`. The folder picker is a pure frontend feature
+once that endpoint is in place.
+
+### Related unrelated fixes shipping alongside
+
+These are needed before the dropdown work can land cleanly but are
+independent of the picker itself:
+
+- **`classifyError` regex miss** (`server/src/services/imapReader.js`):
+  the current pattern `/Mailbox doesn't exist|does not exist|folder/i`
+  doesn't match Outlook's `"foo" doesn't exist.` — the error fell
+  through to `UNKNOWN` instead of `FOLDER`. Extend to match
+  `doesn't exist` without a `Mailbox` prefix, plus `TRYCREATE` and
+  `no such (mailbox|folder)`.
+- **Surface `runError.message` in the `POST /sync` response.**
+  Currently `summary` only has numeric counters, so the curl output
+  shows `errors: 1` with no context. Add `summary.error: string|null`,
+  populate from the catch block in `syncEmails()`, and expose it in
+  the JSON response + the toast `message` field.
+- **Show `error_detail` in `CurveLogsPage.jsx`.** Rows with
+  `status === 'error' | 'parse_error'` currently render `—` in the
+  entity/amount/digest cells and hide the actual message. Add an
+  expandable sub-row (or inline text) showing `log.error_detail`
+  for those statuses so the user can diagnose without mongosh.
+
+---
+
 ## Dev Environment Strategy
 
 The main challenge for local development: **where do the test emails come from?**
