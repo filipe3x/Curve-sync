@@ -96,6 +96,29 @@ cd server && npm install cheerio imapflow
 
 ## Implementation TODOs
 
+### Phase 0 — Standalone Validation Script (DONE)
+
+**Goal**: Ground-truth CLI tool to verify email parsing against real fixtures before (and after) implementing the production parser.
+
+**Status**: Implemented at `server/scripts/validate-fixtures.js` — **zero dependencies** (pure Node.js stdlib: `fs`, `path`, `crypto`). No `npm install` needed.
+
+**How to run**:
+
+```bash
+# Default path: server/test/fixtures/emails/
+node server/scripts/validate-fixtures.js
+
+# Or pass a custom directory
+node server/scripts/validate-fixtures.js /path/to/emails
+```
+
+**Output format**: For each fixture, prints `entity / amount / date / card / digest` or a `[FAIL]` line with the error message. Exits with code 1 if any fixture fails.
+
+**Implementation notes**:
+- Mirrors `curve.py` exactly: finds `<!doctype html>` marker, decodes quoted-printable to UTF-8, applies identical CSS selector logic
+- Uses regex + minimal HTML entity decoder instead of cheerio (sufficient for known Curve email templates)
+- Will serve as regression tool once `emailParser.js` exists — both should produce identical output for the same inputs
+
 ### Phase 1 — Email Parser (`emailParser.js`)
 
 - [ ] Create `server/src/services/emailParser.js`
