@@ -99,13 +99,16 @@ async function main() {
   // logs, and we'd inherit whatever its last_sync_at / counters are.
   let config = await CurveConfig.findOne({ imap_server: TEST_MARKER });
   if (!config) {
-    // Need a user_id — borrow one from the real config if present,
-    // otherwise invent a throwaway ObjectId. Either way the fixture
-    // test never talks to a real user record.
-    const realConfig = await CurveConfig.findOne({
-      imap_server: { $ne: TEST_MARKER },
-    });
-    const user_id = realConfig?.user_id ?? new mongoose.Types.ObjectId();
+    // Always invent a throwaway user_id. CurveConfig.user_id has a
+    // `unique: true` index (one config per user), so we MUST NOT
+    // borrow the real config's user_id — that would E11000 on insert.
+    // The orchestrator never does User.findById on config.user_id,
+    // it just passes it through to Expense.create, so an invented
+    // ObjectId works fine end-to-end AND keeps the test expenses
+    // scoped to a fake user that the cleanup script can nuke without
+    // ever touching real production data. See CurveConfig.js user_id
+    // field for the index definition.
+    const user_id = new mongoose.Types.ObjectId();
     config = await CurveConfig.create({
       user_id,
       imap_server: TEST_MARKER,
@@ -117,7 +120,7 @@ async function main() {
       sync_enabled: false,
       sync_interval_minutes: 0,
     });
-    console.log(`Created test CurveConfig ${config._id}`);
+    console.log(`Created test CurveConfig ${config._id} (user_id=${user_id})`);
   } else {
     console.log(`Reusing test CurveConfig ${config._id}`);
   }
