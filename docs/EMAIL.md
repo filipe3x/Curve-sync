@@ -203,9 +203,11 @@ python3 -m venv .venv
 #    long as the encryption password matches on the new host.
 scp ember@brasume:~/Mail/email-oauth2-proxy/emailproxy.config .
 
-# 3. Smoke test manually. When prompted, enter the encryption password
-#    that was originally used on brasume. On success you'll see
-#    "Starting IMAP server on 127.0.0.1:1993". Ctrl-C.
+# 3. Smoke test manually. The proxy starts listening immediately — it
+#    does NOT prompt for a password at startup. You should see:
+#      "Starting IMAP server at 127.0.0.1:1993 (unsecured) ..."
+#      "Initialised Email OAuth 2.0 Proxy - listening for authentication requests"
+#    That is enough to confirm the binary + config parse. Ctrl-C.
 .venv/bin/python3 emailproxy.py --config-file=emailproxy.config --no-gui
 
 # 4. Install as a systemd unit (template at docs/email-oauth2-proxy.service).
@@ -231,6 +233,16 @@ most likely cause is a typo in the encryption password (Curve Sync
 passes that through verbatim — the proxy then uses it as the PBKDF2
 input to decrypt the stored tokens). Try decrypting manually via the
 proxy CLI to confirm before blaming Curve Sync.
+
+**Heads-up on first successful login**: email-oauth2-proxy may log
+something like `Rotating stored secrets for account <email> to use new
+cryptographic parameters` the first time you authenticate on the new
+host. This is normal — the proxy is re-encrypting the refresh tokens
+with fresh `token_salt` / `token_iterations` values. The password you
+use stays the same, but the on-disk `emailproxy.config` is rewritten
+in-place and will no longer be byte-identical to the brasume copy.
+Take a backup (`cp emailproxy.config emailproxy.config.bak`) right
+after that first successful sync.
 
 ### What happens later (own OAuth2 implementation, Phase 7+)
 

@@ -21,9 +21,9 @@
 #    encryption password stays the same.
 #      scp user@old-host:~/email-oauth2-proxy/emailproxy.config .
 #
-# 3. Smoke-test the proxy once manually. It will prompt for the encryption
-#    password (same one used on the old host) and, on success, start
-#    listening. Ctrl-C out.
+# 3. Smoke-test the proxy once manually. It starts listening immediately
+#    — there is no password prompt at startup. Ctrl-C out after you see
+#    "listening for authentication requests".
 #      .venv/bin/python3 emailproxy.py --config-file=emailproxy.config --no-gui
 #
 # 4. Replace <USER> and <HOME> below with the real values for your
@@ -39,14 +39,22 @@
 #      systemctl status email-oauth2-proxy
 #      journalctl -u email-oauth2-proxy -f
 #
-# The proxy prompts for the encryption password on first run, which
-# means systemd-managed startup needs a way to supply it. Two options:
-#   a) Pass it via stdin by setting ExecStart to run a wrapper script
-#      that `echo "$PASSWORD" | python3 emailproxy.py ...`. The password
-#      can live in a root-only file (`/etc/email-oauth2-proxy.env`).
-#   b) Use the proxy's `--external-auth` or non-interactive mode if
-#      available for your version (check the README).
-# Option (a) is what most people use; keep the password file mode 600.
+# About the "encryption password" (important — don't overthink it)
+# ---------------------------------------------------------------
+# email-oauth2-proxy encrypts the stored OAuth2 refresh tokens using a
+# key derived from a password you chose during the initial OAuth flow
+# (PBKDF2-HMAC → Fernet; parameters live as token_salt / token_iterations
+# in emailproxy.config). Crucially, the proxy does NOT prompt for that
+# password at startup. Instead, every time an IMAP client issues LOGIN
+# against 127.0.0.1:1993, the proxy uses the password from the LOGIN
+# command as the key to decrypt the tokens on-the-fly, then talks
+# XOAUTH2 upstream to the real server.
+#
+# What this means for systemd: there is nothing to inject from the
+# service's side. The proxy just listens. The secret lives entirely in
+# the IMAP client — for Curve Sync that is CurveConfig.imap_password,
+# which the user pastes into the "Password IMAP" field on the config
+# page and which gets sent as the IMAP LOGIN password on every sync.
 
 [Unit]
 Description=email-oauth2-proxy (OAuth2 IMAP bridge for Curve Sync)
