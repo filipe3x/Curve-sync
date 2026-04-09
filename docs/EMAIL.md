@@ -22,13 +22,13 @@ This document covers everything needed to implement the core feature of Curve Sy
 
 | Component | Target Location | Status |
 |-----------|----------------|--------|
-| Email HTML parser (cheerio) | `server/src/services/emailParser.js` | **Not started** |
+| Email HTML parser (cheerio) | `server/src/services/emailParser.js` | Done (Phase 1) |
+| `cheerio` dependency | `server/package.json` | Installed |
 | IMAP reader | `server/src/services/imapReader.js` | **Not started** |
 | Sync orchestrator | `server/src/services/syncOrchestrator.js` | **Not started** |
 | Scheduler (node-cron) | `server/src/services/scheduler.js` | **Not started** |
 | `POST /api/curve/sync` | `server/src/routes/curve.js` | Placeholder only |
 | `POST /api/curve/test-connection` | `server/src/routes/curve.js` | Placeholder only |
-| `cheerio` dependency | `server/package.json` | **Not installed** |
 | `imapflow` dependency | `server/package.json` | **Not installed** |
 
 ---
@@ -119,18 +119,40 @@ node server/scripts/validate-fixtures.js /path/to/emails
 - Uses regex + minimal HTML entity decoder instead of cheerio (sufficient for known Curve email templates)
 - Will serve as regression tool once `emailParser.js` exists — both should produce identical output for the same inputs
 
-### Phase 1 — Email Parser (`emailParser.js`)
+### Phase 1 — Email Parser (`emailParser.js`) — DONE
 
-- [ ] Create `server/src/services/emailParser.js`
-- [ ] Accept raw HTML string as input
-- [ ] Load HTML with `cheerio.load(html)`
-- [ ] Extract `entity`: first `td.u-bold`, trimmed text
-- [ ] Extract `amount`: next sibling `td.u-bold`, strip `€` symbol
-- [ ] Extract `date`: `td.u-greySmaller.u-padding__top--half`, trimmed text
-- [ ] Extract `card`: penultimate `td.u-padding__top--half`, join stripped strings
-- [ ] Add fallback selectors for resilience (Curve may update email templates)
-- [ ] Return `{ entity, amount, date, card }` or throw with details
-- [ ] Validate against real email fixtures (see Dev Strategy below)
+Implemented at `server/src/services/emailParser.js`. Key design decisions:
+
+- **Input tolerance**: accepts either raw MIME email (with headers +
+  quoted-printable body) OR already-decoded HTML. Auto-detects via
+  `<!doctype html>` marker (case-insensitive) with `<html>` fallback.
+- **Required vs optional fields** (matches `Expense` mongoose schema):
+  - REQUIRED: `entity`, `amount`, `date` — missing any → `ParseError`,
+    orchestrator logs as `parse_error`, email left UNSEEN for retry.
+  - OPTIONAL: `card` — missing → warning, expense still inserted (digest
+    computed with empty card, so dedup is weaker for that row only).
+- **Layered fallbacks** (future-proof against template changes):
+  - `entity`: `td.u-bold` → `.u-bold` (any tag)
+  - `amount`: `entity.nextSibling(td.u-bold)` → 2nd global `td.u-bold` →
+    regex `/€\s*-?\d[\d.,]*/` on raw HTML
+  - `date`: `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
+    regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
+  - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
+- **Amount parsing** (`parseAmount`): tolerates `€X.XX`, `X,XX€`, `EUR X`,
+  European thousands `1.234,56`, US thousands `1,234.56`, negatives for
+  refunds. Returns a `Number`.
+- **Digest** stays bit-for-bit compatible with `curve.py`: computed from
+  the RAW amount STRING (`€` stripped) not the parsed Number, so
+  `"1,234.56"` produces the same hash on both sides. Embers' parallel
+  curve.py ingestion hits the same unique index and dedup works.
+- **Never crashes**: `ParseError` is the only exception type thrown.
+  Anything unexpected is a parser bug, not an email problem — the
+  orchestrator's per-email try/catch catches both cases so one bad email
+  cannot stop a sync run.
+- **Smoke test**: `node server/scripts/test-parser.js` runs the parser
+  over all fixtures in `server/test/fixtures/emails/`. Output must match
+  `validate-fixtures.js` (the zero-dep ground truth). Both currently
+  produce identical digests for the 5 real fixtures on disk.
 
 ### Phase 2 — IMAP Reader (`imapReader.js`)
 
