@@ -3,18 +3,29 @@ import PageHeader from '../components/common/PageHeader';
 import * as api from '../services/api';
 
 const FIELDS = [
-  { key: 'imap_server', label: 'Servidor IMAP', placeholder: 'outlook.office365.com' },
-  { key: 'imap_port', label: 'Porta', placeholder: '993', type: 'number' },
+  {
+    key: 'imap_server',
+    label: 'Servidor IMAP',
+    placeholder: 'outlook.office365.com  ou  127.0.0.1',
+  },
+  {
+    key: 'imap_port',
+    label: 'Porta',
+    placeholder: '993 (direto) / 1993 (proxy)',
+    type: 'number',
+  },
   { key: 'imap_username', label: 'Utilizador', placeholder: 'email@example.com' },
   {
     key: 'imap_password',
-    label: 'App Password',
+    label: 'Password IMAP',
     placeholder: '••••••••',
     type: 'password',
     help:
-      'Não é a password da conta — é uma App Password gerada separadamente. ' +
-      'Outlook/M365: activa MFA em account.microsoft.com → Security → Advanced ' +
-      'security options → App passwords. Gmail: myaccount.google.com/apppasswords.',
+      'NÃO é a password normal da conta. Caminho A (direto): cola a App ' +
+      'Password de 16 chars gerada em account.microsoft.com → Security → ' +
+      'Advanced security options → App passwords (requer MFA). Caminho B ' +
+      '(proxy localhost): cola a encryption password do emailproxy.config ' +
+      'do email-oauth2-proxy.',
   },
   { key: 'imap_folder', label: 'Pasta IMAP', placeholder: 'INBOX/Curve Receipts' },
   { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number' },
@@ -68,12 +79,24 @@ export default function CurveConfigPage() {
       />
 
       <form onSubmit={handleSave} className="card max-w-xl animate-fade-in-up">
-        <div className="mb-5 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-800">
-          <strong className="font-semibold">Importante:</strong> Outlook, Microsoft 365
-          e Gmail já não aceitam a password normal da conta para acesso IMAP.
-          Tens de gerar uma <em>App Password</em> (requer MFA / 2-step verification
-          activada) e colar aqui no campo abaixo. Ver ajuda no campo{' '}
-          <em>App Password</em>.
+        <div className="mb-5 rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800">
+          <strong className="font-semibold">Microsoft 365 e Gmail já não aceitam a
+          password normal da conta para IMAP.</strong> Há dois caminhos suportados:
+          <ul className="mt-2 ml-4 list-disc space-y-1">
+            <li>
+              <strong>Caminho A (direto):</strong> servidor{' '}
+              <code>outlook.office365.com</code>, porta <code>993</code>, TLS{' '}
+              <strong>activo</strong>, password = App Password de 16 chars
+              (requer MFA activada na conta).
+            </li>
+            <li>
+              <strong>Caminho B (proxy localhost):</strong> servidor{' '}
+              <code>127.0.0.1</code>, porta <code>1993</code>, TLS{' '}
+              <strong>desligado</strong>, password = encryption password do{' '}
+              <code>emailproxy.config</code> (requer <code>email-oauth2-proxy</code>{' '}
+              a correr). Ver <code>docs/EMAIL.md</code>.
+            </li>
+          </ul>
         </div>
 
         <div className="grid gap-5">
@@ -96,6 +119,23 @@ export default function CurveConfigPage() {
               )}
             </label>
           ))}
+
+          {/* TLS toggle — turn off only for loopback proxy (Caminho B) */}
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              checked={form.imap_tls ?? true}
+              onChange={(e) => handleChange('imap_tls', e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
+            />
+            <span className="text-sm text-sand-700">
+              Usar TLS
+              <span className="mt-0.5 block text-xs text-sand-500">
+                Liga sempre excepto para o proxy localhost (Caminho B).
+                Desligar contra um host não-loopback é recusado pelo servidor.
+              </span>
+            </span>
+          </label>
 
           {/* Sync enabled toggle */}
           <label className="flex items-center gap-3">

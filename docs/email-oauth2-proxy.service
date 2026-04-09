@@ -1,0 +1,75 @@
+# systemd unit template for email-oauth2-proxy (Curve Sync Caminho B).
+#
+# This unit runs Simon Robinson's email-oauth2-proxy as a non-root user,
+# providing a plain-IMAP → XOAUTH2 bridge on 127.0.0.1:1993 so the rest
+# of Curve Sync can talk dumb IMAP without caring about OAuth. See the
+# "Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)" section
+# in docs/EMAIL.md for the full setup walkthrough.
+#
+# Installation
+# ------------
+# 1. Clone the proxy to ~/email-oauth2-proxy (or wherever) and install deps:
+#      cd ~
+#      git clone https://github.com/simonrob/email-oauth2-proxy.git
+#      cd email-oauth2-proxy
+#      python3 -m venv .venv
+#      .venv/bin/pip install -r requirements-core.txt
+#
+# 2. Copy a working emailproxy.config into the same directory. If you're
+#    migrating from another host with a valid refresh token, `scp` the
+#    config over — the encrypted tokens are portable as long as the
+#    encryption password stays the same.
+#      scp user@old-host:~/email-oauth2-proxy/emailproxy.config .
+#
+# 3. Smoke-test the proxy once manually. It will prompt for the encryption
+#    password (same one used on the old host) and, on success, start
+#    listening. Ctrl-C out.
+#      .venv/bin/python3 emailproxy.py --config-file=emailproxy.config --no-gui
+#
+# 4. Replace <USER> and <HOME> below with the real values for your
+#    target machine. On a Raspberry Pi OS default install these are
+#    typically "pi" and "/home/pi".
+#
+# 5. Install and enable:
+#      sudo cp docs/email-oauth2-proxy.service /etc/systemd/system/
+#      sudo sed -i 's|<USER>|pi|g; s|<HOME>|/home/pi|g' \
+#        /etc/systemd/system/email-oauth2-proxy.service
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now email-oauth2-proxy
+#      systemctl status email-oauth2-proxy
+#      journalctl -u email-oauth2-proxy -f
+#
+# The proxy prompts for the encryption password on first run, which
+# means systemd-managed startup needs a way to supply it. Two options:
+#   a) Pass it via stdin by setting ExecStart to run a wrapper script
+#      that `echo "$PASSWORD" | python3 emailproxy.py ...`. The password
+#      can live in a root-only file (`/etc/email-oauth2-proxy.env`).
+#   b) Use the proxy's `--external-auth` or non-interactive mode if
+#      available for your version (check the README).
+# Option (a) is what most people use; keep the password file mode 600.
+
+[Unit]
+Description=email-oauth2-proxy (OAuth2 IMAP bridge for Curve Sync)
+Documentation=https://github.com/simonrob/email-oauth2-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+WorkingDirectory=<HOME>/email-oauth2-proxy
+ExecStart=<HOME>/email-oauth2-proxy/.venv/bin/python3 emailproxy.py \
+          --config-file=<HOME>/email-oauth2-proxy/emailproxy.config \
+          --no-gui
+Restart=on-failure
+RestartSec=10
+
+# Modest sandboxing. Adjust if the proxy writes logs outside its dir.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=<HOME>/email-oauth2-proxy
+
+[Install]
+WantedBy=multi-user.target

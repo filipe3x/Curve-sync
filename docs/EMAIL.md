@@ -89,16 +89,32 @@ plain IMAP passwords for most accounts.
 
 The legacy Embers pipeline used `offlineimap` (external tool, cron every
 minute) to mirror the `Curve Receipts` folder to disk, then piped each
-file into `curve.py`. The IMAP credentials lived in `~/.offlineimaprc`
-outside the Embers repo — **no trace of them exists in the
-`docs/embers-reference/` tree**, which is why grep for `oauth`, `client_id`,
-`tenant_id`, etc. returns nothing.
+file into `curve.py`. But `offlineimap` itself did NOT talk OAuth —
+investigation on the live brasume host revealed the actual topology:
 
-The comment at `docs/EMAIL.md:78` — *"OAuth token expiry causes silent
-failures"* — is the tell: offlineimap was configured with XOAUTH2 (refresh
-token flow against Azure AD). When the refresh token expired, offlineimap
-kept running silently, the cron kept piping zero new emails, and expenses
-stopped flowing without any log trace. That single failure mode is the
+```
+curve.py  ←  cat  ←  offlineimap  →  127.0.0.1:1993  →  OAuth2/IMAP  →  outlook.com
+             (Maildir)   (plain IMAP)    (email-oauth2-proxy,           (real Microsoft)
+                                          Python, local loopback)
+```
+
+`~/.offlineimaprc` on brasume has `remotehost = 127.0.0.1`, `remoteport =
+1993`, `ssl = no`, `auth_mechanisms = PLAIN` — offlineimap is blissfully
+unaware of OAuth; it just talks trivial plain IMAP to a local bridge.
+That bridge is [`email-oauth2-proxy`](https://github.com/simonrob/email-oauth2-proxy),
+a single-file Python program that listens on a loopback port, accepts
+plain IMAP/SMTP from dumb clients, and translates every command to
+XOAUTH2 against Microsoft's endpoints (or Google's). Its config
+(`emailproxy.config`) stores a Fernet-encrypted refresh token; the
+decryption key is derived via PBKDF2 from a password the user types
+interactively on first run (and then supplies as the "IMAP password"
+from every client that connects).
+
+The comment *"OAuth token expiry causes silent failures"* in this file
+was the tell: when the refresh token inside `emailproxy.config` expired,
+email-oauth2-proxy silently returned zero new messages, offlineimap
+dutifully reported a successful sync of nothing, and expenses stopped
+flowing without any log trace. That single silent failure mode is the
 main reason Curve Sync exists as a standalone service.
 
 ### Microsoft's current stance
@@ -117,62 +133,129 @@ main reason Curve Sync exists as a standalone service.
      consent flow to get a refresh token, then exchanging that refresh
      token for short-lived access tokens on every IMAP connect.
 
-### Curve Sync's chosen approach
+### Curve Sync's supported approaches — Caminho A and Caminho B
 
-**Phase 2 ships with App Password support only. OAuth2 is a later
-upgrade.**
+Curve Sync's IMAP reader (`server/src/services/imapReader.js`) is
+deliberately dumb: it talks plain IMAP over a TCP socket with basic auth,
+controlled by four `CurveConfig` fields (`imap_server`, `imap_port`,
+`imap_username`, `imap_password`) and one toggle (`imap_tls`, default
+`true`). That single client supports two very different authentication
+topologies depending on what you put in those fields:
 
-Rationale:
-
-| Criterion | App Password | OAuth2 |
+| | **Caminho A — App Password direto** | **Caminho B — email-oauth2-proxy localhost** |
 |---|---|---|
-| Setup time | 2 minutes in MS account UI | Azure AD app registration, consent flow, token endpoint |
-| Day-1 usability | Works immediately | Requires additional cloud setup the user doesn't need yet |
-| Schema changes | None (reuse `imap_password`) | New fields: `oauth_tenant_id`, `oauth_client_id`, `oauth_refresh_token`, `oauth_access_token`, `oauth_expires_at` |
-| Silent failure mode | App password revoked → hard 535 auth error (visible in logs) | Refresh token expires → silent, exactly what killed Embers |
-| MFA requirement | Must be enabled (hard requirement) | Not required (app is the principal) |
+| Server | `outlook.office365.com` | `127.0.0.1` |
+| Port | `993` | `1993` |
+| TLS | **on** (`imap_tls = true`) | **off** (`imap_tls = false`) — loopback only |
+| Username | real email address | real email address |
+| Password | **16-char App Password** generated in the MS account portal | **encryption password** for `emailproxy.config` (not an MS credential) |
+| Network auth | TLS → basic auth → Microsoft IMAP servers | plain IMAP → `email-oauth2-proxy` → XOAUTH2 → Microsoft |
+| Prereq on account | MFA must be enabled | None — uses an existing OAuth grant stored in `emailproxy.config` |
+| External process | None | `email-oauth2-proxy` running on localhost (systemd unit) |
+| Setup time | ~2 minutes in MS account UI | ~10 minutes: clone proxy, copy config, systemd unit |
+| Schema / code impact | None beyond `imap_tls` (already landed) | None beyond `imap_tls` (already landed) |
+| Silent failure mode | App password revoked → hard `535 AUTHENTICATIONFAILED`, visible | Refresh token expires → proxy returns zero rows silently (*the Embers failure mode*) — mitigated in Curve Sync by the orchestrator raising `last_sync_status = 'error'` when a sync that historically saw traffic suddenly sees none |
+| Portability of consent | Per-user (MFA-enabled MS account) | `emailproxy.config` is file-portable — the refresh token that worked on brasume keeps working on the Pi with zero re-consent, as long as the encryption password matches |
 
-The existing `CurveConfig` schema already stores a plain `imap_password`
-string. For App Passwords this is sufficient — the user just pastes the
-16-character generated password into that field instead of their real
-account password. **No schema migration needed for Phase 2.**
+**Both are supported at the same time** — they are literally different
+values in the same four fields. You can flip between them by editing
+`/curve/config` in the UI. No code change, no restart.
 
-Phase 6 (security) will add AES-256 encryption at rest for that field so
-the app password isn't stored in plaintext in MongoDB.
+#### Which one for which situation?
 
-### Frontend guidance
+- **Caminho A (App Password direto)**: use it if (a) MFA is already on
+  and you don't mind generating a new 16-char code, (b) you don't have a
+  working `email-oauth2-proxy` installation to inherit, or (c) you want
+  the simplest possible ops story (zero extra processes).
+- **Caminho B (email-oauth2-proxy localhost)**: use it if you already
+  have a working proxy on another machine with a live refresh token
+  (exactly the brasume → Pi migration this repo is doing), or if you
+  want an auth flow that keeps working after Microsoft inevitably
+  disables App Passwords too in some future "security improvement".
 
-The `/curve/config` page must make this obvious to the user: the
-"Password" field is NOT the Outlook account password, it is an App
-Password. Current UX updates (committed alongside Phase 2 prep):
+The production Curve Sync deployment on the Raspberry Pi uses
+**Caminho B** — the `emailproxy.config` from brasume was copied to the
+Pi, systemd unit launches the proxy at boot, and Curve Sync's
+`CurveConfig` points at `127.0.0.1:1993` with `imap_tls = false`. See
+the "Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)"
+section below for the exact steps.
 
-- Label changed to **"App Password"** (not "Password")
-- Help text under the field explaining the two requirements:
-  1. MFA / 2-step verification must be on
-  2. Generate at account.microsoft.com → Security → App passwords
-- Banner at the top of the form pointing Outlook/Microsoft 365 users to
-  the App Password flow, with a note that Gmail users follow the same
-  App Password flow at <https://myaccount.google.com/apppasswords>
+Phase 6 (security) adds AES-256 encryption at rest for `imap_password`
+regardless of which path is used — the field holds a secret either way
+(App Password OR the proxy's encryption password).
 
-### What happens later (OAuth2, Phase 7+)
+### Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)
 
-When OAuth2 becomes necessary (e.g., if Microsoft disables App Passwords
-too, or for multi-user deployments where each user shouldn't have to
-enable MFA):
+Prereq: a working `emailproxy.config` (already containing the encrypted
+refresh token) from another host, and the encryption password that was
+used to create it.
 
-- `CurveConfig` schema gets new fields listed above
-- `imapReader.js` gains a branch: if `oauth_refresh_token` set, perform
-  `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` to
-  mint an access token, then authenticate IMAP with XOAUTH2
-- Frontend adds a toggle: "Auth mode: App Password | OAuth2"
+```bash
+# 1. Clone and set up a venv
+cd ~
+git clone https://github.com/simonrob/email-oauth2-proxy.git
+cd email-oauth2-proxy
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-core.txt
+
+# 2. Copy the existing config from the old host (do NOT commit it anywhere).
+#    The encrypted refresh token is portable — no re-consent needed as
+#    long as the encryption password matches on the new host.
+scp ember@brasume:~/Mail/email-oauth2-proxy/emailproxy.config .
+
+# 3. Smoke test manually. When prompted, enter the encryption password
+#    that was originally used on brasume. On success you'll see
+#    "Starting IMAP server on 127.0.0.1:1993". Ctrl-C.
+.venv/bin/python3 emailproxy.py --config-file=emailproxy.config --no-gui
+
+# 4. Install as a systemd unit (template at docs/email-oauth2-proxy.service).
+#    Replace <USER> and <HOME> with the real values, then:
+sudo cp docs/email-oauth2-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now email-oauth2-proxy
+systemctl status email-oauth2-proxy
+journalctl -u email-oauth2-proxy -f   # watch it come up
+
+# 5. In Curve Sync at /curve/config, set:
+#      Servidor IMAP:    127.0.0.1
+#      Porta:            1993
+#      Utilizador:       your-email@outlook.pt
+#      App Password:     <the encryption password of emailproxy.config>
+#      Usar TLS:         unchecked
+#      Pasta IMAP:       Curve Receipts
+#    Save, then "Testar ligação" — you should see the folder list.
+```
+
+If the test connection comes back with `authentication failed`, the
+most likely cause is a typo in the encryption password (Curve Sync
+passes that through verbatim — the proxy then uses it as the PBKDF2
+input to decrypt the stored tokens). Try decrypting manually via the
+proxy CLI to confirm before blaming Curve Sync.
+
+### What happens later (own OAuth2 implementation, Phase 7+)
+
+`email-oauth2-proxy` is a perfectly good bridge and we use it
+deliberately — but it's still an external process we don't control. If
+at some point we want to remove that dependency (e.g., for a simpler
+single-container deployment), we can port the XOAUTH2 logic into
+`imapReader.js` directly:
+
+- `CurveConfig` gets new optional fields: `oauth_tenant_id`,
+  `oauth_client_id`, `oauth_refresh_token`, `oauth_access_token`,
+  `oauth_expires_at`
+- `imapReader.js` gains a branch: if `oauth_refresh_token` is set,
+  `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+  to mint an access token, then authenticate IMAP with XOAUTH2
+  (`imapflow` supports `auth: { user, accessToken }` natively)
+- Frontend adds a third auth mode next to A and B
 - A new route `GET /api/curve/oauth/callback` handles the consent flow
-- A background refresh job re-mints access tokens before they expire, and
-  **loudly errors** if the refresh token is dead — no more silent-failure
-  Embers repeat
+- The orchestrator's "historically saw traffic but suddenly sees none"
+  heuristic remains as a silent-failure canary, because this failure
+  mode is inherent to any long-lived refresh-token scheme
 
-Do NOT add this until a concrete need exists. Over-engineering the auth
-layer before the rest of the pipeline works is exactly how Phase 2 ships
-late.
+Do NOT add this until a concrete need exists. Caminho B already gives
+us the benefits of OAuth2 with zero Azure AD setup work of our own, by
+leveraging the existing proxy installation.
 
 ---
 
@@ -259,9 +342,15 @@ Implemented at `server/src/services/imapReader.js`. Key points:
   → `fetchUnseen()` → `markSeen(uid)` → `close()` lifecycle. The
   orchestrator (Phase 3) drives this step-by-step so it can decide
   per-email whether to mark seen based on insert success.
-- **Basic auth only** (App Password). User pastes a 16-char App Password
-  into `CurveConfig.imap_password`. No XOAUTH2 yet — see Outlook365
-  section above for why and for the future migration plan.
+- **Basic auth only** (the reader speaks plain IMAP PLAIN / LOGIN, not
+  XOAUTH2). This is deliberate — it lets the same client drive both
+  Caminho A (App Password → Outlook directly over TLS:993) and Caminho
+  B (encryption password → `email-oauth2-proxy` over plain:1993 on
+  loopback). See the Outlook365 section above for the full topology.
+- **`imap_tls` toggle** (default `true`): lets Caminho B turn off TLS
+  for the localhost relay. Curve Sync logs a WARN on startup if TLS is
+  off AND the host isn't a loopback address, because that combination
+  would expose credentials over the network.
 - **`ImapError` with `code`** — `CONFIG`, `AUTH`, `CONNECT`, `FOLDER`,
   `FETCH`, `FLAG`, `UNKNOWN`. The route layer maps these to HTTP status
   codes so the frontend can surface a useful hint (e.g., 401 for AUTH).

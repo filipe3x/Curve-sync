@@ -7,6 +7,9 @@ const curveConfigSchema = new mongoose.Schema(
     imap_port: { type: Number, default: 993 },
     imap_username: { type: String, default: '' },
     imap_password: { type: String, default: '' },
+    // TLS on by default. Only turn off for loopback relays (Caminho B:
+    // email-oauth2-proxy on 127.0.0.1:1993). See docs/EMAIL.md.
+    imap_tls: { type: Boolean, default: true },
     imap_folder: { type: String, default: 'INBOX' },
     sync_enabled: { type: Boolean, default: false },
     sync_interval_minutes: { type: Number, default: 5 },

@@ -20,14 +20,14 @@ router.get('/config', async (req, res) => {
 router.put('/config', async (req, res) => {
   try {
     const {
-      imap_server, imap_port, imap_username, imap_password,
+      imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes, user_id,
     } = req.body;
 
     const data = await CurveConfig.findOneAndUpdate(
       {},
       {
-        imap_server, imap_port, imap_username, imap_password,
+        imap_server, imap_port, imap_username, imap_password, imap_tls,
         imap_folder, sync_enabled, sync_interval_minutes,
         ...(user_id && { user_id }),
       },

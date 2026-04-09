@@ -70,6 +70,27 @@ function assertConfig(config) {
 }
 
 /**
+ * Safety check: plain IMAP (no TLS) is only tolerable over a loopback
+ * interface, because the password travels in the clear. If the user
+ * disables TLS against a non-loopback host we refuse to connect rather
+ * than leak credentials over the network. Localhost/loopback targets
+ * are fine because they're the whole point of Caminho B (relaying to
+ * email-oauth2-proxy on 127.0.0.1).
+ */
+const LOOPBACK_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '[::1]',
+  '0.0.0.0',
+]);
+
+function isLoopbackHost(host) {
+  if (!host) return false;
+  return LOOPBACK_HOSTS.has(String(host).trim().toLowerCase());
+}
+
+/**
  * Classify raw errors from imapflow into one of our ImapError codes.
  * imapflow doesn't use stable error codes, so we pattern-match on the
  * message. Keep the regexes permissive — the goal is a useful UX hint,
@@ -107,11 +128,23 @@ function classifyError(e) {
 export class ImapReader {
   constructor(config) {
     assertConfig(config);
+
+    // TLS default: on unless explicitly disabled. Plain IMAP is only
+    // tolerated against loopback hosts (Caminho B → email-oauth2-proxy).
+    const useTls = config.imap_tls !== false;
+    if (!useTls && !isLoopbackHost(config.imap_server)) {
+      throw new ImapError(
+        `refusing plain IMAP to non-loopback host "${config.imap_server}" ` +
+          `— TLS can only be disabled for 127.0.0.1 / localhost / ::1`,
+        { code: 'CONFIG' },
+      );
+    }
+
     this.config = config;
     this.client = new ImapFlow({
       host: config.imap_server,
-      port: config.imap_port ?? 993,
-      secure: true,
+      port: config.imap_port ?? (useTls ? 993 : 1993),
+      secure: useTls,
       auth: {
         user: config.imap_username,
         pass: config.imap_password,
