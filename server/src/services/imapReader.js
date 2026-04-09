@@ -7,7 +7,7 @@
  *     const reader = new ImapReader(config);
  *     await reader.connect();
  *     try {
- *       for (const { uid, source } of await reader.fetchUnseen()) {
+ *       for await (const { uid, source } of reader.fetchUnseen()) {
  *         try {
  *           const parsed = parseEmail(source);
  *           // insert expense, log, etc.
@@ -19,6 +19,12 @@
  *     } finally {
  *       await reader.close();
  *     }
+ *
+ * Note that `fetchUnseen()` is an async generator, not an array-returning
+ * function — it yields one message at a time so the orchestrator can
+ * process each email fully before the next is pulled from the server.
+ * A first sync against a 5000-email mailbox would otherwise hold ~250 MB
+ * of latin1 strings in memory on the Pi.
  *
  * Also exports a standalone `testConnection(config)` for the
  * `POST /api/curve/test-connection` route — opens, lists folders,
@@ -196,26 +202,33 @@ export class ImapReader {
   }
 
   /**
-   * Fetch every UNSEEN message in the current folder. Each entry has
-   * the full raw email source (headers + MIME body) so `emailParser.js`
-   * can handle both MIME decoding and HTML parsing itself.
+   * Fetch every UNSEEN message in the current folder, one at a time.
    *
-   * The parser and this reader deliberately do NOT share any state: if
-   * imapflow later swaps to a different library, the parser's input
-   * contract (raw email string) stays identical.
+   * This is an async generator — NOT an array-returning function. The
+   * orchestrator iterates with `for await (...)` and processes each
+   * email fully (parse → digest → insert → log → markSeen) before the
+   * next is pulled from the server. This keeps peak memory roughly
+   * constant regardless of how many unseen emails are waiting: a first
+   * sync against a large mailbox would otherwise hold the entire
+   * source payload of every email in a single array.
    *
-   * @returns {Promise<Array<{ uid: number, source: string }>>}
+   * Each yielded value has the full raw email source (headers + MIME
+   * body) so `emailParser.js` can handle MIME decoding and HTML parsing
+   * itself. The parser and this reader share no state besides the
+   * `{uid, source}` contract — swapping out imapflow later would not
+   * touch the parser.
+   *
+   * @yields {{ uid: number, source: string }}
    */
-  async fetchUnseen() {
+  async *fetchUnseen() {
     await this.openFolder();
-    const results = [];
     try {
       for await (const msg of this.client.fetch(
         { seen: false },
         { uid: true, source: true },
       )) {
         if (!msg.source) continue;
-        results.push({
+        yield {
           uid: msg.uid,
           // `source` is a Buffer; decode as latin1 so byte values survive
           // into the quoted-printable decoder in emailParser.js — same
@@ -224,7 +237,7 @@ export class ImapReader {
           source: Buffer.isBuffer(msg.source)
             ? msg.source.toString('latin1')
             : String(msg.source),
-        });
+        };
       }
     } catch (e) {
       throw new ImapError(`fetch failed: ${e.message}`, {
@@ -232,7 +245,6 @@ export class ImapReader {
         cause: e,
       });
     }
-    return results;
   }
 
   /**
@@ -259,12 +271,21 @@ export class ImapReader {
    * Close the connection. Best-effort — logout failures are swallowed
    * because by the time we're closing, we already have whatever data we
    * need and the server will reap the session anyway.
+   *
+   * Wrapped in a 5-second timeout so a misbehaving server (or a
+   * half-closed socket on the email-oauth2-proxy side of Caminho B)
+   * cannot hang the orchestrator indefinitely in its `finally` block.
    */
   async close() {
     try {
-      await this.client.logout();
+      await Promise.race([
+        this.client.logout(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('imap logout timeout')), 5000),
+        ),
+      ]);
     } catch {
-      // ignore
+      // ignore — best effort
     }
     this.folderOpen = false;
   }

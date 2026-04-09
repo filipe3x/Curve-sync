@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
-import { testConnection, ImapError } from '../services/imapReader.js';
+import { testConnection, ImapError, ImapReader } from '../services/imapReader.js';
+import {
+  syncEmails,
+  isSyncing,
+  SyncConflictError,
+} from '../services/syncOrchestrator.js';
 
 const router = Router();
 
@@ -40,10 +45,71 @@ router.put('/config', async (req, res) => {
   }
 });
 
-// POST /api/curve/sync — trigger manual sync
-router.post('/sync', async (_req, res) => {
-  // TODO: implement actual IMAP fetch + parse pipeline
-  res.json({ message: 'Sync triggered (not yet implemented).' });
+// POST /api/curve/sync — trigger a manual sync pass against the stored
+// CurveConfig. Query params:
+//   ?dry_run=1      → run the parser + dedup check with zero side effects
+//                     (no Expense.create, no markSeen, no stats update).
+//                     CurveLog entries are still written with dry_run=true.
+//
+// Returns the orchestrator's summary contract verbatim, plus a top-level
+// `message` for the frontend toast. Concurrency: in-memory lock — a second
+// call while a sync is in progress returns 409 with SyncConflictError.
+router.post('/sync', async (req, res) => {
+  const dryRun = req.query.dry_run === '1' || req.query.dry_run === 'true';
+  try {
+    const config = await CurveConfig.findOne();
+    if (!config) {
+      return res.status(404).json({
+        error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
+      });
+    }
+    if (!config.user_id) {
+      return res.status(400).json({
+        error:
+          'CurveConfig sem user_id — multi-user scoping exige que o config esteja associado a um utilizador.',
+      });
+    }
+    const reader = new ImapReader(config.toObject());
+    const summary = await syncEmails({
+      config: config.toObject(),
+      reader,
+      dryRun,
+    });
+    return res.json({
+      message: summary.halted
+        ? `Sync abortada pelo circuit breaker após ${summary.parseErrors} parse errors consecutivos.`
+        : `Sync OK. ${summary.ok} novos, ${summary.duplicates} duplicados, ${summary.parseErrors} parse errors, ${summary.errors} erros.`,
+      summary,
+    });
+  } catch (err) {
+    if (err instanceof SyncConflictError) {
+      return res.status(409).json({ error: err.message });
+    }
+    if (err instanceof ImapError) {
+      const status =
+        { CONFIG: 400, AUTH: 401, CONNECT: 503, FOLDER: 404 }[err.code] ?? 500;
+      return res.status(status).json({ error: err.message, code: err.code });
+    }
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/curve/sync/status — lightweight poll endpoint for the
+// "a sincronizar agora" badge in the UI. Returns the in-memory lock state
+// (authoritative) AND the config's `is_syncing` field (UI hint).
+router.get('/sync/status', async (_req, res) => {
+  try {
+    const config = await CurveConfig.findOne().lean();
+    res.json({
+      running: isSyncing(),
+      config_is_syncing: Boolean(config?.is_syncing),
+      last_sync_at: config?.last_sync_at ?? null,
+      last_sync_status: config?.last_sync_status ?? null,
+      last_email_at: config?.last_email_at ?? null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/curve/test-connection

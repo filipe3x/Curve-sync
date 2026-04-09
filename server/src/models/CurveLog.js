@@ -10,6 +10,10 @@ const curveLogSchema = new mongoose.Schema(
     digest: String,
     expense_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Expense' },
     error_detail: String,
+    // Distinguishes entries produced by a dry run (syncEmails({..., dryRun:true}))
+    // from real syncs. Dry runs still write CurveLog entries for visibility, but
+    // the audit UI should filter them out of normal views by default.
+    dry_run: { type: Boolean, default: false },
   },
   {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
