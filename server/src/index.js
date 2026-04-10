@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { connectDB } from './config/db.js';
 import expensesRouter from './routes/expenses.js';
 import categoriesRouter from './routes/categories.js';
@@ -17,7 +18,35 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Rate limiting — strict on login, relaxed on general API
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                   // 10 attempts per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas tentativas de login. Tenta novamente em 15 minutos.' },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100,            // 100 requests per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados pedidos. Tenta novamente em breve.' },
+});
+
+const syncLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 3,              // 3 syncs per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados pedidos de sync. Aguarda um momento.' },
+});
+
 // Routes — auth is public, everything else requires a valid token
+app.use('/api/auth/login', loginLimiter);
+app.use('/api/curve/sync', syncLimiter);
+app.use('/api', apiLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/expenses', authenticate, expensesRouter);
 app.use('/api/categories', authenticate, categoriesRouter);
