@@ -1186,6 +1186,44 @@ renamed. The migration is the user clicking one button.
 - [ ] `POST /api/curve/test-connection` already returns
       `{ folders: string[] }` — no changes needed there
 
+### First-sync safety net — `imap_since` + `max_emails_per_run`
+
+Without guards, the first `POST /sync` against a folder with years of
+UNSEEN Curve receipts would pull every single email in one shot. The
+digest unique index protects against data corruption (everything
+already in Embers lands as `duplicate`), but the run would block the
+sync lock for minutes to hours and could trigger Outlook rate limits.
+
+Two new `CurveConfig` fields solve this:
+
+| Field | Type | Default | Where enforced |
+|-------|------|---------|----------------|
+| `imap_since` | `Date \| null` | `null` (→ fallback 31 days ago, Europe/Lisbon) | IMAP server-side via `SEARCH UNSEEN SINCE <date>` |
+| `max_emails_per_run` | `Number` | `500` | Client-side in `ImapReader.fetchUnseen()` |
+
+**`imap_since`** is the coarse filter. The IMAP `SINCE` command
+compares against the message's internal date (date-only, no time),
+so the server discards old emails before sending them over the wire.
+When `null`, the reader computes the fallback using
+`Intl.DateTimeFormat` in `Europe/Lisbon` — this matters because the
+future cycle-aware mode (day 22) must answer "what day is today in
+Lisbon?", not "what day is it in UTC?".
+
+**`max_emails_per_run`** is the hard cap. After yielding 500 messages
+the generator stops and sets `reader.capped = true`. The orchestrator
+surfaces `summary.capped = true` and the route appends
+`(limitado a 500 — há mais emails por processar)` to the response
+message. Remaining emails stay UNSEEN for the next run — no data is
+lost, just deferred.
+
+**Future: cycle-aware `imap_since`** — the frontend will expose a
+control tied to the monthly cycle logic (day 22, see CLAUDE.md →
+Custom Monthly Cycle). If today >= 22nd, since = 22nd of this month;
+if today < 22nd, since = 22nd of last month. Timezone: Europe/Lisbon.
+This matches the Embers pay-cycle window and means the sync only
+pulls emails from the current expense period. Until then, the 31-day
+fallback is a safe conservative default.
+
 ### Related unrelated fixes shipping alongside
 
 These are needed before the dropdown work can land cleanly but are

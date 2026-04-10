@@ -51,6 +51,7 @@ router.put('/config', async (req, res) => {
     const {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes, email,
+      imap_since, max_emails_per_run,
       // `confirm_folder: true` is sent by the frontend folder picker
       // (auto-save on dropdown change) and by the "Manter INBOX"
       // dismiss button. It's the ONLY way to set imap_folder_confirmed_at
@@ -82,6 +83,8 @@ router.put('/config', async (req, res) => {
     const update = {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
+      imap_since: imap_since ? new Date(imap_since) : null,
+      max_emails_per_run: max_emails_per_run != null ? Number(max_emails_per_run) : undefined,
       user_id: user._id,
     };
     if (confirm_folder === true) {
@@ -144,6 +147,9 @@ router.post('/sync', async (req, res) => {
       message = `Sync falhou${codeSuffix}: ${summary.error}`;
     } else {
       message = `Sync OK. ${summary.ok} novos, ${summary.duplicates} duplicados, ${summary.parseErrors} parse errors, ${summary.errors} erros.`;
+    }
+    if (summary.capped) {
+      message += ` (limitado a ${config.max_emails_per_run ?? 500} — há mais emails por processar)`;
     }
     return res.json({ message, summary });
   } catch (err) {

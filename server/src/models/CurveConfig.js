@@ -22,6 +22,23 @@ const curveConfigSchema = new mongoose.Schema(
     imap_folder_confirmed_at: { type: Date, default: null },
     sync_enabled: { type: Boolean, default: false },
     sync_interval_minutes: { type: Number, default: 5 },
+    // IMAP SEARCH SINCE filter. When set, the reader appends
+    // `SINCE <date>` to the SEARCH UNSEEN query so the IMAP server
+    // filters old messages server-side before sending. When `null`,
+    // the reader falls back to 31 days ago in Europe/Lisbon time.
+    //
+    // Future: the frontend will expose this as a cycle-aware
+    // control — if the user's month starts on day 22, `imap_since`
+    // is auto-computed to the 22nd of the current (or previous)
+    // month on each sync invocation. See CLAUDE.md → Custom Monthly
+    // Cycle for the day-22 logic.
+    imap_since: { type: Date, default: null },
+    // Hard cap on emails fetched per sync run. Prevents a first-time
+    // sync against a folder with thousands of UNSEEN historical emails
+    // from blocking the lock for hours. The reader stops yielding
+    // after this many messages and sets a `capped` flag that the
+    // summary surfaces. Remaining emails stay UNSEEN for the next run.
+    max_emails_per_run: { type: Number, default: 500 },
     last_sync_at: { type: Date },
     last_sync_status: { type: String, enum: ['ok', 'error', null], default: null },
     emails_processed_total: { type: Number, default: 0 },

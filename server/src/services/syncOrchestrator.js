@@ -213,6 +213,10 @@ export async function syncEmails({ config, reader, dryRun = false }) {
     // dashboard can show the real reason without grepping CurveLog.
     error: null,
     errorCode: null,
+    // Set to true when the reader hit the per-run cap before
+    // exhausting all UNSEEN messages. Tells the user "there are more
+    // emails waiting — run sync again to continue".
+    capped: false,
   };
 
   // Circuit-breaker state: counter of consecutive parse errors since
@@ -421,6 +425,14 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       });
       await safeMarkSeen(reader, uid);
     }
+
+    // The reader sets `capped = true` when it stopped yielding because
+    // the per-run cap was reached (not because it ran out of messages).
+    // Surface it on the summary so the route / frontend can tell the
+    // user "there are more emails waiting — run sync again".
+    if (reader.capped === true) {
+      summary.capped = true;
+    }
   } catch (e) {
     // Reader-level failure (connect failed, fetch stream died, etc.).
     // Individual per-email errors are caught inside the loop above;
@@ -560,4 +572,5 @@ async function safeMarkSeen(reader, uid) {
  * @property {number}  durationMs
  * @property {?string} error         human-readable reason the run aborted, or null
  * @property {?string} errorCode     ImapError classification (FOLDER, AUTH, ...) or null
+ * @property {boolean} capped        true iff the reader stopped at max_emails_per_run
  */

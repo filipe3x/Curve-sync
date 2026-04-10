@@ -97,6 +97,33 @@ function isLoopbackHost(host) {
 }
 
 /**
+ * Fallback SINCE date when `CurveConfig.imap_since` is null (i.e. the
+ * user hasn't set an explicit date yet). Returns 31 days ago in
+ * Europe/Lisbon time — the IMAP SINCE command compares against the
+ * message's internal date (date-only, no time component), so ±1 day
+ * from timezone effects is acceptable for a 31-day window.
+ *
+ * Why Europe/Lisbon: the user is in Portugal and the expense cycle
+ * logic (day 22) is defined in local time. Using UTC could shift the
+ * cut-off by a day around midnight, which matters when the future
+ * cycle-aware mode computes the since date dynamically.
+ */
+function defaultSince() {
+  // Intl gives us "today in Lisbon" regardless of the server's TZ.
+  const lisbonDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Lisbon',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const [y, m, d] = lisbonDate.split('-').map(Number);
+  // Construct a local Date at midnight, then subtract 31 days.
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() - 31);
+  return dt;
+}
+
+/**
  * Classify raw errors from imapflow into one of our ImapError codes.
  * imapflow doesn't use stable error codes, so we pattern-match on the
  * message. Keep the regexes permissive — the goal is a useful UX hint,
@@ -212,7 +239,7 @@ export class ImapReader {
   }
 
   /**
-   * Fetch every UNSEEN message in the current folder, one at a time.
+   * Fetch UNSEEN messages in the current folder, one at a time.
    *
    * This is an async generator — NOT an array-returning function. The
    * orchestrator iterates with `for await (...)` and processes each
@@ -221,6 +248,20 @@ export class ImapReader {
    * constant regardless of how many unseen emails are waiting: a first
    * sync against a large mailbox would otherwise hold the entire
    * source payload of every email in a single array.
+   *
+   * Two safety nets prevent a first-time sync from pulling thousands
+   * of historical emails:
+   *
+   *   1. **`imap_since`** — IMAP `SEARCH UNSEEN SINCE <date>` filter.
+   *      When set on the config, the server discards messages older
+   *      than that date before sending. When `null`, the reader falls
+   *      back to 31 days ago in Europe/Lisbon time. The frontend will
+   *      eventually expose this as a cycle-aware control (day 22).
+   *
+   *   2. **`max_emails_per_run`** — client-side hard cap (default 500).
+   *      After yielding this many messages, the generator stops and
+   *      sets `this.capped = true`. Remaining emails stay UNSEEN for
+   *      the next run.
    *
    * Each yielded value has the full raw email source (headers + MIME
    * body) so `emailParser.js` can handle MIME decoding and HTML parsing
@@ -232,9 +273,21 @@ export class ImapReader {
    */
   async *fetchUnseen() {
     await this.openFolder();
+
+    const maxPerRun = this.config.max_emails_per_run ?? 500;
+    const since = this.config.imap_since
+      ? new Date(this.config.imap_since)
+      : defaultSince();
+
+    const criteria = { seen: false };
+    if (since) criteria.since = since;
+
+    this.capped = false;
+    let fetched = 0;
+
     try {
       for await (const msg of this.client.fetch(
-        { seen: false },
+        criteria,
         { uid: true, source: true },
       )) {
         if (!msg.source) continue;
@@ -248,6 +301,11 @@ export class ImapReader {
             ? msg.source.toString('latin1')
             : String(msg.source),
         };
+        fetched += 1;
+        if (fetched >= maxPerRun) {
+          this.capped = true;
+          return;
+        }
       }
     } catch (e) {
       throw new ImapError(`fetch failed: ${e.message}`, {
