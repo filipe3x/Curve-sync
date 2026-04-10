@@ -22,14 +22,14 @@ This document covers everything needed to implement the core feature of Curve Sy
 
 | Component | Target Location | Status |
 |-----------|----------------|--------|
-| Email HTML parser (cheerio) | `server/src/services/emailParser.js` | **Not started** |
-| IMAP reader | `server/src/services/imapReader.js` | **Not started** |
+| Email HTML parser (cheerio) | `server/src/services/emailParser.js` | Done (Phase 1) |
+| `cheerio` dependency | `server/package.json` | Installed |
+| IMAP reader | `server/src/services/imapReader.js` | Done (Phase 2) |
+| `imapflow` dependency | `server/package.json` | Installed |
+| `POST /api/curve/test-connection` | `server/src/routes/curve.js` | Done (Phase 2) |
 | Sync orchestrator | `server/src/services/syncOrchestrator.js` | **Not started** |
 | Scheduler (node-cron) | `server/src/services/scheduler.js` | **Not started** |
 | `POST /api/curve/sync` | `server/src/routes/curve.js` | Placeholder only |
-| `POST /api/curve/test-connection` | `server/src/routes/curve.js` | Placeholder only |
-| `cheerio` dependency | `server/package.json` | **Not installed** |
-| `imapflow` dependency | `server/package.json` | **Not installed** |
 
 ---
 
@@ -79,6 +79,207 @@ Known issues with this approach: no error recovery, no logging, offlineimap can 
 
 ---
 
+## Outlook365 / Microsoft 365 Authentication
+
+**This is the single biggest constraint on Phase 2.** The dev mailbox for
+Curve receipts lives on Outlook / Microsoft 365, which no longer accepts
+plain IMAP passwords for most accounts.
+
+### What Embers did (and why it broke)
+
+The legacy Embers pipeline used `offlineimap` (external tool, cron every
+minute) to mirror the `Curve Receipts` folder to disk, then piped each
+file into `curve.py`. But `offlineimap` itself did NOT talk OAuth —
+investigation on the live brasume host revealed the actual topology:
+
+```
+curve.py  ←  cat  ←  offlineimap  →  127.0.0.1:1993  →  OAuth2/IMAP  →  outlook.com
+             (Maildir)   (plain IMAP)    (email-oauth2-proxy,           (real Microsoft)
+                                          Python, local loopback)
+```
+
+`~/.offlineimaprc` on brasume has `remotehost = 127.0.0.1`, `remoteport =
+1993`, `ssl = no`, `auth_mechanisms = PLAIN` — offlineimap is blissfully
+unaware of OAuth; it just talks trivial plain IMAP to a local bridge.
+That bridge is [`email-oauth2-proxy`](https://github.com/simonrob/email-oauth2-proxy),
+a single-file Python program that listens on a loopback port, accepts
+plain IMAP/SMTP from dumb clients, and translates every command to
+XOAUTH2 against Microsoft's endpoints (or Google's). Its config
+(`emailproxy.config`) stores a Fernet-encrypted refresh token; the
+decryption key is derived via PBKDF2 from a password the user types
+interactively on first run (and then supplies as the "IMAP password"
+from every client that connects).
+
+The comment *"OAuth token expiry causes silent failures"* in this file
+was the tell: when the refresh token inside `emailproxy.config` expired,
+email-oauth2-proxy silently returned zero new messages, offlineimap
+dutifully reported a successful sync of nothing, and expenses stopped
+flowing without any log trace. That single silent failure mode is the
+main reason Curve Sync exists as a standalone service.
+
+### Microsoft's current stance
+
+- **Basic Authentication for IMAP/POP is disabled by default since
+  October 2022** for almost every Microsoft 365 tenant. Personal
+  outlook.com accounts had it disabled in September 2024.
+- There are only two supported mechanisms for IMAP access today:
+  1. **App Passwords** — a secondary 16-character credential that
+     bypasses MFA for legacy protocols. Requires MFA / 2-step verification
+     to be ENABLED on the account first (counterintuitively: no MFA → no
+     app passwords). Generated at <https://account.microsoft.com/security>
+     → Advanced security options → App passwords.
+  2. **OAuth2 (XOAUTH2 / Modern Auth)** — requires registering an Azure AD
+     application, obtaining `client_id` / `tenant_id`, running a one-time
+     consent flow to get a refresh token, then exchanging that refresh
+     token for short-lived access tokens on every IMAP connect.
+
+### Curve Sync's supported approaches — Caminho A and Caminho B
+
+Curve Sync's IMAP reader (`server/src/services/imapReader.js`) is
+deliberately dumb: it talks plain IMAP over a TCP socket with basic auth,
+controlled by four `CurveConfig` fields (`imap_server`, `imap_port`,
+`imap_username`, `imap_password`) and one toggle (`imap_tls`, default
+`true`). That single client supports two very different authentication
+topologies depending on what you put in those fields:
+
+| | **Caminho A — App Password direto** | **Caminho B — email-oauth2-proxy localhost** |
+|---|---|---|
+| Server | `outlook.office365.com` | `127.0.0.1` |
+| Port | `993` | `1993` |
+| TLS | **on** (`imap_tls = true`) | **off** (`imap_tls = false`) — loopback only |
+| Username | real email address | real email address |
+| Password | **16-char App Password** generated in the MS account portal | **encryption password** for `emailproxy.config` (not an MS credential) |
+| Network auth | TLS → basic auth → Microsoft IMAP servers | plain IMAP → `email-oauth2-proxy` → XOAUTH2 → Microsoft |
+| Prereq on account | MFA must be enabled | None — uses an existing OAuth grant stored in `emailproxy.config` |
+| External process | None | `email-oauth2-proxy` running on localhost (systemd unit) |
+| Setup time | ~2 minutes in MS account UI | ~10 minutes: clone proxy, copy config, systemd unit |
+| Schema / code impact | None beyond `imap_tls` (already landed) | None beyond `imap_tls` (already landed) |
+| Silent failure mode | App password revoked → hard `535 AUTHENTICATIONFAILED`, visible | Refresh token expires → proxy returns zero rows silently (*the Embers failure mode*) — mitigated in Curve Sync by the orchestrator raising `last_sync_status = 'error'` when a sync that historically saw traffic suddenly sees none |
+| Portability of consent | Per-user (MFA-enabled MS account) | `emailproxy.config` is file-portable — the refresh token that worked on brasume keeps working on the Pi with zero re-consent, as long as the encryption password matches |
+
+**Both are supported at the same time** — they are literally different
+values in the same four fields. You can flip between them by editing
+`/curve/config` in the UI. No code change, no restart.
+
+#### Which one for which situation?
+
+- **Caminho A (App Password direto)**: use it if (a) MFA is already on
+  and you don't mind generating a new 16-char code, (b) you don't have a
+  working `email-oauth2-proxy` installation to inherit, or (c) you want
+  the simplest possible ops story (zero extra processes).
+- **Caminho B (email-oauth2-proxy localhost)**: use it if you already
+  have a working proxy on another machine with a live refresh token
+  (exactly the brasume → Pi migration this repo is doing), or if you
+  want an auth flow that keeps working after Microsoft inevitably
+  disables App Passwords too in some future "security improvement".
+
+The production Curve Sync deployment on the Raspberry Pi uses
+**Caminho B** — the `emailproxy.config` from brasume was copied to the
+Pi, systemd unit launches the proxy at boot, and Curve Sync's
+`CurveConfig` points at `127.0.0.1:1993` with `imap_tls = false`. See
+the "Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)"
+section below for the exact steps.
+
+Phase 6 (security) adds AES-256 encryption at rest for `imap_password`
+regardless of which path is used — the field holds a secret either way
+(App Password OR the proxy's encryption password).
+
+### Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)
+
+**Status: validated on 2026-04-09.** `email-oauth2-proxy` is running on
+the production Pi (`raspberrypi.local`), a live IMAP client session was
+successfully authenticated end-to-end (proxy log shows
+`Successfully authenticated IMAP connection - releasing session`), and
+the proxy re-keyed the stored tokens on first use (`Rotating stored
+secrets ... to use new cryptographic parameters`). The current
+`emailproxy.config` on the Pi has therefore diverged from the brasume
+copy — treat the Pi version as authoritative from now on.
+
+Prereq: a working `emailproxy.config` (already containing the encrypted
+refresh token) from another host, and the encryption password that was
+used to create it.
+
+```bash
+# 1. Clone and set up a venv
+cd ~
+git clone https://github.com/simonrob/email-oauth2-proxy.git
+cd email-oauth2-proxy
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-core.txt
+
+# 2. Copy the existing config from the old host (do NOT commit it anywhere).
+#    The encrypted refresh token is portable — no re-consent needed as
+#    long as the encryption password matches on the new host.
+scp ember@brasume:~/Mail/email-oauth2-proxy/emailproxy.config .
+
+# 3. Smoke test manually. The proxy starts listening immediately — it
+#    does NOT prompt for a password at startup. You should see:
+#      "Starting IMAP server at 127.0.0.1:1993 (unsecured) ..."
+#      "Initialised Email OAuth 2.0 Proxy - listening for authentication requests"
+#    That is enough to confirm the binary + config parse. Ctrl-C.
+.venv/bin/python3 emailproxy.py --config-file=emailproxy.config --no-gui
+
+# 4. Install as a systemd unit (template at docs/email-oauth2-proxy.service).
+#    Replace <USER> and <HOME> with the real values, then:
+sudo cp docs/email-oauth2-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now email-oauth2-proxy
+systemctl status email-oauth2-proxy
+journalctl -u email-oauth2-proxy -f   # watch it come up
+
+# 5. In Curve Sync at /curve/config, set:
+#      Servidor IMAP:    127.0.0.1
+#      Porta:            1993
+#      Utilizador:       your-email@outlook.pt
+#      App Password:     <the encryption password of emailproxy.config>
+#      Usar TLS:         unchecked
+#      Pasta IMAP:       Curve Receipts
+#    Save, then "Testar ligação" — you should see the folder list.
+```
+
+If the test connection comes back with `authentication failed`, the
+most likely cause is a typo in the encryption password (Curve Sync
+passes that through verbatim — the proxy then uses it as the PBKDF2
+input to decrypt the stored tokens). Try decrypting manually via the
+proxy CLI to confirm before blaming Curve Sync.
+
+**Heads-up on first successful login**: email-oauth2-proxy may log
+something like `Rotating stored secrets for account <email> to use new
+cryptographic parameters` the first time you authenticate on the new
+host. This is normal — the proxy is re-encrypting the refresh tokens
+with fresh `token_salt` / `token_iterations` values. The password you
+use stays the same, but the on-disk `emailproxy.config` is rewritten
+in-place and will no longer be byte-identical to the brasume copy.
+Take a backup (`cp emailproxy.config emailproxy.config.bak`) right
+after that first successful sync.
+
+### What happens later (own OAuth2 implementation, Phase 7+)
+
+`email-oauth2-proxy` is a perfectly good bridge and we use it
+deliberately — but it's still an external process we don't control. If
+at some point we want to remove that dependency (e.g., for a simpler
+single-container deployment), we can port the XOAUTH2 logic into
+`imapReader.js` directly:
+
+- `CurveConfig` gets new optional fields: `oauth_tenant_id`,
+  `oauth_client_id`, `oauth_refresh_token`, `oauth_access_token`,
+  `oauth_expires_at`
+- `imapReader.js` gains a branch: if `oauth_refresh_token` is set,
+  `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+  to mint an access token, then authenticate IMAP with XOAUTH2
+  (`imapflow` supports `auth: { user, accessToken }` natively)
+- Frontend adds a third auth mode next to A and B
+- A new route `GET /api/curve/oauth/callback` handles the consent flow
+- The orchestrator's "historically saw traffic but suddenly sees none"
+  heuristic remains as a silent-failure canary, because this failure
+  mode is inherent to any long-lived refresh-token scheme
+
+Do NOT add this until a concrete need exists. Caminho B already gives
+us the benefits of OAuth2 with zero Azure AD setup work of our own, by
+leveraging the existing proxy installation.
+
+---
+
 ## Dependencies to Install
 
 ```bash
@@ -119,41 +320,418 @@ node server/scripts/validate-fixtures.js /path/to/emails
 - Uses regex + minimal HTML entity decoder instead of cheerio (sufficient for known Curve email templates)
 - Will serve as regression tool once `emailParser.js` exists — both should produce identical output for the same inputs
 
-### Phase 1 — Email Parser (`emailParser.js`)
+### Phase 1 — Email Parser (`emailParser.js`) — DONE
 
-- [ ] Create `server/src/services/emailParser.js`
-- [ ] Accept raw HTML string as input
-- [ ] Load HTML with `cheerio.load(html)`
-- [ ] Extract `entity`: first `td.u-bold`, trimmed text
-- [ ] Extract `amount`: next sibling `td.u-bold`, strip `€` symbol
-- [ ] Extract `date`: `td.u-greySmaller.u-padding__top--half`, trimmed text
-- [ ] Extract `card`: penultimate `td.u-padding__top--half`, join stripped strings
-- [ ] Add fallback selectors for resilience (Curve may update email templates)
-- [ ] Return `{ entity, amount, date, card }` or throw with details
-- [ ] Validate against real email fixtures (see Dev Strategy below)
+Implemented at `server/src/services/emailParser.js`. Key design decisions:
 
-### Phase 2 — IMAP Reader (`imapReader.js`)
+- **Input tolerance**: accepts either raw MIME email (with headers +
+  quoted-printable body) OR already-decoded HTML. Auto-detects via
+  `<!doctype html>` marker (case-insensitive) with `<html>` fallback.
+- **Required vs optional fields** (matches `Expense` mongoose schema):
+  - REQUIRED: `entity`, `amount`, `date` — missing any → `ParseError`,
+    orchestrator logs as `parse_error`, email left UNSEEN for retry.
+  - OPTIONAL: `card` — missing → warning, expense still inserted (digest
+    computed with empty card, so dedup is weaker for that row only).
+- **Layered fallbacks** (future-proof against template changes):
+  - `entity`: `td.u-bold` → `.u-bold` (any tag)
+  - `amount`: `entity.nextSibling(td.u-bold)` → 2nd global `td.u-bold` →
+    regex `/€\s*-?\d[\d.,]*/` on raw HTML
+  - `date`: `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
+    regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
+  - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
+- **Amount parsing** (`parseAmount`): tolerates `€X.XX`, `X,XX€`, `EUR X`,
+  European thousands `1.234,56`, US thousands `1,234.56`, negatives for
+  refunds. Returns a `Number`.
+- **Digest** stays bit-for-bit compatible with `curve.py`: computed from
+  the RAW amount STRING (`€` stripped) not the parsed Number, so
+  `"1,234.56"` produces the same hash on both sides. Embers' parallel
+  curve.py ingestion hits the same unique index and dedup works.
+- **Never crashes**: `ParseError` is the only exception type thrown.
+  Anything unexpected is a parser bug, not an email problem — the
+  orchestrator's per-email try/catch catches both cases so one bad email
+  cannot stop a sync run.
+- **Smoke test**: `node server/scripts/test-parser.js` runs the parser
+  over all fixtures in `server/test/fixtures/emails/`. Output must match
+  `validate-fixtures.js` (the zero-dep ground truth). Both currently
+  produce identical digests for the 5 real fixtures on disk.
 
-- [ ] Create `server/src/services/imapReader.js`
-- [ ] Connect using credentials from `CurveConfig` model
-- [ ] Open configured IMAP folder (e.g., `Curve Receipts`)
-- [ ] Fetch `UNSEEN` emails only
-- [ ] Extract HTML body from each email (imapflow handles MIME decoding)
-- [ ] Return array of `{ uid, html }` objects
-- [ ] Mark emails as `\Seen` only after successful processing (not before)
-- [ ] Handle connection errors, timeouts, auth failures gracefully
-- [ ] Close connection properly in all code paths (try/finally)
+### Phase 2 — IMAP Reader (`imapReader.js`) — DONE
+
+Implemented at `server/src/services/imapReader.js`. Key points:
+
+- **Class-based `ImapReader`** with explicit `connect()` → `openFolder()`
+  → `fetchUnseen()` → `markSeen(uid)` → `close()` lifecycle. The
+  orchestrator (Phase 3) drives this step-by-step so it can decide
+  per-email whether to mark seen based on insert success.
+- **Basic auth only** (the reader speaks plain IMAP PLAIN / LOGIN, not
+  XOAUTH2). This is deliberate — it lets the same client drive both
+  Caminho A (App Password → Outlook directly over TLS:993) and Caminho
+  B (encryption password → `email-oauth2-proxy` over plain:1993 on
+  loopback). See the Outlook365 section above for the full topology.
+- **`imap_tls` toggle** (default `true`): lets Caminho B turn off TLS
+  for the localhost relay. Curve Sync logs a WARN on startup if TLS is
+  off AND the host isn't a loopback address, because that combination
+  would expose credentials over the network.
+- **`ImapError` with `code`** — `CONFIG`, `AUTH`, `CONNECT`, `FOLDER`,
+  `FETCH`, `FLAG`, `UNKNOWN`. The route layer maps these to HTTP status
+  codes so the frontend can surface a useful hint (e.g., 401 for AUTH).
+- **`fetchUnseen()` returns raw email source as a `latin1` string** —
+  same byte-preserving convention as `validate-fixtures.js` uses for
+  on-disk fixtures, so `emailParser.extractHtml()` can run its
+  quoted-printable decoder on the result unchanged. The parser and
+  reader share no state besides that string contract.
+- **`markSeen(uid)` is only called by the orchestrator on success** (or
+  confirmed duplicate). Parse errors leave the email UNSEEN, so the next
+  sync retries it automatically — this is how one bad email fails
+  gracefully without losing ground.
+- **`close()` is best-effort** (swallows logout errors). Orchestrator
+  wraps everything in `try/finally`.
+- **`testConnection(config)` convenience function** — one-shot
+  connect → list folders → disconnect, used by `POST /api/curve/test-connection`.
+
+**Wired route:** `POST /api/curve/test-connection` now reads the stored
+`CurveConfig`, attempts a connection via `testConnection()`, and returns
+the folder list on success. The "Testar ligação" button in
+`/curve/config` calls this end to end. Error responses map `ImapError.code`
+to HTTP status so the UI shows distinct messages for wrong-host (503),
+wrong-password (401), wrong-folder (404), and missing-config (400).
 
 ### Phase 3 — Sync Orchestrator (`syncOrchestrator.js`)
 
+Coordinates parser + IMAP reader + Mongo inserts + logging. The bullet
+list at the bottom of this section is the actual implementation TODO;
+everything above it is design rationale captured during
+pre-implementation analysis so a future reader can understand *why*
+the orchestrator is shaped the way it is — all the tripwires we hit on
+paper before writing any code.
+
+#### Signature and multi-user scoping (decided: day 1)
+
+```js
+syncEmails({ config, reader, dryRun = false }) → Promise<Summary>
+```
+
+- Takes a full `CurveConfig` document, NOT a `configId` or `userId`.
+  The orchestrator does zero `findOne()` calls — the caller (route
+  handler, scheduler) is responsible for picking the right config.
+  This makes multi-user scoping a non-event: just pick a different
+  config in the caller.
+- Every write to `Expense` and `CurveLog` uses `config.user_id`
+  directly — both schemas require it.
+- Also takes a `reader` (see next section) — dependency injection, not
+  constructed internally.
+
+#### Reader abstraction (decided: dev-mode safety)
+
+The orchestrator does NOT construct an `ImapReader` itself. It accepts
+a reader object implementing this contract:
+
+```js
+interface EmailReader {
+  connect(): Promise<void>
+  fetchUnseen(): AsyncIterable<{uid, source}>   // async generator
+  markSeen(uid): Promise<void>
+  close(): Promise<void>
+}
+```
+
+Two implementations ship in Phase 3:
+
+1. **`ImapReader`** (existing, Phase 2) — talks to real IMAP. Used in
+   production sync and for realistic end-to-end tests.
+2. **`FixtureReader`** (new, Phase 3) — reads raw `.eml`-style files
+   from `server/test/fixtures/emails/`, yields them as
+   `{uid: <index>, source: <latin1 string>}`, and `markSeen` is a
+   no-op. Zero IMAP traffic.
+
+This DI pattern is the clean answer to *"dev on the Pi must not touch
+production emails"*. There is no `dev_mode` flag, no environment
+branching inside the orchestrator — the same function runs everywhere;
+only the reader changes.
+
+**Dev workflows (all risk-free against production mailbox):**
+
+- **Primary: fixtures loop.** Caller instantiates
+  `FixtureReader('server/test/fixtures/emails/')` and passes it to
+  `syncEmails()`. Zero IMAP traffic. First run inserts the fixtures
+  as real expenses in Mongo; subsequent runs hit the digest unique
+  index and fall into the `duplicate` path. This exercises parser +
+  digest + dedup + insert + log + summary contract in a deterministic
+  loop. No production emails touched because there's no connection to
+  Outlook at all.
+- **Secondary: Outlook sandbox folder.** When you genuinely need to
+  test `ImapReader` itself (auth, folder open, streaming fetch,
+  markSeen round-trip), create a subfolder `Curve Receipts/dev-sandbox`
+  in Outlook, copy a handful of historical Curve emails into it, mark
+  them unread. Create a second `CurveConfig` row with
+  `imap_folder = 'Curve Receipts/dev-sandbox'` and
+  `sync_enabled: false` (so the scheduler ignores it). Trigger the run
+  manually with `POST /api/curve/sync?config_id=<devConfigId>`.
+  `markSeen` only touches the sandbox subfolder — production
+  `Curve Receipts` is never opened by that run.
+- **Tertiary: `dry_run` against production.** Read-only pass through
+  the real mailbox. Never writes to Mongo, never marks anything seen.
+  Useful as a sanity check right before enabling the scheduler for the
+  first time.
+
+#### Per-email pipeline (in order)
+
+For each `{uid, source}` yielded by the reader:
+
+1. `parseEmail(source)` — may throw `ParseError`. Caught → log
+   `parse_error`, increment the in-run consecutive-parse-error counter,
+   **do not markSeen** (so next sync retries automatically once the
+   parser is fixed). See "Circuit breaker" below for the escape hatch.
+2. `computeDigest({entity, amount, date, card})` — operates on raw
+   strings (with `€` stripped from amount) to match `curve.py`
+   bit-for-bit. Embers and Curve Sync inserting the same email produce
+   the same digest, so the unique index de-dupes across both ingestion
+   paths.
+3. `assignCategoryFromList(entity, categoriesCache)` — uses an
+   in-memory array of categories loaded **once** at sync start.
+4. `Expense.create({ ..., user_id: config.user_id, category_id })` —
+   may throw `MongoServerError` with `code: 11000`.
+5. **Duplicate detection trap**: if `err.code === 11000`, check
+   `err.keyPattern?.digest` is set before classifying as duplicate.
+   A collision on any *other* future unique index must NOT be silently
+   treated as a duplicate. If it's the digest index → log `duplicate`,
+   markSeen, continue. If it's another index → log `error`, do NOT
+   markSeen.
+6. On unexpected error (not 11000): log `error` with truncated
+   `error_detail`, do NOT markSeen. Next sync retries.
+7. On successful insert: log `ok` with the `expense_id`, update the
+   in-run "saw an OK" flag (resets the parse-error streak), then
+   `reader.markSeen(uid)`. **Critical recovery invariant**: if
+   markSeen itself fails, the email stays UNSEEN → next sync
+   reprocesses it → the insert hits the digest unique index → the
+   duplicate path (step 5) retries markSeen. This is the mechanism
+   that heals half-applied writes. Do NOT "optimize" the duplicate
+   path to skip markSeen — that would break recovery.
+
+#### Circuit breaker for parse errors (decided: A+C)
+
+If the orchestrator sees **≥10 consecutive `parse_error` with 0 `ok`**
+in the same run, it halts immediately:
+
+- Writes `CurveConfig.last_sync_status = 'error'`
+- Writes a summary `CurveLog` entry with
+  `error_detail: 'circuit breaker: 10 consecutive parse errors without
+  a successful parse — halting to avoid retry storm'`
+- Returns a partial summary with `halted: true`
+
+No persistent state — the counter is per-run, reset every invocation.
+Next sync tries again from scratch, which is the right behaviour if
+the parser was just fixed between runs. The dashboard shows
+`last_sync_status = 'error'` loudly, which is the user-visible signal
+to investigate. The streak counter resets to zero on any `ok`, so a
+single good email mid-run keeps the sync going.
+
+#### Silent-failure canary (decided: `last_email_at` + 3-day red)
+
+The failure mode we're guarding against: sync runs look healthy
+(`last_sync_status = 'ok'`), but the mailbox is returning zero new
+emails because of an upstream problem (OAuth token silently expired
+in email-oauth2-proxy; the Curve Receipts folder rule broke; Microsoft
+changed something). This is the Embers failure mode that motivates
+Curve Sync's existence.
+
+**Schema addition (`CurveConfig`):**
+
+```js
+last_email_at: { type: Date },
+```
+
+Updated whenever a sync produces a `status: 'ok'` log entry (i.e. a
+genuinely new expense). Duplicates do NOT update it — they do not
+represent new traffic.
+
+**Dashboard rule (frontend):**
+
+- Green / normal if `last_email_at` is within the last 3 days.
+- **Red / warning** if `last_email_at` is older than 3 days AND
+  `last_sync_at` is recent (≤1 day). This is the tell: syncs are
+  happening but they're not finding anything, which is exactly the
+  silent-failure mode.
+- Neutral if both are stale (sync is off) or both are fresh (healthy).
+
+The 3-day threshold is a frontend constant (`STALE_EMAIL_DAYS = 3`) so
+it can be tuned without a backend change. Tests that run against
+fixtures will not update `last_email_at` because `FixtureReader`-driven
+syncs should not poison the canary — the orchestrator only updates
+`last_email_at` when the reader is an `ImapReader`. (Alternative:
+update it always, document that the dev config is expected to show a
+misleading-recent value. I prefer the first: `FixtureReader` is
+side-effect-free in every direction, including stats.)
+
+#### `dry_run` mode
+
+Disables all side effects but preserves full pipeline visibility:
+
+- Parser runs normally.
+- Digest is computed normally.
+- Duplicate check runs as a read-only query (`Expense.exists({ digest })`),
+  no insert.
+- **No `Expense.create`** — nothing written to `expenses`.
+- **No `reader.markSeen`** — emails stay UNSEEN.
+- `CurveLog` entries ARE created, with a new `dry_run: Boolean` field
+  on the schema, so dry-run logs are auditable but filterable in the
+  UI.
+- `CurveConfig` stats (`last_sync_at`, `last_sync_status`,
+  `emails_processed_total`, `last_email_at`, `is_syncing`) are NOT
+  updated. Dry runs are invisible to the dashboard except via the
+  filtered log view.
+
+Response summary from `POST /api/curve/sync` carries `dryRun: true` so
+the frontend can render a "simulated" badge on the result.
+
+#### Concurrency lock (interim, pre-Phase 5)
+
+Single-process in-memory lock:
+
+```js
+let running = false
+export function isSyncing() { return running }
+export async function syncEmails(args) {
+  if (running) throw new SyncConflictError('sync already in progress')
+  running = true
+  try { /* ... */ } finally { running = false }
+}
+```
+
+The route handler catches `SyncConflictError` and returns **409
+Conflict** with a helpful message. Phase 5 either promotes this to a
+Mongo-level lock (for multi-process deployments) or leans on node-cron's
+single-process guarantee if we stay single-process. Either way, this
+in-memory flag has to exist now so that `POST /api/curve/sync` while
+the scheduler is mid-run can't accidentally open a second IMAP session.
+
+#### New schema fields landing in Phase 3
+
+**`CurveConfig`** gains:
+
+- `last_email_at: { type: Date }` — silent-failure canary (see above).
+- `is_syncing: { type: Boolean, default: false }` — UI hint for "a
+  sincronizar agora" badge. NOT the authoritative lock (the in-memory
+  flag is). Kept as a separate field instead of adding `'running'` to
+  the `last_sync_status` enum, because `last_sync_status` is about the
+  outcome of the *last completed* sync, not the current one.
+
+**`CurveLog`** gains:
+
+- `dry_run: { type: Boolean, default: false }` — filter flag for
+  audit UI.
+
+#### Performance / resource pitfalls addressed
+
+- **Reader streaming (required change to `imapReader.js`):**
+  `fetchUnseen()` must become an `async *fetchUnseen()` generator,
+  yielding `{uid, source}` one at a time instead of returning an
+  array. Current implementation collects every message into an array
+  before returning → a first sync against a mailbox with 5000 unseen
+  emails holds ~250 MB of latin1 strings in memory on the Pi (more
+  than half its RAM). Generator-style means the parser + insert +
+  markSeen runs fully on message N before message N+1 is fetched.
+- **Category cache:** `assignCategory(entity)` today does a full
+  `Category.find()` per call. The orchestrator loads categories once
+  at the start of a run and passes the array to a new
+  `assignCategoryFromList(entity, categories)`. Reduces N queries to
+  1 per sync. The existing `assignCategory()` stays as-is (it's used
+  by the one-off `POST /api/expenses` route).
+- **`emails_processed_total`:** cumulative counter, must be updated
+  with `$inc: { emails_processed_total: syncedCount }`, not `set`.
+  Trivial but easy to get wrong with `findOneAndUpdate`.
+- **`close()` timeout:** `imapReader.close()` currently awaits
+  `logout()` best-effort with no timeout. If the server doesn't
+  respond, the orchestrator hangs indefinitely in the `finally` block.
+  Wrap in `Promise.race([logout(), setTimeout(5000)])` so the
+  orchestrator always returns.
+- **`error_detail` truncation:** truncate to 2000 chars before writing
+  to `CurveLog`. A verbose stack trace with `cause` chains can easily
+  be 5 KB; multiplied over the 90-day TTL and a flaky week, the
+  collection bloats. Utility helper in the orchestrator module.
+- **Per-email parse timeout:** wrap `parseEmail()` in
+  `Promise.race([parseEmail(source), timeout(10_000)])`. Defence
+  against a pathological input triggering a catastrophic regex
+  backtrack in cheerio or the fallback regexes. Over-engineering
+  today, cheap insurance for later.
+
+#### Deliberately deferred
+
+- **`Expense.date` is a `String`, not a `Date`** — bit-for-bit
+  compatibility with `curve.py`, which never parsed the date. This
+  means lexicographic ordering over `"22 Mar 2026 14:03:21"` does NOT
+  produce chronological order (Apr < Mar alphabetically). The
+  orchestrator does not solve this; the dashboard will need its own
+  parser once it does month-by-month rendering. **Do NOT change the
+  schema** — Embers' parallel ingestion inserts with the same format.
+- **Multi-process sync lock** — deferred to Phase 5. In-memory flag
+  is enough while Curve Sync runs as a single Node process.
+- **Canary enforcement beyond dashboard colouring** — the Phase 3
+  orchestrator only writes `last_email_at` and the frontend only
+  colours it. Any stronger action (email alert, auto-disable sync
+  after N days, SMS) is deferred.
+- **Poison-pill persistence** — the circuit breaker is per-run. If a
+  persistently broken email keeps re-triggering the breaker on every
+  run, that's still visible in the dashboard (`last_sync_status =
+  'error'` every sync, `parseErrors` counter growing in logs). We
+  accept the noise in exchange for not tracking per-UID state on
+  disk.
+
+#### Summary contract
+
+The orchestrator returns:
+
+```js
+{
+  total: number,              // emails fetched by the reader
+  ok: number,                 // new expenses inserted (or would-insert if dryRun)
+  duplicates: number,         // dedup hits (not errors)
+  parseErrors: number,
+  errors: number,             // everything else
+  halted: boolean,            // true if circuit breaker fired
+  dryRun: boolean,
+  durationMs: number,
+}
+```
+
+The route serializes this verbatim. The dashboard renders a
+per-category breakdown; if `halted === true`, it switches to a warning
+style and links to the latest CurveLog entries for triage.
+
+#### Implementation checklist
+
+Schema groundwork first (small, safe diffs):
+
+- [ ] Add `last_email_at: Date` and `is_syncing: Boolean` to
+      `CurveConfig.js`
+- [ ] Add `dry_run: Boolean` to `CurveLog.js`
+- [ ] Convert `imapReader.fetchUnseen()` to an `async *` generator
+- [ ] Add 5-second timeout to `imapReader.close()`
+- [ ] Extract `assignCategoryFromList(entity, categories)` in
+      `services/expense.js` alongside the existing `assignCategory`
+
+Then the orchestrator module itself:
+
 - [ ] Create `server/src/services/syncOrchestrator.js`
-- [ ] Main function: `syncEmails(configId)` or `syncEmails(userId)`
-- [ ] Pipeline per email: parse HTML -> compute digest -> check duplicate -> insert expense -> create log entry -> mark seen
-- [ ] Per-email error handling (one failure doesn't block others)
-- [ ] Create `CurveLog` entry for every email (status: `ok`, `duplicate`, `parse_error`, `error`)
-- [ ] Update `CurveConfig.last_sync_at`, `last_sync_status`, `emails_processed_total`
-- [ ] Return summary: `{ synced, duplicates, parseErrors, errors, total }`
-- [ ] Support `dry_run` flag (logs everything but skips DB insert + mark seen)
+- [ ] Define and document the `EmailReader` contract
+- [ ] Implement `FixtureReader` for dev / tests
+- [ ] Implement `syncEmails({ config, reader, dryRun })`
+- [ ] Per-email pipeline with duplicate 11000 + `keyPattern.digest`
+      check
+- [ ] Circuit breaker (≥10 consecutive parse_errors with 0 ok)
+- [ ] In-memory sync lock + exported `isSyncing()`
+- [ ] Category cache loaded once per run
+- [ ] `error_detail` truncation helper
+- [ ] Per-email `parseEmail` timeout wrapper
+- [ ] Canary update (`last_email_at`) only when reader is `ImapReader`
+
+And the glue (overlaps with Phase 4):
+
+- [ ] Wire `POST /api/curve/sync` to the orchestrator, handling
+      `SyncConflictError` → 409
+- [ ] Dev test: run `syncEmails()` with `FixtureReader` against a
+      clean Mongo, then again, and assert the second run is all
+      `duplicates`
 
 ### Phase 4 — Wire Up Routes
 
@@ -179,51 +757,652 @@ node server/scripts/validate-fixtures.js /path/to/emails
 
 ---
 
+## Config UX — Folder Picker
+
+### Problem statement
+
+The first real run of `POST /api/curve/sync` against Outlook via Caminho B
+failed with:
+
+```
+"INBOX/Curve Receipts" doesn't exist. (code=UNKNOWN)
+```
+
+Root cause: `CurveConfigPage.jsx` exposes `imap_folder` as a free-text
+input. The user typed `INBOX/Curve Receipts`, but the actual folder on
+Outlook365 is `Curve Receipts` at root level (confirmed via
+`POST /api/curve/test-connection`, which returned 14 folders including
+`INBOX`, `Sent`, `Arquivo`, `Continente`, `Curve Receipts`, `FlixBus`,
+`Formações`, `Notes`, ...).
+
+Free-text entry is a footgun for this field:
+
+- Any typo, wrong separator (`/` vs `\` vs `.`), or wrong case gives a
+  runtime failure invisible until the next sync.
+- Different IMAP servers expose the folder hierarchy differently: some
+  put everything under `INBOX.*`, others at root, others use quoted
+  paths with spaces.
+- The user has no way to discover the correct path without reading
+  server logs or shelling into mongosh.
+
+### Design constraints
+
+1. **No hardcoding beyond `INBOX` as the universal starting default.**
+   The picker must NOT know about provider-specific folder names
+   (`Curve Receipts`, `[Gmail]/All Mail`, etc.) — that's user data, not
+   configuration.
+2. **The user MUST pick a folder from their own server's folder list.**
+   Free-text entry is disallowed. The list comes exclusively from the
+   live `testConnection` response.
+3. **Seamless and natural.** No multi-step wizards, no separate forms
+   for credentials vs folder, no modal dialogs. A single page with a
+   state-aware dropdown.
+4. **Resilient to credential changes.** If the user updates the
+   server/password/port, the cached folder list is stale and must be
+   reloaded before a new pick is valid.
+5. **Backend trusts the client.** No server-side IMAP validation on
+   `PUT /api/curve/config` — see rationale below.
+
+### UX flow — first-time setup
+
+1. User opens `/curve/config` with no existing config.
+2. Form shows all credential fields plus `imap_folder` as a **disabled
+   `<select>`** with a single option `INBOX` selected. Sub-label:
+   *"Guarda as credenciais, depois clica **Testar ligação** para
+   carregares a lista de pastas."*
+3. User fills email + credentials, clicks **Guardar**.
+4. `PUT /api/curve/config` succeeds (`user_id` resolved from email),
+   config upserted with `imap_folder: 'INBOX'` and
+   `imap_folder_confirmed_at: null`.
+5. A prominent banner appears below the form:
+   > *"Credenciais guardadas. Clica **Testar ligação** para
+   > carregar a lista de pastas e escolheres a pasta correcta."*
+6. User clicks **Testar ligação** (the existing button, which already
+   returns `folders[]` from `POST /api/curve/test-connection` — we
+   reuse it as the single entry point for loading the folder list).
+7. On success, dropdown transitions to `loaded`:
+   - Enables and populates with the `folders[]` array.
+   - Banner morphs to:
+     > *"Escolhe agora a pasta onde estão os recibos Curve (actualmente
+     > a ler de `INBOX`). Ou clica **Manter INBOX** se é mesmo essa que
+     > queres."*
+8. User picks `Curve Receipts` from the dropdown (or clicks
+   **Manter INBOX**).
+9. Change auto-saves via `PUT /config`, writing both `imap_folder`
+   and `imap_folder_confirmed_at: Date.now()` (see the "Persistent
+   confirmation" section below).
+10. Brief toast: *"Pasta confirmada: «Curve Receipts»."*
+11. Banner disappears (`imap_folder_confirmed_at` is now set). Config
+    is complete — user can trigger a sync.
+
+### UX flow — returning user (existing config)
+
+1. User opens `/curve/config`.
+2. Form loads from `GET /config`. Dropdown state: `stale`, options =
+   `[storedFolder]` (single-item list, pre-selected). No banner if
+   `imap_folder_confirmed_at` is set — happy path for a returning
+   user whose folder is already confirmed.
+3. **No background IMAP traffic on mount.** If the user just wants to
+   toggle `sync_enabled` or read the current settings, we don't open
+   an IMAP connection to Outlook on every page load — that's extra
+   load on the proxy, extra OAuth2 token cycling, and a visible
+   2-5 second delay for no reason. The user must click
+   **Testar ligação** explicitly if they want to re-pick a folder.
+4. When the user clicks **Testar ligação**:
+   - State transitions `stale → loading → loaded` (or `error`).
+   - Dropdown options replace with the live list.
+   - Stored folder stays selected if still present on the server.
+     Otherwise the sync-failure flow takes over (section below).
+5. With a loaded list, the user can freely open the dropdown and pick
+   a different folder. Auto-save handles the rest (writes a fresh
+   `imap_folder_confirmed_at` alongside the new `imap_folder`).
+6. On `testConnection` failure: inline warning + Retry button under
+   the dropdown. The user can still save unrelated field changes via
+   the main **Guardar** button; they just can't re-pick the folder
+   until a new `testConnection` attempt succeeds.
+
+### UX flow — credentials changed mid-session
+
+1. User edits any of `imap_server`, `imap_port`, `imap_username`,
+   `imap_password`, `imap_tls`.
+2. `useEffect` on those fields fires and resets the picker:
+   - `folderListState` → `stale`
+   - `folderOptions` → `[form.imap_folder]` (whatever's currently in
+     form state, even if still unsaved)
+   - Dropdown sub-label becomes *"Credenciais alteradas — guarda e
+     clica **Testar ligação** para recarregar as pastas."*
+3. User clicks **Guardar** (to persist the new credentials), then
+   **Testar ligação** (to refresh the folder list against the new
+   server). Two explicit clicks, zero background traffic.
+4. Normal flow resumes once `testConnection` succeeds.
+
+### UX flow — sync failure with FOLDER error
+
+1. `syncEmails()` catches an `ImapError` with `code === 'FOLDER'`.
+2. **The orchestrator resets `imap_folder_confirmed_at` to `null`**
+   as part of the same `updateOne` that writes
+   `last_sync_status='error'`. The previous confirmation is no
+   longer trustworthy because the folder it points to is gone.
+3. `POST /api/curve/sync` response includes `summary.error` with the
+   classified message (e.g. *"folder not found on server: «Curve
+   Receipts» doesn't exist"*).
+4. `DashboardPage` shows a red card: *"A sincronização falhou: a
+   pasta configurada já não existe no servidor. Actualiza a
+   configuração."* with a link to `/curve/config`.
+5. On arrival at the config page, the folder dropdown gets a red
+   border (`aria-invalid`). The banner reappears automatically —
+   no special logic needed because `imap_folder_confirmed_at` is
+   null again. The user clicks **Testar ligação** to reload the
+   list and pick a replacement folder.
+
+### State machine
+
+States:
+
+```
+idle    — no credentials saved yet; Testar ligação disabled
+stale   — credentials present but folder list not yet loaded
+          (returning user on first visit, or credentials just changed)
+loading — testConnection call in flight
+loaded  — folder list populated; user can pick from the dropdown
+error   — last testConnection failed; Retry button visible
+```
+
+Transitions (ALL explicit — zero background fetches):
+
+```
+idle    →  stale    : user fills credentials and clicks Guardar
+stale   →  loading  : user clicks Testar ligação
+loading →  loaded   : testConnection succeeds
+loading →  error    : testConnection fails
+loaded  →  stale    : user edits any credential field
+loaded  →  (loaded) : user picks a folder (auto-save; no state change)
+error   →  loading  : user clicks Retry (re-triggers Testar ligação)
+```
+
+Implemented as three coupled React state slots:
+
+- `folderListState: 'idle' | 'stale' | 'loading' | 'loaded' | 'error'`
+- `folderOptions: string[]`
+- `folderListError: string | null`
+
+### Auto-save semantics (folder dropdown ONLY)
+
+When the dropdown's value changes AND `folderListState === 'loaded'`:
+
+1. Optimistic UI: update `form.imap_folder` immediately.
+2. Debounce 300 ms to collapse rapid toggles.
+3. Fire `PUT /api/curve/config` with the full form payload.
+4. On success: toast *"Pasta actualizada para «X»"*.
+5. On error: revert to the previous value + error toast.
+
+The main **Guardar** button still saves all fields in one shot —
+auto-save is a convenience layered on top of the dropdown specifically,
+not a replacement for the explicit button. All other fields continue
+to require an explicit Save click.
+
+Rationale: the user's mental model of picking a folder from a dropdown
+is "click and it's done", not "click and then click Save again". The
+explicit Save is reserved for the credentials/password flow, where
+optimistic saves would be dangerous.
+
+### Persistent confirmation of the folder pick
+
+The banner must disappear after the user makes an explicit choice
+(pick a folder OR confirm the `INBOX` default) AND must stay hidden
+across page reloads — otherwise a user who legitimately wants
+`INBOX` as their Curve folder would see the same prompt every time.
+
+The state is stored in a new `CurveConfig` field:
+
+```js
+imap_folder_confirmed_at: { type: Date, default: null }
+```
+
+Lifecycle:
+
+- **`null`** (default for new configs) → banner visible when the list
+  is `loaded` AND `folderOptions.length > 1`.
+- **Set to `Date.now()`** by any of:
+  1. User picks a new folder from the dropdown. Auto-save writes
+     `{ imap_folder, imap_folder_confirmed_at: Date.now() }` in a
+     single `PUT /config`.
+  2. User clicks the **Manter INBOX** dismiss button on the banner.
+     This writes only `{ imap_folder_confirmed_at: Date.now() }` to
+     `PUT /config` — no folder change.
+- **Reset to `null`** by `syncEmails()` when it catches a run-level
+  error with `err?.code === 'FOLDER'`. The existing confirmation is
+  now stale because the folder it trusted is gone, so the user has
+  to re-confirm after re-picking.
+
+This design pattern (confirmed-at timestamp + auto-invalidation on
+failure) is cleaner than a plain boolean because:
+
+- Timestamp gives us a debugging datapoint ("when was this last
+  confirmed?") at zero extra cost.
+- A plain boolean would need an extra "I dismissed this already"
+  field — one column does both jobs.
+- Auto-invalidation on FOLDER failure means we never have to track
+  "did the user dismiss the banner for a folder that no longer
+  exists" — the next sync failure implicitly re-arms the prompt.
+
+### Audit trail scope — why config changes don't land in `curve_logs`
+
+`CurveLog` is strictly an **email-level audit trail**. Every entry
+either describes a specific email being processed (`ok`, `duplicate`,
+`parse_error`) or a run-level abort during fetch/parse (`error`).
+Config changes — including the user picking a new folder — do NOT
+fit this schema: there's no email, no digest, no entity, no amount.
+Pushing them in would pollute the per-email signal the dashboard
+relies on (counters, failure rates, stale-email canary).
+
+Config-level observability is handled elsewhere:
+
+- **`CurveConfig.updated_at`** (already maintained by Mongoose via
+  `timestamps`) answers "when did the user last change config?".
+- **stdout / journalctl** via `console.log('[config] imap_folder
+  changed from X to Y')` inside `PUT /config` can be added if we
+  ever need more granular visibility — 2 lines of code, zero
+  schema change, visible in `journalctl -u curve-sync -f`.
+- **A dedicated `curve_config_audit` collection** is only worth
+  building when this service goes multi-user AND we need to answer
+  questions like "which admin changed my sync schedule?". Until
+  then it's overkill.
+
+### Why client-side validation only
+
+We considered having `PUT /api/curve/config` open an IMAP connection
+and verify the folder exists on save. Rejected:
+
+1. **Latency.** A cold IMAP connect + login + list takes 2-5 seconds
+   on the Pi via Caminho B. That penalty applies to every config save,
+   even ones that don't touch the folder (e.g. toggling `sync_enabled`).
+2. **Availability coupling.** A transient proxy outage would block
+   unrelated config updates.
+3. **Redundancy.** The client ALREADY has the authoritative list from
+   the most recent `testConnection` call. Saving any folder outside
+   that list requires bypassing the UI, at which point the user has
+   bigger problems.
+4. **Sync is the source of truth anyway.** If the folder disappears
+   between save and sync, the run fails gracefully with `code=FOLDER`
+   and the dashboard surfaces it (see flow 4 above). The recovery UX
+   is the same whether we validated on save or not.
+
+### Migration — existing configs from before the dropdown
+
+The rollout is deliberately **zero-migration**. No backfill script,
+no one-off mongosh command, no data surgery.
+
+1. **Schema change is purely additive.** `imap_folder_confirmed_at`
+   lands with `default: null`. Every existing `CurveConfig` document
+   implicitly gets `imap_folder_confirmed_at = null` on the next read
+   — Mongoose inserts the default transparently, the server restart
+   does NOT need to touch the collection.
+
+2. **All pre-existing configs land in the needs-re-confirmation
+   state.** Because `imap_folder_confirmed_at === null`, the banner
+   fires on the next visit to `/curve/config` regardless of what the
+   stored `imap_folder` value is (even if it's literally `INBOX`).
+   The user clicks **Testar ligação**, the dropdown appears, they
+   either keep INBOX (dismiss button writes `confirmed_at = now`) or
+   pick a new folder (auto-save writes `confirmed_at = now` as a side
+   effect of the same PUT). Either way the config leaves the
+   unconfirmed state through the user's explicit action, not via a
+   silent migration.
+
+3. **Stored value not in the loaded list.** This is the
+   `INBOX/Curve Receipts` case that started this whole thread — the
+   stored folder literally doesn't exist on the server. When the
+   dropdown is populated from a successful `testConnection`, we
+   compute `const isStale = !folderOptions.includes(form.imap_folder)`
+   and, if true, inject a **pinned synthetic disabled `<option>`** at
+   the top:
+
+   ```jsx
+   {isStale && (
+     <option value={form.imap_folder} disabled className="text-red-600">
+       {form.imap_folder} (não existe — escolha outra)
+     </option>
+   )}
+   {folderOptions.map((f) => (
+     <option key={f} value={f}>{f}</option>
+   ))}
+   ```
+
+   The banner text also flips from amber ("confirme a pasta") to red
+   ("a pasta actualmente configurada («INBOX/Curve Receipts») não
+   existe no servidor — escolha outra"). No extra state needed — the
+   staleness is derived from `form.imap_folder` + `folderOptions` on
+   every render.
+
+4. **Recovery path is the same as the happy path.** The user picks a
+   valid folder from the list, auto-save fires, the PUT writes both
+   `imap_folder` and `imap_folder_confirmed_at = new Date()`, the
+   synthetic option disappears on the next render because the stored
+   value is now in the list. Zero-touch cleanup.
+
+5. **Silent-failure-free fallback.** If the user ignores the banner
+   entirely and triggers a sync, the orchestrator hits the now-fixed
+   `classifyError` regex, emits `code=FOLDER`, the finally block
+   resets `imap_folder_confirmed_at = null` (which is already null
+   anyway in this state), and the frontend banner stays red on the
+   next visit. The only way out of the state is to pick a valid
+   folder — which is what we want.
+
+No timestamps are forged, no defaults are guessed, no folders are
+renamed. The migration is the user clicking one button.
+
+### Why `INBOX` as the single hardcoded default
+
+- It's the **only** universal folder across every IMAP provider
+  (Gmail, Outlook365, Fastmail, Fastmail, Yahoo, ProtonBridge, ...).
+  The IMAP spec guarantees it exists.
+- Safe fallback semantics: if the user somehow skips the picker flow
+  and runs a sync against `INBOX`, the parser rejects non-Curve emails
+  as `parse_error`. Noisy in `curve_logs`, but not broken — the
+  circuit breaker (10 consecutive parse errors) halts the run before
+  real damage accumulates.
+- Keeps the codebase free of provider-specific logic. We never ship
+  a list like `['Curve Receipts', 'Curve', 'Receipts/Curve']` — that's
+  user data.
+
+### Anti-patterns rejected
+
+- ❌ **Auto-detect the Curve folder by name heuristic.** Fails for
+  localized installs (`Recibos Curve`), fails for renamed folders,
+  fails for users who keep Curve emails under a parent like
+  `Finance/Curve`. Hardcoded heuristics are brittle.
+- ❌ **Two-step wizard (credentials page → folder page).** Over-
+  engineered for a 6-field form, doubles the save friction.
+- ❌ **Free-text input with `<datalist>` hints.** Still permits typos,
+  which is the whole bug we're fixing.
+- ❌ **Blocking the first Save until a non-default folder is picked.**
+  Chicken-and-egg: can't list folders without saved credentials.
+- ❌ **Server-side `mailboxOpen` check on every save.** Latency, see
+  above.
+- ❌ **A separate `/api/curve/folders` endpoint.** `POST /test-connection`
+  already returns the list; a dedicated endpoint adds surface area
+  for nothing.
+- ❌ **Auto-fetch the folder list on page mount.** Every visit to
+  `/curve/config` would open an IMAP connection to Outlook via the
+  proxy, even when the user is just toggling `sync_enabled` or
+  reading the current value. That's unnecessary load on the proxy,
+  unnecessary OAuth2 token cycling, and a visible 2-5 second delay
+  on every page load. Explicit click on **Testar ligação** only.
+- ❌ **Log folder changes to `curve_logs`.** `CurveLog` is the
+  email-level audit trail; config changes belong in `updated_at` or
+  `console.log`, not in the table the dashboard uses to count
+  `ok` / `duplicate` / `parse_error` outcomes.
+- ❌ **A plain boolean `folder_confirmed` flag.** A timestamp gives
+  the same UX for free plus a debugging datapoint ("last confirmed
+  at") plus a clean auto-invalidation pattern on FOLDER failure.
+  One column does the job of two.
+
+### Implementation checklist (frontend)
+
+- [ ] Convert `imap_folder` input → standalone `<select>` component
+      (has custom state, doesn't fit the existing `FIELDS` array loop)
+- [ ] Add state slots: `folderListState`, `folderOptions`,
+      `folderListError`
+- [ ] `loadFolders()` helper calling `api.testConnection()` with
+      transitions `loading → loaded | error`; reuse the existing
+      `handleTest` handler as the single entry point (double duty:
+      connectivity smoke-test AND populate the dropdown)
+- [ ] `useEffect` on credential fields (`imap_server`, `imap_port`,
+      `imap_username`, `imap_password`, `imap_tls`) → reset picker
+      to `stale`
+- [ ] **NO auto-fetch on mount.** Only on explicit button click.
+- [ ] After a successful first `handleSave` (transition `idle → stale`),
+      show the banner prompting the user to click **Testar ligação**
+- [ ] Banner component rendered when `folderListState === 'loaded'`
+      AND `form.imap_folder_confirmed_at == null` AND
+      `folderOptions.length > 1`
+- [ ] Banner has two CTAs:
+  - Dropdown value change → auto-save writes both `imap_folder` and
+    `imap_folder_confirmed_at: new Date().toISOString()`
+  - **Manter INBOX** button → calls `api.updateCurveConfig({ ...form,
+    imap_folder_confirmed_at: new Date().toISOString() })` with no
+    folder change
+- [ ] Debounced auto-save (300 ms) when dropdown value changes while
+      `folderListState === 'loaded'`
+- [ ] Red-bordered error state when arriving at config after a sync
+      failure (read `imap_folder_confirmed_at == null` combined with
+      `last_sync_status === 'error'` as the "just failed" signal)
+
+### Implementation checklist (backend)
+
+- [ ] Add `imap_folder_confirmed_at: { type: Date, default: null }`
+      to `CurveConfig` schema (`server/src/models/CurveConfig.js`)
+- [ ] Allow `PUT /api/curve/config` to accept and persist
+      `imap_folder_confirmed_at` (pass-through — no validation; the
+      frontend owns the timing semantics)
+- [ ] The `GET /api/curve/config` response already includes any
+      schema field via `.lean()`, so no changes needed there beyond
+      verifying the new field is present on the returned object
+- [ ] In `syncEmails()` (`server/src/services/syncOrchestrator.js`),
+      when the finally-block writes `last_sync_status`, also reset
+      `imap_folder_confirmed_at: null` iff `runError?.code === 'FOLDER'`.
+      Same `updateOne` — no extra round trip
+- [ ] `POST /api/curve/test-connection` already returns
+      `{ folders: string[] }` — no changes needed there
+
+### First-sync safety net — `imap_since` + `max_emails_per_run`
+
+Without guards, the first `POST /sync` against a folder with years of
+UNSEEN Curve receipts would pull every single email in one shot. The
+digest unique index protects against data corruption (everything
+already in Embers lands as `duplicate`), but the run would block the
+sync lock for minutes to hours and could trigger Outlook rate limits.
+
+Two new `CurveConfig` fields solve this:
+
+| Field | Type | Default | Where enforced |
+|-------|------|---------|----------------|
+| `imap_since` | `Date \| null` | `null` (→ fallback 31 days ago, Europe/Lisbon) | IMAP server-side via `SEARCH UNSEEN SINCE <date>` |
+| `max_emails_per_run` | `Number` | `500` | Client-side in `ImapReader.fetchUnseen()` |
+
+**`imap_since`** is the coarse filter. The IMAP `SINCE` command
+compares against the message's internal date (date-only, no time),
+so the server discards old emails before sending them over the wire.
+When `null`, the reader computes the fallback using
+`Intl.DateTimeFormat` in `Europe/Lisbon` — this matters because the
+future cycle-aware mode (day 22) must answer "what day is today in
+Lisbon?", not "what day is it in UTC?".
+
+**`max_emails_per_run`** is the hard cap. After yielding 500 messages
+the generator stops and sets `reader.capped = true`. The orchestrator
+surfaces `summary.capped = true` and the route appends
+`(limitado a 500 — há mais emails por processar)` to the response
+message. Remaining emails stay UNSEEN for the next run — no data is
+lost, just deferred.
+
+**Future: cycle-aware `imap_since`** — the frontend will expose a
+control tied to the monthly cycle logic (day 22, see CLAUDE.md →
+Custom Monthly Cycle). If today >= 22nd, since = 22nd of this month;
+if today < 22nd, since = 22nd of last month. Timezone: Europe/Lisbon.
+This matches the Embers pay-cycle window and means the sync only
+pulls emails from the current expense period. Until then, the 31-day
+fallback is a safe conservative default.
+
+### Related unrelated fixes shipping alongside
+
+These are needed before the dropdown work can land cleanly but are
+independent of the picker itself:
+
+- **`classifyError` regex miss** (`server/src/services/imapReader.js`):
+  the current pattern `/Mailbox doesn't exist|does not exist|folder/i`
+  doesn't match Outlook's `"foo" doesn't exist.` — the error fell
+  through to `UNKNOWN` instead of `FOLDER`. Extend to match
+  `doesn't exist` without a `Mailbox` prefix, plus `TRYCREATE` and
+  `no such (mailbox|folder)`.
+- **Surface `runError.message` in the `POST /sync` response.**
+  Currently `summary` only has numeric counters, so the curl output
+  shows `errors: 1` with no context. Add `summary.error: string|null`,
+  populate from the catch block in `syncEmails()`, and expose it in
+  the JSON response + the toast `message` field.
+- **Show `error_detail` in `CurveLogsPage.jsx`.** Rows with
+  `status === 'error' | 'parse_error'` currently render `—` in the
+  entity/amount/digest cells and hide the actual message. Add an
+  expandable sub-row (or inline text) showing `log.error_detail`
+  for those statuses so the user can diagnose without mongosh.
+
+---
+
 ## Dev Environment Strategy
 
 The main challenge for local development: **where do the test emails come from?**
 
-### Layer 1 — Parser with Fixtures (no network needed)
+### Testing workflow — current state
 
-**Goal**: Develop and validate `emailParser.js` in complete isolation.
+> **Scope warning:** The workflow below covers the **happy path** and
+> **duplicate handling** only. Edge cases like parse errors, circuit
+> breaker, concurrent 409, and capped runs are NOT exercised by these
+> scripts. See the "Untested branches" table at the end of this
+> section.
 
-1. Save 2-3 real Curve Card receipt HTML files in `server/test/fixtures/emails/`
-   - Get these from the Outlook365 mailbox (view source / export `.eml`)
-   - Sanitize any personal data if needed
-2. Write the parser against these fixtures
-3. Validate output matches what `curve.py` would produce for the same emails
-4. Cross-check digest output with `computeDigest()` from `expense.js`
+All commands assume `cd ~/Curve-sync` and `server/.env` pointing at
+`embers_db_dev`.
 
-**This is the fastest path to progress** — zero network dependency, instant feedback loop.
+#### Step 0 — Parser validation (zero Mongo, zero IMAP)
 
-### Layer 2 — IMAP Against Real or Test Account
+Verifies the cheerio parser against saved fixture files. No network,
+no database — fastest feedback loop.
 
-**Option A** (recommended): Use the real Outlook365 account with the "Curve Receipts" folder. It already has historical emails. Set credentials in `server/.env`.
+```bash
+# Ground-truth (regex-based, mirrors curve.py logic)
+node server/scripts/validate-fixtures.js
 
-**Option B**: Create a test IMAP account (Gmail with app password, or a service like Mailtrap/Ethereal) and forward/copy some real Curve emails there.
-
-```env
-# server/.env (dev)
-IMAP_SERVER=outlook.office365.com
-IMAP_PORT=993
-IMAP_USERNAME=your-email@outlook.com
-IMAP_PASSWORD=your-app-password
-IMAP_FOLDER=Curve Receipts
+# Production parser (cheerio) — output must match validate-fixtures
+node server/scripts/test-parser.js
 ```
 
-### Layer 3 — Orchestrator with Dry Run
+Expected: 5 fixtures, 0 parse_error, 0 fatal, identical digests.
 
-1. Wire parser + IMAP reader in the orchestrator
-2. Use `dry_run: true` flag — runs the full pipeline but:
-   - Does NOT insert expenses into MongoDB
-   - Does NOT mark emails as `\Seen`
-   - DOES create log entries (for debugging)
-3. Review logs to confirm everything works before going "live"
-4. Flip off dry run, test with a single email, verify expense appears in DB
+#### Step 1 — Orchestrator with FixtureReader (Mongo real, IMAP zero)
 
-### Layer 4 — Scheduler (final step)
+Exercises the full parse → digest → dedup → insert → log pipeline
+against real MongoDB but with zero IMAP traffic. Uses a dedicated
+`__fixture_test__` CurveConfig so production data is never touched.
 
-Only enable after the manual `POST /api/curve/sync` works reliably. Start with a long interval (e.g., 60 minutes) and reduce once stable.
+```bash
+# Clean up artefacts from previous fixture runs
+node server/scripts/cleanup-test-orchestrator.js
+
+# Three passes: dry run → real insert → re-run (all duplicates)
+node server/scripts/test-orchestrator.js
+```
+
+Expected output:
+```
+== dry run ==
+  total=5  ok=5  dup=0  parseErrors=0  errors=0  halted=false  dryRun=true
+
+== real insert (first run) ==
+  total=5  ok=5  dup=0  parseErrors=0  errors=0  halted=false  dryRun=false
+
+== real insert (re-run) ==
+  total=5  ok=0  dup=5  parseErrors=0  errors=0  halted=false  dryRun=false
+
+PASSED
+```
+
+What this proves:
+- Dry run path: parser runs, `Expense.exists()` check, zero writes
+- Real insert: `Expense.create()` succeeds, CurveLog with status=ok
+- Duplicate handling: digest unique index → status=duplicate, no new rows
+- FixtureReader canary: `last_email_at` stays null (fixtures don't
+  count as real email for the silent-failure canary)
+- Config stats: `last_sync_status=ok`, `is_syncing=false`
+
+#### Step 2 — IMAP dry run (real connection, zero writes)
+
+Tests the full IMAP pipeline (connect → fetch → parse → digest check)
+but without inserting Expenses or marking emails as `\Seen`.
+
+```bash
+# Verify config: folder, confirmed_at, safety net fields
+curl -s http://localhost:3001/api/curve/config \
+  | jq '{folder: .data.imap_folder, confirmed: .data.imap_folder_confirmed_at, since: .data.imap_since, cap: .data.max_emails_per_run}'
+
+# Test IMAP connection + list available folders
+curl -s http://localhost:3001/api/curve/test-connection -X POST | jq
+
+# Dry run — counts emails, zero side effects
+curl -s 'http://localhost:3001/api/curve/sync?dry_run=1' -X POST | jq '{message, summary}'
+```
+
+Expected: `parseErrors=0`, `errors=0`, `total` = number of UNSEEN
+emails within the `imap_since` window (default 31 days). `capped`
+should be `false` unless there are >500 emails in that window.
+
+#### Step 3 — Real sync
+
+```bash
+# First run: inserts Expenses + marks emails \Seen
+curl -s http://localhost:3001/api/curve/sync -X POST | jq '{message, summary}'
+
+# Second run: must return total=0 (everything is \Seen)
+curl -s http://localhost:3001/api/curve/sync -X POST | jq '{message, summary}'
+```
+
+Expected first run: `ok + duplicates = total`, `errors=0`.
+Expected second run: `total=0`, everything else zero.
+
+The frontend "Sincronizar agora" button on the Dashboard does the
+same thing as the first curl (POST /sync without dry_run).
+
+#### Step 4 — Full reset (re-test from scratch)
+
+Two scripts undo everything from step 3 so the sync can be re-run
+cleanly. Always run in this order:
+
+```bash
+# 1. Wipe Mongo data (Expenses + CurveLogs + config stats)
+#    Shows a briefing with counts and sample data before asking y/N
+node server/scripts/cleanup-sync.js
+
+# 2. Unmark emails on IMAP (Seen → Unseen)
+#    Shows count of SEEN vs UNSEEN before asking y/N
+node server/scripts/reset-seen.js
+
+# 3. Verify clean state
+curl -s 'http://localhost:3001/api/curve/sync?dry_run=1' -X POST | jq '.summary.total'
+```
+
+After this, steps 2-3 can be re-run as if it were a first-time sync.
+
+**Important:** `cleanup-sync.js` only deletes Expenses that are
+linked via `CurveLog.expense_id` — it never touches expenses created
+by other means (manual entries, Embers Python pipeline). The
+`__fixture_test__` config artefacts are NOT cleaned by this script —
+use `cleanup-test-orchestrator.js` for those.
+
+#### Scripts summary
+
+| Script | Touches Mongo | Touches IMAP | Needs confirmation |
+|--------|:---:|:---:|:---:|
+| `validate-fixtures.js` | — | — | — |
+| `test-parser.js` | — | — | — |
+| `test-orchestrator.js` | writes | — | — |
+| `cleanup-test-orchestrator.js` | deletes | — | — |
+| `cleanup-sync.js` | deletes | — | y/N |
+| `reset-seen.js` | reads | writes | y/N |
+
+#### Untested branches
+
+These edge cases are NOT covered by the scripts above. They can be
+triggered manually but there are no automated test scripts for them
+yet.
+
+| Branch | How to trigger manually | Risk if untested |
+|--------|------------------------|------------------|
+| Parse error | Add a corrupt file to `test/fixtures/emails/` and run `test-orchestrator.js` | Low — leaves UNSEEN for retry |
+| Circuit breaker (10 parse errors) | Add 10+ corrupt fixtures | Low — only fires on template change |
+| `capped = true` | Set `max_emails_per_run: 3` via mongosh, run sync | Low — verified by code review |
+| SyncConflictError 409 | Two simultaneous `curl POST /sync` | Low — in-memory lock, trivial |
+| FOLDER error + auto-invalidation | Set `imap_folder` to a non-existent folder, run sync | Tested manually (was the original bug) |
+| Socket timeout recovery | Kill email-oauth2-proxy mid-sync | Medium — fixed by error handler + batch markSeen |
+| Auth failure | Set wrong password, run sync | Low — classifyError regex covers it |
 
 ---
 

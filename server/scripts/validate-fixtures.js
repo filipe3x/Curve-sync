@@ -70,18 +70,41 @@ function stripTags(html) {
 }
 
 /**
- * Extract every <td>...</td> along with its class list.
+ * Extract every <td>...</td> along with its class list, in document order.
  * Returns array of { classes: string[], content: string }.
- * Regex-based — sufficient for known Curve email templates, not a full HTML parser.
+ *
+ * Handles nested <td> tags (Curve emails wrap the entity/amount row in an
+ * outer <td> containing an inner <table>). A naive `<td>...</td>` regex
+ * with a lazy quantifier would match the outer opening against the first
+ * inner closing — here we walk open/close td tokens and track depth to
+ * pair each opening tag with its real matching closing tag.
  */
 function extractTds(html) {
-  const regex = /<td\b([^>]*)>([\s\S]*?)<\/td>/gi;
+  const openRe = /<td\b([^>]*)>/gi;
+  const tokenRe = /<(\/?)td\b[^>]*>/gi;
   const tds = [];
   let m;
-  while ((m = regex.exec(html)) !== null) {
+  while ((m = openRe.exec(html)) !== null) {
     const classMatch = m[1].match(/class\s*=\s*"([^"]*)"/i);
     const classes = classMatch ? classMatch[1].split(/\s+/).filter(Boolean) : [];
-    tds.push({ classes, content: m[2] });
+    const contentStart = m.index + m[0].length;
+    tokenRe.lastIndex = contentStart;
+    let depth = 1;
+    let contentEnd = -1;
+    let t;
+    while ((t = tokenRe.exec(html)) !== null) {
+      if (t[1] === '/') {
+        depth--;
+        if (depth === 0) {
+          contentEnd = t.index;
+          break;
+        }
+      } else {
+        depth++;
+      }
+    }
+    const content = contentEnd >= 0 ? html.slice(contentStart, contentEnd) : '';
+    tds.push({ classes, content });
   }
   return tds;
 }
