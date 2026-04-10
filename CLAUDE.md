@@ -129,6 +129,35 @@ mongorestore --db=embers_db_dev /tmp/embers_db_dev --drop
 | `curve_configs` | Curve Sync | IMAP config per user |
 | `curve_logs` | Curve Sync | Audit trail |
 
+### Inspecting BSON files without MongoDB
+
+When `mongorestore` is not available, inspect `.bson` files directly via the `bson` npm package:
+
+```bash
+npm install --no-save bson
+tar xzf dev/db/embers-dump.tar.gz -C /tmp
+```
+
+```javascript
+const fs = require('fs');
+const { BSON } = require('bson');
+
+function readBson(file) {
+  const buf = fs.readFileSync(file);
+  const docs = [];
+  let offset = 0;
+  while (offset < buf.length) {
+    const size = buf.readInt32LE(offset);
+    docs.push(BSON.deserialize(buf.slice(offset, offset + size)));
+    offset += size;
+  }
+  return docs;
+}
+
+const users = readBson('/tmp/embers_db_dev/users.bson');
+console.log(users);
+```
+
 ### Important
 
 - The data is test/bogus accounts — safe to track in git
