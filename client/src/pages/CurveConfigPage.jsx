@@ -38,7 +38,9 @@ const FIELDS = [
       '(proxy localhost): cola a encryption password do emailproxy.config ' +
       'do email-oauth2-proxy.',
   },
-  { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number' },
+  { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number',
+    help: 'De quantos em quantos minutos o sync automático verifica emails novos no servidor IMAP. Default: 5 minutos.',
+  },
 ];
 
 // Debounce window for the folder dropdown auto-save. Short enough to feel
@@ -367,14 +369,20 @@ export default function CurveConfigPage() {
           </label>
 
           {/* Sync enabled toggle */}
-          <label className="flex items-center gap-3">
+          <label className="flex items-start gap-3">
             <input
               type="checkbox"
               checked={form.sync_enabled ?? false}
               onChange={(e) => handleChange('sync_enabled', e.target.checked)}
-              className="h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
+              className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
             />
-            <span className="text-sm text-sand-700">Sincronização automática activa</span>
+            <span className="text-sm text-sand-700">
+              Sincronização automática activa
+              <span className="mt-0.5 block text-xs text-sand-500">
+                Se activa, o servidor verifica automaticamente emails novos no intervalo definido acima.
+                Se desligada, a importação só corre quando clicares em «Sincronizar» manualmente.
+              </span>
+            </span>
           </label>
         </div>
 
