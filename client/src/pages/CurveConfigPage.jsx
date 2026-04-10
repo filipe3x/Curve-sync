@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import PageHeader from '../components/common/PageHeader';
+import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 
 // Text fields only. `imap_folder` is rendered separately as a state-aware
@@ -39,6 +40,7 @@ const FIELDS = [
 const FOLDER_AUTOSAVE_MS = 300;
 
 export default function CurveConfigPage() {
+  const { user } = useAuth();
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -187,6 +189,21 @@ export default function CurveConfigPage() {
         </div>
 
         <div className="grid gap-5">
+          {/* Read-only: authenticated user's email */}
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-sand-500">
+              Email Embers
+            </span>
+            <input
+              type="email"
+              value={user?.email ?? ''}
+              disabled
+              className="input bg-sand-50 text-sand-500"
+            />
+            <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
+              Utilizador autenticado. A configuração IMAP fica associada a esta conta.
+            </span>
+          </label>
           {FIELDS.map(({ key, label, placeholder, type, help }) => (
             <label key={key} className="block">
               <span className="mb-1.5 block text-xs font-medium text-sand-500">
