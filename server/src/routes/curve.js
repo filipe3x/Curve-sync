@@ -11,88 +11,47 @@ import {
 
 const router = Router();
 
-// Escape a string for safe use inside a RegExp literal. The admin types
-// the email by hand, so we don't trust the characters to be regex-safe
-// even though real addresses rarely contain metacharacters.
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 // GET /api/curve/config
-// Returns the singleton CurveConfig plus a synthetic `email` field
-// resolved from `user_id` (matches the Embers User collection's field
-// name). The frontend uses `email` to pre-fill the "Email Embers" input
-// — the raw `user_id` ObjectId is never shown.
+// Returns the authenticated user's CurveConfig plus a synthetic `email`
+// field resolved from `user_id`.
 router.get('/config', async (req, res) => {
   try {
-    // For now return the first config (single-user). TODO: auth + user scoping.
-    const data = await CurveConfig.findOne().lean();
+    const data = await CurveConfig.findOne({ user_id: req.userId }).lean();
     if (!data) return res.json({ data: {} });
 
-    let email = null;
-    if (data.user_id) {
-      const user = await User.findById(data.user_id).select('email').lean();
-      email = user?.email ?? null;
-    }
-    res.json({ data: { ...data, email } });
+    const user = await User.findById(req.userId).select('email').lean();
+    res.json({ data: { ...data, email: user?.email ?? null } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // PUT /api/curve/config
-// The client sends `email` (the Embers user's email — same field name as
-// the Embers User collection) instead of `user_id`. We look up the User
-// by that email (case-insensitive exact match) and set `user_id` from the
-// lookup result. This is the ONLY path that writes `user_id` — we never
-// trust a client-supplied ObjectId for multi-user scoping.
+// The user_id comes from the authenticated session (req.userId), not from
+// the request body. The email→user lookup is no longer needed — the user
+// IS the authenticated user.
 router.put('/config', async (req, res) => {
   try {
     const {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
-      imap_folder, sync_enabled, sync_interval_minutes, email,
+      imap_folder, sync_enabled, sync_interval_minutes,
       imap_since, max_emails_per_run,
-      // `confirm_folder: true` is sent by the frontend folder picker
-      // (auto-save on dropdown change) and by the "Manter INBOX"
-      // dismiss button. It's the ONLY way to set imap_folder_confirmed_at
-      // — we don't let the client forge the timestamp directly.
       confirm_folder,
     } = req.body;
-
-    const emailTrimmed = typeof email === 'string' ? email.trim() : '';
-    if (!emailTrimmed) {
-      return res.status(400).json({
-        error: 'Email do utilizador Embers é obrigatório.',
-      });
-    }
-
-    // Embers stores emails lowercase (downcase_email before_validation)
-    // but we use a case-insensitive exact match so casing typos in the
-    // admin UI don't cause a false negative.
-    const user = await User.findOne({
-      email: { $regex: `^${escapeRegex(emailTrimmed)}$`, $options: 'i' },
-    })
-      .select('_id')
-      .lean();
-    if (!user) {
-      return res.status(404).json({
-        error: `Nenhum utilizador Embers encontrado com email "${emailTrimmed}".`,
-      });
-    }
 
     const update = {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
       imap_since: imap_since ? new Date(imap_since) : null,
       max_emails_per_run: max_emails_per_run != null ? Number(max_emails_per_run) : undefined,
-      user_id: user._id,
+      user_id: req.userId,
     };
     if (confirm_folder === true) {
       update.imap_folder_confirmed_at = new Date();
     }
 
     const data = await CurveConfig.findOneAndUpdate(
-      {},
+      { user_id: req.userId },
       update,
       { upsert: true, new: true, runValidators: true },
     );
@@ -115,16 +74,10 @@ router.put('/config', async (req, res) => {
 router.post('/sync', async (req, res) => {
   const dryRun = req.query.dry_run === '1' || req.query.dry_run === 'true';
   try {
-    const config = await CurveConfig.findOne();
+    const config = await CurveConfig.findOne({ user_id: req.userId });
     if (!config) {
       return res.status(404).json({
         error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
-      });
-    }
-    if (!config.user_id) {
-      return res.status(400).json({
-        error:
-          'CurveConfig sem user_id — multi-user scoping exige que o config esteja associado a um utilizador.',
       });
     }
     const reader = new ImapReader(config.toObject());
@@ -168,9 +121,9 @@ router.post('/sync', async (req, res) => {
 // GET /api/curve/sync/status — lightweight poll endpoint for the
 // "a sincronizar agora" badge in the UI. Returns the in-memory lock state
 // (authoritative) AND the config's `is_syncing` field (UI hint).
-router.get('/sync/status', async (_req, res) => {
+router.get('/sync/status', async (req, res) => {
   try {
-    const config = await CurveConfig.findOne().lean();
+    const config = await CurveConfig.findOne({ user_id: req.userId }).lean();
     res.json({
       running: isSyncing(),
       config_is_syncing: Boolean(config?.is_syncing),
@@ -187,9 +140,9 @@ router.get('/sync/status', async (_req, res) => {
 // Reads the stored CurveConfig, attempts an IMAP connect + folder list,
 // and returns the folder paths so the user can verify the `imap_folder`
 // value. Maps ImapError.code → HTTP status for nicer UX on the frontend.
-router.post('/test-connection', async (_req, res) => {
+router.post('/test-connection', async (req, res) => {
   try {
-    const config = await CurveConfig.findOne().lean();
+    const config = await CurveConfig.findOne({ user_id: req.userId }).lean();
     if (!config) {
       return res.status(404).json({
         error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
@@ -216,13 +169,14 @@ router.get('/logs', async (req, res) => {
     const { page = 1, limit = 30 } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
+    const logFilter = { user_id: req.userId };
     const [data, total] = await Promise.all([
-      CurveLog.find()
+      CurveLog.find(logFilter)
         .sort('-created_at')
         .skip(skip)
         .limit(Number(limit))
         .lean(),
-      CurveLog.countDocuments(),
+      CurveLog.countDocuments(logFilter),
     ]);
 
     res.json({ data, meta: { total, page: Number(page), limit: Number(limit) } });

@@ -7,6 +7,7 @@ import categoriesRouter from './routes/categories.js';
 import curveRouter from './routes/curve.js';
 import autocompleteRouter from './routes/autocomplete.js';
 import authRouter from './routes/auth.js';
+import { authenticate } from './middleware/auth.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -14,12 +15,12 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Routes
+// Routes — auth is public, everything else requires a valid token
 app.use('/api/auth', authRouter);
-app.use('/api/expenses', expensesRouter);
-app.use('/api/categories', categoriesRouter);
-app.use('/api/curve', curveRouter);
-app.use('/api/autocomplete', autocompleteRouter);
+app.use('/api/expenses', authenticate, expensesRouter);
+app.use('/api/categories', authenticate, categoriesRouter);
+app.use('/api/curve', authenticate, curveRouter);
+app.use('/api/autocomplete', authenticate, autocompleteRouter);
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
