@@ -1,4 +1,5 @@
 import Session from '../models/Session.js';
+import { audit, clientIp } from '../services/audit.js';
 
 /**
  * Express middleware: validates Bearer token from the Authorization header,
@@ -24,6 +25,7 @@ export async function authenticate(req, res, next) {
     // Check expiry — sessions without expires_at (Embers legacy) are allowed
     if (session.expires_at && new Date(session.expires_at) < new Date()) {
       await Session.deleteOne({ token });
+      audit({ action: 'session_expired', userId: session.user_id, ip: clientIp(req) });
       return res.status(401).json({ error: 'Sessão expirada.' });
     }
 

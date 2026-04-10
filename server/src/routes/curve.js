@@ -14,6 +14,7 @@ import {
   getSchedulerStatus,
 } from '../services/scheduler.js';
 import { encrypt, decrypt } from '../services/crypto.js';
+import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
 
@@ -69,6 +70,14 @@ router.put('/config', async (req, res) => {
       { upsert: true, new: true, runValidators: true },
     );
 
+    const detail = imap_password ? 'config + password updated' : 'config updated';
+    audit({
+      action: imap_password ? 'password_changed' : 'config_updated',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail,
+    });
+
     res.json({ data });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -95,6 +104,14 @@ router.post('/sync', async (req, res) => {
     }
     const plainConfig = withDecryptedPassword(config.toObject());
     const reader = new ImapReader(plainConfig);
+
+    audit({
+      action: 'sync_manual',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: dryRun ? 'dry_run' : null,
+    });
+
     const summary = await syncEmails({
       config: plainConfig,
       reader,
@@ -178,12 +195,17 @@ router.post('/test-connection', async (req, res) => {
 });
 
 // GET /api/curve/logs
+// Optional query: ?type=audit  → only audit/security events (action != null)
+//                 ?type=sync   → only sync events (action == null)
+//                 (omit)       → all entries
 router.get('/logs', async (req, res) => {
   try {
-    const { page = 1, limit = 30 } = req.query;
+    const { page = 1, limit = 30, type } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
     const logFilter = { user_id: req.userId };
+    if (type === 'audit') logFilter.action = { $ne: null };
+    else if (type === 'sync') logFilter.action = null;
     const [data, total] = await Promise.all([
       CurveLog.find(logFilter)
         .sort('-created_at')
