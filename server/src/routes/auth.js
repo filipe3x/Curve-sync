@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import User from '../models/User.js';
 import Session from '../models/Session.js';
-import { verifyPassword, generateToken } from '../services/auth.js';
+import { verifyPassword, generateToken, SESSION_TTL_MS } from '../services/auth.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = Router();
@@ -20,7 +20,8 @@ router.post('/login', async (req, res) => {
     }
 
     const token = generateToken();
-    await Session.create({ user_id: user._id, token });
+    const expires_at = new Date(Date.now() + SESSION_TTL_MS);
+    await Session.create({ user_id: user._id, token, expires_at });
 
     res.json({
       token,

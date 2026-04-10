@@ -2,7 +2,8 @@ import Session from '../models/Session.js';
 
 /**
  * Express middleware: validates Bearer token from the Authorization header,
- * looks up the session in MongoDB, and sets req.userId.
+ * looks up the session in MongoDB, checks expiry, and sets req.userId.
+ * Expired sessions are deleted on the spot (lazy cleanup).
  */
 export async function authenticate(req, res, next) {
   const header = req.headers.authorization;
@@ -12,9 +13,18 @@ export async function authenticate(req, res, next) {
 
   const token = header.slice(7);
   try {
-    const session = await Session.findOne({ token }).select('user_id').lean();
+    const session = await Session.findOne({ token })
+      .select('user_id expires_at')
+      .lean();
+
     if (!session) {
       return res.status(401).json({ error: 'Sessão inválida ou expirada.' });
+    }
+
+    // Check expiry — sessions without expires_at (Embers legacy) are allowed
+    if (session.expires_at && new Date(session.expires_at) < new Date()) {
+      await Session.deleteOne({ token });
+      return res.status(401).json({ error: 'Sessão expirada.' });
     }
 
     req.userId = session.user_id;
