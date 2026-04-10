@@ -208,9 +208,9 @@ export default function CurveConfigPage() {
               className="input bg-sand-50 text-sand-500"
             />
             <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
-              Conta com que fizeste login no Curve Sync. As despesas importadas
-              ficam associadas a este utilizador. Não é o email que recebe os
-              recibos do Curve Pay.
+              Conta com que fizeste login. As despesas importadas
+              ficam associadas a este utilizador. Não é necessariamente
+              o email que recebe os recibos do Curve Pay.
             </span>
           </label>
           {FIELDS.map(({ key, label, placeholder, type, help }) => (
