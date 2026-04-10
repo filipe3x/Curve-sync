@@ -26,8 +26,8 @@ Dropdown de pasta IMAP populado pelo servidor (POST /test-connection), com banne
 
 - **Implementado:** `CurveConfigPage.jsx`, `CurveConfig.imap_folder_confirmed_at`
 
-### 1.5 Autenticação e Multi-User Support
-→ Ver **secção dedicada "Multi-User Support"** abaixo — detalha 5 fases desde auth middleware até scheduler per-user.
+### ~~1.5 Autenticação e Multi-User Support~~ ✅
+→ Ver **secção dedicada "Multi-User Support"** abaixo — 5 fases completas (MU-1 a MU-5).
 
 ---
 
@@ -67,8 +67,8 @@ Ligar os `StatCard` do Dashboard a dados reais: total do mês (ciclo 22), saving
 ### 2.6 Filtros avançados na listagem de despesas
 Filtros por: categoria, cartão, intervalo de datas, entidade. Ordenação por data ou entidade (asc/desc). O frontend já tem a estrutura; falta implementar os query params no backend.
 
-### 2.7 Encriptação de credenciais IMAP
-As passwords IMAP são guardadas em texto simples no `curve_configs`. Encriptar com AES-256 antes de guardar e desencriptar apenas no momento da ligação.
+### ~~2.7 Encriptação de credenciais IMAP~~ ✅
+Movido para MU-5 e implementado: AES-256-GCM at rest, decrypt on-the-fly, backwards-compat com plaintext. Ver `server/src/services/crypto.js`.
 
 ---
 
@@ -203,6 +203,6 @@ Segurança e robustez para ambiente multi-user em produção.
 | Questão | Opções | Notas |
 |---------|--------|-------|
 | ~~Autenticação~~ | ~~API key simples vs JWT vs sessão partilhada com Embers~~ | **Decidido:** Login próprio com SHA-256 do Embers (Opção 1 do `AUTH.md`) |
-| IMAP library | `imapflow` vs `node-imap` | `imapflow` é mais moderno e mantido |
-| Scheduler | `node-cron` (in-process) vs `bull` + Redis (queue) | `node-cron` suficiente para single-instance; `bull` se precisar de retry/concurrency |
-| Password encryption | `crypto.createCipheriv` (AES-256-GCM) | Chave de encriptação em variável de ambiente |
+| ~~IMAP library~~ | ~~`imapflow` vs `node-imap`~~ | **Decidido:** `imapflow` — implementado em `imapReader.js` |
+| ~~Scheduler~~ | ~~`node-cron` (in-process) vs `bull` + Redis (queue)~~ | **Decidido:** `node-cron` — implementado em `scheduler.js`; BullMQ reservado para 100+ users |
+| ~~Password encryption~~ | ~~`crypto.createCipheriv` (AES-256-GCM)~~ | **Decidido e implementado:** `crypto.js`, chave em `IMAP_ENCRYPTION_KEY` |
