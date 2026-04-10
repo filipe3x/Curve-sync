@@ -7,16 +7,6 @@ import * as api from '../services/api';
 // docs/EMAIL.md → Config UX for the full rationale.
 const FIELDS = [
   {
-    key: 'email',
-    label: 'Email Embers',
-    placeholder: 'email@example.com',
-    type: 'email',
-    help:
-      'Email da conta Embers (NÃO é o email associado ao Curve Pay). ' +
-      'O backend procura o utilizador Embers pelo email (que é único) ' +
-      'e liga o CurveConfig ao respectivo user_id.',
-  },
-  {
     key: 'imap_server',
     label: 'Servidor IMAP',
     placeholder: 'outlook.office365.com  ou  127.0.0.1',
@@ -80,13 +70,6 @@ export default function CurveConfigPage() {
   const handleSave = async (e) => {
     e.preventDefault();
     setMessage(null);
-    // Guard: the backend requires `email` to resolve the user_id that
-    // scopes this config. Catch the empty case client-side so we don't
-    // round-trip just to get a 400.
-    if (!form.email?.trim()) {
-      setMessage({ type: 'error', text: 'Preenche o campo "Email Embers" antes de guardar.' });
-      return;
-    }
     setSaving(true);
     try {
       await api.updateCurveConfig(form);
@@ -119,12 +102,6 @@ export default function CurveConfigPage() {
     (nextFolder) => {
       if (folderSaveTimer.current) clearTimeout(folderSaveTimer.current);
       folderSaveTimer.current = setTimeout(async () => {
-        if (!form.email?.trim()) {
-          // Can't PUT without email — the backend would 400. Stay silent
-          // here because the main Guardar button will surface the same
-          // message when the user tries to save.
-          return;
-        }
         setFolderSaving(true);
         try {
           await api.updateCurveConfig({
@@ -153,10 +130,6 @@ export default function CurveConfigPage() {
   // "Manter INBOX" dismiss: confirm the current value (typically INBOX)
   // without opening the dropdown or requiring a folder list fetch.
   const handleDismissBanner = async () => {
-    if (!form.email?.trim()) {
-      setMessage({ type: 'error', text: 'Preenche o campo "Email Embers" antes de guardar.' });
-      return;
-    }
     setFolderSaving(true);
     try {
       await api.updateCurveConfig({

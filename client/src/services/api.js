@@ -1,16 +1,29 @@
 const BASE = '/api';
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
+  const token = localStorage.getItem('token');
+  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${BASE}${path}`, { ...options, headers });
+
+  if (res.status === 401 && !path.startsWith('/auth/')) {
+    window.dispatchEvent(new Event('auth:logout'));
+    throw new Error('Sessão expirada.');
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Request failed: ${res.status}`);
   }
   return res.json();
 }
+
+// Auth
+export const login = (data) =>
+  request('/auth/login', { method: 'POST', body: JSON.stringify(data) });
 
 // Expenses
 export const getExpenses = (params) =>
