@@ -66,10 +66,13 @@ export default function CurveLogsPage() {
                 const isErrorRow =
                   (log.status === 'error' || log.status === 'parse_error') &&
                   log.error_detail;
+                const isDryRun = Boolean(log.dry_run);
                 return (
                   <Fragment key={log._id ?? i}>
                     <tr
                       className={`transition-colors duration-150 hover:bg-sand-50 ${
+                        isDryRun ? 'bg-sand-50/50' : ''
+                      } ${
                         isErrorRow ? 'border-t border-sand-50' : 'border-b border-sand-50'
                       }`}
                     >
@@ -79,14 +82,21 @@ export default function CurveLogsPage() {
                           : '—'}
                       </td>
                       <td className="px-5 py-3">
-                        <span className={STATUS_CLASSES[log.status] ?? 'badge bg-sand-100 text-sand-600'}>
-                          {log.status}
+                        <span className="flex items-center gap-1.5">
+                          <span className={STATUS_CLASSES[log.status] ?? 'badge bg-sand-100 text-sand-600'}>
+                            {log.status}
+                          </span>
+                          {isDryRun && (
+                            <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-indigo-600">
+                              simulação
+                            </span>
+                          )}
                         </span>
                       </td>
-                      <td className="px-5 py-3 font-medium text-sand-900">
+                      <td className={`px-5 py-3 font-medium ${isDryRun ? 'text-sand-400' : 'text-sand-900'}`}>
                         {log.entity ?? '—'}
                       </td>
-                      <td className="px-5 py-3 text-sand-600">
+                      <td className={`px-5 py-3 ${isDryRun ? 'text-sand-400' : 'text-sand-600'}`}>
                         {log.amount != null ? `€${Number(log.amount).toFixed(2)}` : '—'}
                       </td>
                       <td className="px-5 py-3">
