@@ -111,21 +111,22 @@ Secção dedicada à evolução de single-user para multi-user. Substitui os ant
 | Camada | Multi-user pronto? | Notas |
 |--------|-------------------|-------|
 | **Schemas (modelos)** | ✅ Sim | `user_id` required em `Expense`, `CurveConfig` (unique), `CurveLog` |
-| **Sync Orchestrator** | ✅ Sim | Recebe `config.user_id`, valida-o, usa-o em todos os writes |
-| **Routes (API)** | ❌ Não | Todos os endpoints usam `findOne()` sem filtro — single-user |
-| **Auth middleware** | ❌ Não | Zero middleware, zero tokens, zero sessions |
-| **Frontend** | ❌ Não | Sem login, sem contexto de utilizador, sem Authorization header |
-| **Cron/Scheduler** | ❌ Não | `node-cron` instalado mas nunca usado |
+| **Sync Orchestrator** | ✅ Sim | Recebe `config.user_id`, valida-o, usa-o em todos os writes; lock per-user via `Set` |
+| **Routes (API)** | ✅ Sim | Todos os endpoints filtram por `req.userId` via middleware authenticate |
+| **Auth middleware** | ✅ Sim | Bearer token → Session lookup → `req.userId`; session expiry 1 dia |
+| **Frontend** | ✅ Sim | AuthContext, LoginPage, ProtectedRoute, 401 auto-logout |
+| **Cron/Scheduler** | ✅ Sim | `node-cron` itera configs com `sync_enabled: true`; auto-start no boot |
+| **Hardening** | ✅ Sim | AES-256-GCM para IMAP passwords, rate limiting, CORS, audit logging |
 
 ### MU-1 — Auth Foundation (backend)
 
 Criar a camada de autenticação. Opção escolhida: **login próprio replicando o hash SHA-256 do Embers** (ver `docs/AUTH.md` Opção 1).
 
-- [ ] **Modelo Session** — `server/src/models/Session.js` (read-only ou read-write, `strict: false`, collection `sessions`)
-- [ ] **Actualizar modelo User** — adicionar campos `encrypted_password` e `salt` (read-only)
-- [ ] **Serviço auth** — `server/src/services/auth.js` com `sha256()` e `verifyPassword(password, salt, encryptedPassword)`
-- [ ] **Middleware authenticate** — `server/src/middleware/auth.js`: extrai Bearer token → lookup Session → define `req.userId`
-- [ ] **Routes auth** — `server/src/routes/auth.js`: `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+- [x] **Modelo Session** — `server/src/models/Session.js` (read-write, `strict: false`, collection `sessions`)
+- [x] **Actualizar modelo User** — campos `encrypted_password` e `salt` (read-only)
+- [x] **Serviço auth** — `server/src/services/auth.js` com `sha256()` e `verifyPassword(password, salt, encryptedPassword)`
+- [x] **Middleware authenticate** — `server/src/middleware/auth.js`: extrai Bearer token → lookup Session → define `req.userId`
+- [x] **Routes auth** — `server/src/routes/auth.js`: `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
 
 **Dependências:** Nenhuma — pode ser desenvolvido de forma independente.
 **Referência:** `docs/AUTH.md` (código quasi-pronto para cada peça).
@@ -134,15 +135,15 @@ Criar a camada de autenticação. Opção escolhida: **login próprio replicando
 
 Aplicar o middleware `authenticate` a todas as routes e fazer scoping por `req.userId`.
 
-- [ ] **GET /api/expenses** — adicionar `{ user_id: req.userId }` ao filter (`expenses.js:20`)
-- [ ] **POST /api/expenses** — usar `req.userId` em vez de `req.body.user_id` (`expenses.js:48`)
-- [ ] **GET /api/curve/config** — `CurveConfig.findOne({ user_id: req.userId })` (`curve.js:29`)
-- [ ] **PUT /api/curve/config** — `findOneAndUpdate({ user_id: req.userId }, ...)` em vez de `{}` (`curve.js:94`); remover o email→user lookup (o user já é o autenticado)
-- [ ] **POST /api/curve/sync** — `CurveConfig.findOne({ user_id: req.userId })` (`curve.js:118`)
-- [ ] **GET /api/curve/sync/status** — idem (`curve.js:173`)
-- [ ] **POST /api/curve/test-connection** — idem (`curve.js:192`)
-- [ ] **GET /api/curve/logs** — `CurveLog.find({ user_id: req.userId })` (`curve.js:220`)
-- [ ] **GET /api/autocomplete/:field** — `Expense.distinct(field, { user_id: req.userId })` (`autocomplete.js:16`)
+- [x] **GET /api/expenses** — `{ user_id: req.userId }` no filter
+- [x] **POST /api/expenses** — usa `req.userId` em vez de `req.body.user_id`
+- [x] **GET /api/curve/config** — `CurveConfig.findOne({ user_id: req.userId })`
+- [x] **PUT /api/curve/config** — `findOneAndUpdate({ user_id: req.userId }, ...)`; email→user lookup removido
+- [x] **POST /api/curve/sync** — `CurveConfig.findOne({ user_id: req.userId })`
+- [x] **GET /api/curve/sync/status** — idem
+- [x] **POST /api/curve/test-connection** — idem
+- [x] **GET /api/curve/logs** — `CurveLog.find({ user_id: req.userId })`; suporta `?type=audit|sync`
+- [x] **GET /api/autocomplete/:field** — `Expense.distinct(field, { user_id: req.userId })`
 
 **Dependências:** MU-1 (middleware authenticate).
 
@@ -150,12 +151,12 @@ Aplicar o middleware `authenticate` a todas as routes e fazer scoping por `req.u
 
 Adicionar login/logout e protecção de rotas no frontend.
 
-- [ ] **AuthContext** — `client/src/contexts/AuthContext.jsx`: estado `user`/`token`, persist em `localStorage`, expose `login()`/`logout()`
-- [ ] **API interceptor** — `client/src/services/api.js`: injectar `Authorization: Bearer <token>` em todos os pedidos; redirect para login em 401
-- [ ] **LoginPage** — `client/src/pages/LoginPage.jsx`: form email + password → `POST /api/auth/login`
-- [ ] **ProtectedRoute** — wrapper que redireciona para `/login` se não autenticado
-- [ ] **App.jsx** — envolver routes no AuthContext; aplicar ProtectedRoute
-- [ ] **Layout** — mostrar email do utilizador na sidebar/header; botão logout
+- [x] **AuthContext** — `client/src/contexts/AuthContext.jsx`: estado `user`/`token`, persist em `localStorage`, `login()`/`logout()`
+- [x] **API interceptor** — `client/src/services/api.js`: `Authorization: Bearer <token>` em todos os pedidos; 401 → auto-logout via custom event
+- [x] **LoginPage** — `client/src/pages/LoginPage.jsx`: form email + password → `POST /api/auth/login`
+- [x] **ProtectedRoute** — wrapper em `App.jsx` que redireciona para `/login` se não autenticado
+- [x] **App.jsx** — routes envolvidas em AuthContext + ProtectedRoute
+- [x] **Layout** — email do utilizador + role na sidebar; botão logout
 
 **Dependências:** MU-1 (endpoints auth), MU-2 (routes protegidas retornam 401 sem token).
 
@@ -163,11 +164,11 @@ Adicionar login/logout e protecção de rotas no frontend.
 
 Tornar o sync concorrente entre utilizadores e implementar o cron scheduler.
 
-- [ ] **Lock per-user** — `syncOrchestrator.js`: trocar `let running = false` por `const running = new Set()` de `config._id`; verificar `running.has(config._id)` em vez de `running === true`
-- [ ] **Unique index composto** — migrar de `{ digest: 1 }` para `{ digest: 1, user_id: 1 }` em `Expense` (permite que dois users tenham a mesma transacção; mantém compatibilidade com curve.py porque o digest em si não muda)
-- [ ] **Scheduler** — `server/src/services/scheduler.js`: `node-cron` com intervalo fixo (ex: 5min); itera `CurveConfig.find({ sync_enabled: true })`; chama `syncEmails()` sequencialmente por config; skip se lock activo para esse config
-- [ ] **Routes scheduler** — expor `POST /api/curve/scheduler/start`, `POST /api/curve/scheduler/stop`, `GET /api/curve/scheduler/status` (admin only)
-- [ ] **Arranque automático** — iniciar scheduler no boot do servidor se existirem configs com `sync_enabled: true`
+- [x] **Lock per-user** — `syncOrchestrator.js`: `const running = new Set()` de `config._id`; `running.has()` / `running.add()` / `running.delete()`
+- [x] **Unique index composto** — `{ digest: 1, user_id: 1 }` em `Expense` (mantém compatibilidade com curve.py)
+- [x] **Scheduler** — `server/src/services/scheduler.js`: `node-cron` 5min; itera configs com `sync_enabled: true`; skip se lock activo
+- [x] **Routes scheduler** — `POST start`, `POST stop`, `GET status`
+- [x] **Arranque automático** — scheduler inicia no boot se existirem configs com `sync_enabled: true`
 
 **Dependências:** MU-2 (routes scoped); MU-1 (auth para rotas admin).
 
@@ -175,11 +176,11 @@ Tornar o sync concorrente entre utilizadores e implementar o cron scheduler.
 
 Segurança e robustez para ambiente multi-user em produção.
 
-- [ ] **Encriptação IMAP passwords** — AES-256-GCM at rest em `curve_configs.imap_password`; desencriptar apenas no momento da ligação; chave em `IMAP_ENCRYPTION_KEY` no `.env`
-- [ ] **Rate limiting** — `express-rate-limit` por IP + por `userId` (ex: 100 req/min geral, 5 req/min para POST /sync)
-- [ ] **Session expiry** — TTL nas sessions (ex: 30 dias); cleanup periódico ou TTL index no MongoDB
-- [ ] **Audit logging** — registar login/logout e acções sensíveis (config update, manual sync) no `curve_logs`
-- [ ] **CORS restritivo** — limitar `origin` ao domínio do frontend em produção (actualmente `cors()` sem restrições)
+- [x] **Encriptação IMAP passwords** — AES-256-GCM at rest; decrypt on-the-fly para IMAP; chave em `IMAP_ENCRYPTION_KEY`; backwards-compat com plaintext
+- [x] **Rate limiting** — `express-rate-limit`: login 10/15min, sync 3/min, API 100/min
+- [x] **Session expiry** — TTL 1 dia via `expires_at` + lazy cleanup no middleware (sem TTL index — collection partilhada com Embers)
+- [x] **Audit logging** — login/logout/session_expired/config_updated/password_changed/sync_manual → `curve_logs` com IP; `?type=audit` filter
+- [x] **CORS restritivo** — `CORS_ORIGIN` env var; lista de origens separadas por vírgula
 
 **Dependências:** MU-1 a MU-4 concluídas.
 
