@@ -8,6 +8,11 @@ import {
   isSyncing,
   SyncConflictError,
 } from '../services/syncOrchestrator.js';
+import {
+  startScheduler,
+  stopScheduler,
+  getSchedulerStatus,
+} from '../services/scheduler.js';
 
 const router = Router();
 
@@ -180,6 +185,38 @@ router.get('/logs', async (req, res) => {
     ]);
 
     res.json({ data, meta: { total, page: Number(page), limit: Number(limit) } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- Scheduler routes (admin only) ----------
+
+// POST /api/curve/scheduler/start
+router.post('/scheduler/start', async (req, res) => {
+  try {
+    const interval = Number(req.query.interval) || 5;
+    startScheduler(interval);
+    res.json({ message: `Scheduler iniciado (cada ${interval} min).` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/curve/scheduler/stop
+router.post('/scheduler/stop', async (_req, res) => {
+  try {
+    stopScheduler();
+    res.json({ message: 'Scheduler parado.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/curve/scheduler/status
+router.get('/scheduler/status', async (_req, res) => {
+  try {
+    res.json(getSchedulerStatus());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

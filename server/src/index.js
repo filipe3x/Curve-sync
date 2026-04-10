@@ -8,6 +8,8 @@ import curveRouter from './routes/curve.js';
 import autocompleteRouter from './routes/autocomplete.js';
 import authRouter from './routes/auth.js';
 import { authenticate } from './middleware/auth.js';
+import CurveConfig from './models/CurveConfig.js';
+import { startScheduler } from './services/scheduler.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,8 +28,18 @@ app.use('/api/autocomplete', authenticate, autocompleteRouter);
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
 // Start
-connectDB().then(() => {
+connectDB().then(async () => {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
+
+  // Auto-start scheduler if any config has sync_enabled
+  try {
+    const hasEnabled = await CurveConfig.exists({ sync_enabled: true });
+    if (hasEnabled) {
+      startScheduler();
+    }
+  } catch (err) {
+    console.warn(`Scheduler auto-start check failed: ${err.message}`);
+  }
 });
