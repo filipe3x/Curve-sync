@@ -18,7 +18,14 @@ const FIELDS = [
     placeholder: '993 (direto) / 1993 (proxy)',
     type: 'number',
   },
-  { key: 'imap_username', label: 'Utilizador', placeholder: 'email@example.com' },
+  {
+    key: 'imap_username',
+    label: 'Email Curve Pay',
+    placeholder: 'email@example.com',
+    help:
+      'O email da conta que recebe os recibos do Curve Pay (Curve Receipts). ' +
+      'É este email que o IMAP vai consultar para importar despesas.',
+  },
   {
     key: 'imap_password',
     label: 'Password IMAP',
@@ -189,10 +196,10 @@ export default function CurveConfigPage() {
         </div>
 
         <div className="grid gap-5">
-          {/* Read-only: authenticated user's email */}
+          {/* Read-only: authenticated user's Embers account */}
           <label className="block">
             <span className="mb-1.5 block text-xs font-medium text-sand-500">
-              Email Embers
+              Conta Embers
             </span>
             <input
               type="email"
@@ -201,7 +208,9 @@ export default function CurveConfigPage() {
               className="input bg-sand-50 text-sand-500"
             />
             <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
-              Utilizador autenticado. A configuração IMAP fica associada a esta conta.
+              Conta com que fizeste login no Curve Sync. As despesas importadas
+              ficam associadas a este utilizador. Não é o email que recebe os
+              recibos do Curve Pay.
             </span>
           </label>
           {FIELDS.map(({ key, label, placeholder, type, help }) => (
