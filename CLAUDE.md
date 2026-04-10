@@ -99,6 +99,42 @@ Key documentation:
 - `docs/MONGODB_SCHEMA.md` — Complete schema with Mongoose equivalents, relationships, indexes, and consistency rules
 - `docs/expense-tracking.md` — Full system documentation including savings score, monthly cycle logic, TODOs, and proposed standalone architecture
 
+## Dev Database
+
+A full MongoDB dump of the shared Embers database can be placed at `dev/db/embers-dump.tar.gz` for local development. The data is bogus/test accounts — safe to commit.
+
+### Setup
+
+```bash
+# 1. Export from production (on the server running MongoDB)
+mongodump --db=embers_production --out=/tmp/mongodump
+tar czf embers-dump.tar.gz -C /tmp/mongodump embers_production
+
+# 2. Place the file
+cp embers-dump.tar.gz dev/db/
+
+# 3. Import into local MongoDB
+tar xzf dev/db/embers-dump.tar.gz -C /tmp
+mongorestore --db=embers_production /tmp/embers_production --drop
+```
+
+### What it contains
+
+| Collection | Used by | Dev relevance |
+|------------|---------|---------------|
+| `users` | Embers (owner) | `email`, `encrypted_password`, `salt` — needed to test auth (MU-1) |
+| `categories` | Embers (owner) | Category list for auto-assignment |
+| `expenses` | Both | Existing expenses for testing queries and dedup |
+| `sessions` | Embers (owner) | Session tokens — needed to test session validation |
+| `curve_configs` | Curve Sync | IMAP config per user |
+| `curve_logs` | Curve Sync | Audit trail |
+
+### Important
+
+- The data is test/bogus accounts — safe to track in git
+- The `MONGODB_URI` in `server/.env` should point to the local instance where the dump was restored
+- The `users` collection contains `encrypted_password` and `salt` fields using the Embers custom SHA-256 hash: `SHA256("password--salt")` — this is what MU-1 auth will validate against
+
 ## API Endpoints (Target)
 
 - `GET/POST /api/expenses` — List and create expenses
