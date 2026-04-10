@@ -125,7 +125,7 @@ router.get('/sync/status', async (req, res) => {
   try {
     const config = await CurveConfig.findOne({ user_id: req.userId }).lean();
     res.json({
-      running: isSyncing(),
+      running: config ? isSyncing(config._id) : false,
       config_is_syncing: Boolean(config?.is_syncing),
       last_sync_at: config?.last_sync_at ?? null,
       last_sync_status: config?.last_sync_status ?? null,

@@ -58,20 +58,23 @@ const PARSE_ERROR_CIRCUIT_BREAKER = 10;
  */
 const MAX_ERROR_DETAIL = 2000;
 
-// ---------- In-memory concurrency lock ----------
+// ---------- In-memory concurrency lock (per-config) ----------
 //
-// Single-process serialization: prevents `POST /api/curve/sync`
-// landing on top of a scheduler-triggered run (or vice versa). This
-// is an interim measure — Phase 5 either promotes it to a Mongo-level
-// lock (for multi-process deployments) or leans on node-cron's own
-// single-process guarantee. Intentionally module-level so every
-// caller shares the same state.
+// Prevents overlapping syncs for the SAME config while allowing
+// different users to sync in parallel. Each entry is a config._id
+// string. The route layer and scheduler check this before calling
+// syncEmails(). Intentionally module-level so every caller shares
+// the same state.
 
-let running = false;
+const running = new Set();
 
-/** @returns {boolean} true iff a sync is currently executing */
-export function isSyncing() {
-  return running;
+/**
+ * @param {string} [configId] - If provided, checks whether that
+ *   specific config is syncing. If omitted, returns true if ANY
+ *   sync is running (useful for global status checks).
+ */
+export function isSyncing(configId) {
+  return configId ? running.has(String(configId)) : running.size > 0;
 }
 
 /**
@@ -195,8 +198,9 @@ export async function syncEmails({ config, reader, dryRun = false }) {
   if (!config?.user_id) throw new Error('syncEmails: config.user_id required');
   if (!reader) throw new Error('syncEmails: reader required');
 
-  if (running) throw new SyncConflictError();
-  running = true;
+  const configKey = String(config._id);
+  if (running.has(configKey)) throw new SyncConflictError();
+  running.add(configKey);
 
   const startedAt = Date.now();
   const summary = {
@@ -520,7 +524,7 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       }
     }
 
-    running = false;
+    running.delete(configKey);
   }
 
   return summary;
