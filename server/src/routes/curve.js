@@ -13,8 +13,14 @@ import {
   stopScheduler,
   getSchedulerStatus,
 } from '../services/scheduler.js';
+import { encrypt, decrypt } from '../services/crypto.js';
 
 const router = Router();
+
+/** Decrypt the IMAP password in a config object for use by ImapReader. */
+function withDecryptedPassword(configObj) {
+  return { ...configObj, imap_password: decrypt(configObj.imap_password) };
+}
 
 // GET /api/curve/config
 // Returns the authenticated user's CurveConfig plus a synthetic `email`
@@ -45,7 +51,9 @@ router.put('/config', async (req, res) => {
     } = req.body;
 
     const update = {
-      imap_server, imap_port, imap_username, imap_password, imap_tls,
+      imap_server, imap_port, imap_username,
+      imap_password: imap_password ? encrypt(imap_password) : undefined,
+      imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
       imap_since: imap_since ? new Date(imap_since) : null,
       max_emails_per_run: max_emails_per_run != null ? Number(max_emails_per_run) : undefined,
@@ -85,9 +93,10 @@ router.post('/sync', async (req, res) => {
         error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
       });
     }
-    const reader = new ImapReader(config.toObject());
+    const plainConfig = withDecryptedPassword(config.toObject());
+    const reader = new ImapReader(plainConfig);
     const summary = await syncEmails({
-      config: config.toObject(),
+      config: plainConfig,
       reader,
       dryRun,
     });
@@ -153,7 +162,7 @@ router.post('/test-connection', async (req, res) => {
         error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
       });
     }
-    const { folders } = await testConnection(config);
+    const { folders } = await testConnection(withDecryptedPassword(config));
     res.json({
       message: `Ligação OK. ${folders.length} pastas disponíveis no servidor.`,
       folders,
