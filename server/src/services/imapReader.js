@@ -198,6 +198,14 @@ export class ImapReader {
       // Be kind to the server: don't retry silently on disconnect.
       disableAutoIdle: true,
     });
+    // ImapFlow emits 'error' events on the underlying socket (e.g.
+    // ETIMEOUT, ECONNRESET). If nobody listens, Node.js crashes the
+    // process with "Unhandled 'error' event". This handler converts
+    // the event into a stored error that the next operation picks up
+    // via classifyError — no crash, no swallowed failure.
+    this.client.on('error', (err) => {
+      this._socketError = err;
+    });
     this.folderOpen = false;
   }
 
@@ -316,9 +324,9 @@ export class ImapReader {
   }
 
   /**
-   * Mark a message as \Seen. The orchestrator calls this ONLY after a
-   * successful insert (or confirmed duplicate) — parse errors leave the
-   * message UNSEEN so a future sync can retry it.
+   * Mark a single message as \Seen. Kept for the duck-typing contract
+   * (FixtureReader also has `markSeen`), but the orchestrator now
+   * prefers `markSeenBatch` to avoid per-email IMAP round-trips.
    */
   async markSeen(uid) {
     try {
@@ -332,6 +340,38 @@ export class ImapReader {
         code: 'FLAG',
         cause: e,
       });
+    }
+  }
+
+  /**
+   * Mark multiple messages as \Seen in a single IMAP STORE command.
+   *
+   * This is the primary markSeen path for the orchestrator — instead
+   * of 61 sequential round-trips (one per email, ~1.5 s each on the
+   * Pi via email-oauth2-proxy), we accumulate UIDs during the loop
+   * and issue one `UID STORE <uid1,uid2,...> +FLAGS (\Seen)` at the
+   * end. Total IMAP time drops from ~90 s to ~1 s.
+   *
+   * If the batch fails, the emails stay UNSEEN — the next sync will
+   * re-fetch them, hit the digest unique index, land as `duplicate`,
+   * and retry markSeen from the duplicate branch. This is the same
+   * recovery invariant the single-UID path relies on.
+   *
+   * @param {number[]} uids - array of message UIDs to mark
+   */
+  async markSeenBatch(uids) {
+    if (!uids || uids.length === 0) return;
+    try {
+      await this.client.messageFlagsAdd(
+        { uid: uids.join(',') },
+        ['\\Seen'],
+        { uid: true },
+      );
+    } catch (e) {
+      throw new ImapError(
+        `could not mark ${uids.length} messages as seen: ${e.message}`,
+        { code: 'FLAG', cause: e },
+      );
     }
   }
 

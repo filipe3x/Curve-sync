@@ -259,6 +259,13 @@ export async function syncEmails({ config, reader, dryRun = false }) {
   // Connect the reader. Any failure here is terminal for the whole
   // run — nothing to process, but we still have to update stats +
   // release the lock in `finally`.
+  // UIDs of emails that were successfully processed (ok or duplicate)
+  // and should be marked \Seen after the loop. Batching into a single
+  // IMAP STORE command avoids the N-round-trip timeout that killed the
+  // connection when markSeen was called per-email (~1.5 s × 61 emails
+  // on the Pi via email-oauth2-proxy). See imapReader.markSeenBatch().
+  const seenUids = [];
+
   let runError = null;
   try {
     await reader.connect();
@@ -389,7 +396,7 @@ export async function syncEmails({ config, reader, dryRun = false }) {
             amount: parsed.amount,
             digest: parsed.digest,
           });
-          await safeMarkSeen(reader, uid);
+          seenUids.push(uid);
           continue;
         }
         // ---- 4b. Any other error → log, leave UNSEEN for retry ----
@@ -423,7 +430,15 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         digest: parsed.digest,
         expense_id: expenseDoc._id,
       });
-      await safeMarkSeen(reader, uid);
+      seenUids.push(uid);
+    }
+
+    // Batch markSeen: one IMAP STORE for all successfully processed
+    // UIDs instead of N individual round-trips. If this fails, the
+    // emails stay UNSEEN → next sync re-fetches → all duplicate →
+    // retry markSeen. The recovery invariant holds.
+    if (seenUids.length > 0 && !dryRun) {
+      await safeMarkSeenBatch(reader, seenUids);
     }
 
     // The reader sets `capped = true` when it stopped yielding because
@@ -546,17 +561,39 @@ async function writeLog(entry) {
 
 /**
  * Mark an email as \Seen, swallowing any failure to a console warning.
- * The orchestrator deliberately does NOT treat markSeen failure as a
- * run-level error: the next sync will re-pick the email (still UNSEEN),
- * re-parse it, hit the digest unique index, fall into the duplicate
- * branch of `syncEmails`, and retry markSeen from there. This is the
- * recovery invariant the duplicate branch exists to support.
+ * Kept for the FixtureReader contract (no-op) and as a fallback. The
+ * main sync loop now uses `safeMarkSeenBatch` instead.
  */
 async function safeMarkSeen(reader, uid) {
   try {
     await reader.markSeen(uid);
   } catch (e) {
     console.warn(`syncEmails: markSeen(${uid}) failed: ${e.message}`);
+  }
+}
+
+/**
+ * Batch version of safeMarkSeen — one IMAP STORE for all UIDs.
+ *
+ * Falls back to per-UID markSeen if the reader doesn't support
+ * `markSeenBatch` (e.g. FixtureReader, which has a no-op `markSeen`).
+ * This keeps the duck-typing contract simple: only ImapReader needs
+ * to implement the batch method.
+ */
+async function safeMarkSeenBatch(reader, uids) {
+  if (typeof reader.markSeenBatch === 'function') {
+    try {
+      await reader.markSeenBatch(uids);
+    } catch (e) {
+      console.warn(
+        `syncEmails: markSeenBatch(${uids.length} uids) failed: ${e.message}`,
+      );
+    }
+  } else {
+    // Fallback for readers without batch support (FixtureReader).
+    for (const uid of uids) {
+      await safeMarkSeen(reader, uid);
+    }
   }
 }
 
