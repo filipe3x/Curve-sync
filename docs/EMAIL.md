@@ -1252,47 +1252,157 @@ independent of the picker itself:
 
 The main challenge for local development: **where do the test emails come from?**
 
-### Layer 1 — Parser with Fixtures (no network needed)
+### Testing workflow — current state
 
-**Goal**: Develop and validate `emailParser.js` in complete isolation.
+> **Scope warning:** The workflow below covers the **happy path** and
+> **duplicate handling** only. Edge cases like parse errors, circuit
+> breaker, concurrent 409, and capped runs are NOT exercised by these
+> scripts. See the "Untested branches" table at the end of this
+> section.
 
-1. Save 2-3 real Curve Card receipt HTML files in `server/test/fixtures/emails/`
-   - Get these from the Outlook365 mailbox (view source / export `.eml`)
-   - Sanitize any personal data if needed
-2. Write the parser against these fixtures
-3. Validate output matches what `curve.py` would produce for the same emails
-4. Cross-check digest output with `computeDigest()` from `expense.js`
+All commands assume `cd ~/Curve-sync` and `server/.env` pointing at
+`embers_db_dev`.
 
-**This is the fastest path to progress** — zero network dependency, instant feedback loop.
+#### Step 0 — Parser validation (zero Mongo, zero IMAP)
 
-### Layer 2 — IMAP Against Real or Test Account
+Verifies the cheerio parser against saved fixture files. No network,
+no database — fastest feedback loop.
 
-**Option A** (recommended): Use the real Outlook365 account with the "Curve Receipts" folder. It already has historical emails. Set credentials in `server/.env`.
+```bash
+# Ground-truth (regex-based, mirrors curve.py logic)
+node server/scripts/validate-fixtures.js
 
-**Option B**: Create a test IMAP account (Gmail with app password, or a service like Mailtrap/Ethereal) and forward/copy some real Curve emails there.
-
-```env
-# server/.env (dev)
-IMAP_SERVER=outlook.office365.com
-IMAP_PORT=993
-IMAP_USERNAME=your-email@outlook.com
-IMAP_PASSWORD=your-app-password
-IMAP_FOLDER=Curve Receipts
+# Production parser (cheerio) — output must match validate-fixtures
+node server/scripts/test-parser.js
 ```
 
-### Layer 3 — Orchestrator with Dry Run
+Expected: 5 fixtures, 0 parse_error, 0 fatal, identical digests.
 
-1. Wire parser + IMAP reader in the orchestrator
-2. Use `dry_run: true` flag — runs the full pipeline but:
-   - Does NOT insert expenses into MongoDB
-   - Does NOT mark emails as `\Seen`
-   - DOES create log entries (for debugging)
-3. Review logs to confirm everything works before going "live"
-4. Flip off dry run, test with a single email, verify expense appears in DB
+#### Step 1 — Orchestrator with FixtureReader (Mongo real, IMAP zero)
 
-### Layer 4 — Scheduler (final step)
+Exercises the full parse → digest → dedup → insert → log pipeline
+against real MongoDB but with zero IMAP traffic. Uses a dedicated
+`__fixture_test__` CurveConfig so production data is never touched.
 
-Only enable after the manual `POST /api/curve/sync` works reliably. Start with a long interval (e.g., 60 minutes) and reduce once stable.
+```bash
+# Clean up artefacts from previous fixture runs
+node server/scripts/cleanup-test-orchestrator.js
+
+# Three passes: dry run → real insert → re-run (all duplicates)
+node server/scripts/test-orchestrator.js
+```
+
+Expected output:
+```
+== dry run ==
+  total=5  ok=5  dup=0  parseErrors=0  errors=0  halted=false  dryRun=true
+
+== real insert (first run) ==
+  total=5  ok=5  dup=0  parseErrors=0  errors=0  halted=false  dryRun=false
+
+== real insert (re-run) ==
+  total=5  ok=0  dup=5  parseErrors=0  errors=0  halted=false  dryRun=false
+
+PASSED
+```
+
+What this proves:
+- Dry run path: parser runs, `Expense.exists()` check, zero writes
+- Real insert: `Expense.create()` succeeds, CurveLog with status=ok
+- Duplicate handling: digest unique index → status=duplicate, no new rows
+- FixtureReader canary: `last_email_at` stays null (fixtures don't
+  count as real email for the silent-failure canary)
+- Config stats: `last_sync_status=ok`, `is_syncing=false`
+
+#### Step 2 — IMAP dry run (real connection, zero writes)
+
+Tests the full IMAP pipeline (connect → fetch → parse → digest check)
+but without inserting Expenses or marking emails as `\Seen`.
+
+```bash
+# Verify config: folder, confirmed_at, safety net fields
+curl -s http://localhost:3001/api/curve/config \
+  | jq '{folder: .data.imap_folder, confirmed: .data.imap_folder_confirmed_at, since: .data.imap_since, cap: .data.max_emails_per_run}'
+
+# Test IMAP connection + list available folders
+curl -s http://localhost:3001/api/curve/test-connection -X POST | jq
+
+# Dry run — counts emails, zero side effects
+curl -s 'http://localhost:3001/api/curve/sync?dry_run=1' -X POST | jq '{message, summary}'
+```
+
+Expected: `parseErrors=0`, `errors=0`, `total` = number of UNSEEN
+emails within the `imap_since` window (default 31 days). `capped`
+should be `false` unless there are >500 emails in that window.
+
+#### Step 3 — Real sync
+
+```bash
+# First run: inserts Expenses + marks emails \Seen
+curl -s http://localhost:3001/api/curve/sync -X POST | jq '{message, summary}'
+
+# Second run: must return total=0 (everything is \Seen)
+curl -s http://localhost:3001/api/curve/sync -X POST | jq '{message, summary}'
+```
+
+Expected first run: `ok + duplicates = total`, `errors=0`.
+Expected second run: `total=0`, everything else zero.
+
+The frontend "Sincronizar agora" button on the Dashboard does the
+same thing as the first curl (POST /sync without dry_run).
+
+#### Step 4 — Full reset (re-test from scratch)
+
+Two scripts undo everything from step 3 so the sync can be re-run
+cleanly. Always run in this order:
+
+```bash
+# 1. Wipe Mongo data (Expenses + CurveLogs + config stats)
+#    Shows a briefing with counts and sample data before asking y/N
+node server/scripts/cleanup-sync.js
+
+# 2. Unmark emails on IMAP (Seen → Unseen)
+#    Shows count of SEEN vs UNSEEN before asking y/N
+node server/scripts/reset-seen.js
+
+# 3. Verify clean state
+curl -s 'http://localhost:3001/api/curve/sync?dry_run=1' -X POST | jq '.summary.total'
+```
+
+After this, steps 2-3 can be re-run as if it were a first-time sync.
+
+**Important:** `cleanup-sync.js` only deletes Expenses that are
+linked via `CurveLog.expense_id` — it never touches expenses created
+by other means (manual entries, Embers Python pipeline). The
+`__fixture_test__` config artefacts are NOT cleaned by this script —
+use `cleanup-test-orchestrator.js` for those.
+
+#### Scripts summary
+
+| Script | Touches Mongo | Touches IMAP | Needs confirmation |
+|--------|:---:|:---:|:---:|
+| `validate-fixtures.js` | — | — | — |
+| `test-parser.js` | — | — | — |
+| `test-orchestrator.js` | writes | — | — |
+| `cleanup-test-orchestrator.js` | deletes | — | — |
+| `cleanup-sync.js` | deletes | — | y/N |
+| `reset-seen.js` | reads | writes | y/N |
+
+#### Untested branches
+
+These edge cases are NOT covered by the scripts above. They can be
+triggered manually but there are no automated test scripts for them
+yet.
+
+| Branch | How to trigger manually | Risk if untested |
+|--------|------------------------|------------------|
+| Parse error | Add a corrupt file to `test/fixtures/emails/` and run `test-orchestrator.js` | Low — leaves UNSEEN for retry |
+| Circuit breaker (10 parse errors) | Add 10+ corrupt fixtures | Low — only fires on template change |
+| `capped = true` | Set `max_emails_per_run: 3` via mongosh, run sync | Low — verified by code review |
+| SyncConflictError 409 | Two simultaneous `curl POST /sync` | Low — in-memory lock, trivial |
+| FOLDER error + auto-invalidation | Set `imap_folder` to a non-existent folder, run sync | Tested manually (was the original bug) |
+| Socket timeout recovery | Kill email-oauth2-proxy mid-sync | Medium — fixed by error handler + batch markSeen |
+| Auth failure | Set wrong password, run sync | Low — classifyError regex covers it |
 
 ---
 
