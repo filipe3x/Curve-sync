@@ -409,7 +409,7 @@ export class ImapReader {
  * @returns {Promise<{ folders: string[] }>}
  * @throws {ImapError} on any failure (caller maps `code` to HTTP status)
  */
-export async function testConnection(config, { timeoutMs = 15_000 } = {}) {
+export async function testConnection(config, { timeoutMs = 10_000 } = {}) {
   const reader = new ImapReader(config);
   const timer = new Promise((_, reject) =>
     setTimeout(() => reject(new ImapError(

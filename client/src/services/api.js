@@ -59,7 +59,7 @@ export const updateCurveConfig = (data) =>
   request('/curve/config', { method: 'PUT', body: JSON.stringify(data) });
 
 export const testConnection = () =>
-  request('/curve/test-connection', { method: 'POST', timeoutMs: 20_000 });
+  request('/curve/test-connection', { method: 'POST', timeoutMs: 15_000 });
 
 // Curve Sync
 export const triggerSync = (params) =>

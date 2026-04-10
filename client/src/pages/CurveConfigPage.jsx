@@ -222,7 +222,11 @@ export default function CurveConfigPage() {
                 type={type ?? 'text'}
                 value={form[key] ?? ''}
                 onChange={(e) => handleChange(key, e.target.value)}
-                placeholder={placeholder}
+                placeholder={
+                  key === 'imap_password' && form.has_imap_password && !form.imap_password
+                    ? 'password guardada — deixa vazio para manter'
+                    : placeholder
+                }
                 className="input"
               />
               {help && (

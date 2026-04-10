@@ -32,7 +32,12 @@ router.get('/config', async (req, res) => {
     if (!data) return res.json({ data: {} });
 
     const user = await User.findById(req.userId).select('email').lean();
-    res.json({ data: { ...data, email: user?.email ?? null } });
+    // Never send the encrypted password to the frontend — only a boolean
+    // flag so the UI can show "password saved" vs empty.
+    const { imap_password, ...safe } = data;
+    safe.has_imap_password = Boolean(imap_password);
+    safe.email = user?.email ?? null;
+    res.json({ data: safe });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
