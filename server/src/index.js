@@ -15,7 +15,9 @@ import { startScheduler } from './services/scheduler.js';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+// CORS — restrict to CORS_ORIGIN in production, open in development
+const corsOrigin = process.env.CORS_ORIGIN;
+app.use(cors(corsOrigin ? { origin: corsOrigin.split(','), credentials: true } : {}));
 app.use(express.json());
 
 // Rate limiting — strict on login, relaxed on general API
