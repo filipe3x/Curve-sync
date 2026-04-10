@@ -13,7 +13,7 @@ router.get('/:field', async (req, res) => {
   }
 
   try {
-    const values = await Expense.distinct(field);
+    const values = await Expense.distinct(field, { user_id: req.userId });
     res.json({ data: values.filter(Boolean).sort() });
   } catch (err) {
     res.status(500).json({ error: err.message });

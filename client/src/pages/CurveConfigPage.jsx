@@ -1,21 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import PageHeader from '../components/common/PageHeader';
+import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 
 // Text fields only. `imap_folder` is rendered separately as a state-aware
 // <select> so the user can't typo a folder path into existence — see
 // docs/EMAIL.md → Config UX for the full rationale.
 const FIELDS = [
-  {
-    key: 'email',
-    label: 'Email Embers',
-    placeholder: 'email@example.com',
-    type: 'email',
-    help:
-      'Email da conta Embers (NÃO é o email associado ao Curve Pay). ' +
-      'O backend procura o utilizador Embers pelo email (que é único) ' +
-      'e liga o CurveConfig ao respectivo user_id.',
-  },
   {
     key: 'imap_server',
     label: 'Servidor IMAP',
@@ -27,7 +18,14 @@ const FIELDS = [
     placeholder: '993 (direto) / 1993 (proxy)',
     type: 'number',
   },
-  { key: 'imap_username', label: 'Utilizador', placeholder: 'email@example.com' },
+  {
+    key: 'imap_username',
+    label: 'Email Curve Pay',
+    placeholder: 'email@example.com',
+    help:
+      'O email da conta que recebe os recibos do Curve Pay (Curve Receipts). ' +
+      'É este email que o IMAP vai consultar para importar despesas.',
+  },
   {
     key: 'imap_password',
     label: 'Password IMAP',
@@ -40,7 +38,9 @@ const FIELDS = [
       '(proxy localhost): cola a encryption password do emailproxy.config ' +
       'do email-oauth2-proxy.',
   },
-  { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number' },
+  { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number',
+    help: 'De quantos em quantos minutos o sync automático verifica emails novos no servidor IMAP. Default: 5 minutos.',
+  },
 ];
 
 // Debounce window for the folder dropdown auto-save. Short enough to feel
@@ -49,9 +49,11 @@ const FIELDS = [
 const FOLDER_AUTOSAVE_MS = 300;
 
 export default function CurveConfigPage() {
+  const { user } = useAuth();
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState(null);
   // Folders loaded from POST /test-connection. Empty until the user
   // clicks "Testar ligação" — no auto-fetch on mount (see docs/EMAIL.md
@@ -80,13 +82,6 @@ export default function CurveConfigPage() {
   const handleSave = async (e) => {
     e.preventDefault();
     setMessage(null);
-    // Guard: the backend requires `email` to resolve the user_id that
-    // scopes this config. Catch the empty case client-side so we don't
-    // round-trip just to get a 400.
-    if (!form.email?.trim()) {
-      setMessage({ type: 'error', text: 'Preenche o campo "Email Embers" antes de guardar.' });
-      return;
-    }
     setSaving(true);
     try {
       await api.updateCurveConfig(form);
@@ -119,12 +114,6 @@ export default function CurveConfigPage() {
     (nextFolder) => {
       if (folderSaveTimer.current) clearTimeout(folderSaveTimer.current);
       folderSaveTimer.current = setTimeout(async () => {
-        if (!form.email?.trim()) {
-          // Can't PUT without email — the backend would 400. Stay silent
-          // here because the main Guardar button will surface the same
-          // message when the user tries to save.
-          return;
-        }
         setFolderSaving(true);
         try {
           await api.updateCurveConfig({
@@ -153,10 +142,6 @@ export default function CurveConfigPage() {
   // "Manter INBOX" dismiss: confirm the current value (typically INBOX)
   // without opening the dropdown or requiring a folder list fetch.
   const handleDismissBanner = async () => {
-    if (!form.email?.trim()) {
-      setMessage({ type: 'error', text: 'Preenche o campo "Email Embers" antes de guardar.' });
-      return;
-    }
     setFolderSaving(true);
     try {
       await api.updateCurveConfig({
@@ -214,18 +199,68 @@ export default function CurveConfigPage() {
         </div>
 
         <div className="grid gap-5">
+          {/* Read-only: authenticated user's Embers account */}
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-sand-500">
+              Conta Embers
+            </span>
+            <input
+              type="email"
+              value={user?.email ?? ''}
+              disabled
+              className="input bg-sand-50 text-sand-500"
+            />
+            <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
+              Conta com que fizeste login. As despesas importadas
+              ficam associadas a este utilizador. Não é necessariamente
+              o email que recebe os recibos do Curve Pay.
+            </span>
+          </label>
           {FIELDS.map(({ key, label, placeholder, type, help }) => (
             <label key={key} className="block">
               <span className="mb-1.5 block text-xs font-medium text-sand-500">
                 {label}
               </span>
-              <input
-                type={type ?? 'text'}
-                value={form[key] ?? ''}
-                onChange={(e) => handleChange(key, e.target.value)}
-                placeholder={placeholder}
-                className="input"
-              />
+              {key === 'imap_password' ? (
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={form[key] ?? ''}
+                    onChange={(e) => handleChange(key, e.target.value)}
+                    placeholder={
+                      form.has_imap_password && !form.imap_password
+                        ? 'password guardada — deixa vazio para manter'
+                        : placeholder
+                    }
+                    className="input pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    className="absolute inset-y-0 right-0 flex items-center pr-3 text-sand-400 hover:text-curve-600 transition-colors"
+                    tabIndex={-1}
+                  >
+                    {showPassword ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12c1.292 4.338 5.31 7.5 10.066 7.5.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <input
+                  type={type ?? 'text'}
+                  value={form[key] ?? ''}
+                  onChange={(e) => handleChange(key, e.target.value)}
+                  placeholder={placeholder}
+                  className="input"
+                />
+              )}
               {help && (
                 <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
                   {help}
@@ -334,14 +369,20 @@ export default function CurveConfigPage() {
           </label>
 
           {/* Sync enabled toggle */}
-          <label className="flex items-center gap-3">
+          <label className="flex items-start gap-3">
             <input
               type="checkbox"
               checked={form.sync_enabled ?? false}
               onChange={(e) => handleChange('sync_enabled', e.target.checked)}
-              className="h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
+              className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
             />
-            <span className="text-sm text-sand-700">Sincronização automática activa</span>
+            <span className="text-sm text-sand-700">
+              Sincronização automática activa
+              <span className="mt-0.5 block text-xs text-sand-500">
+                Se activa, o servidor verifica automaticamente emails novos no intervalo definido acima.
+                Se desligada, a importação só corre quando clicares em «Sincronizar» manualmente.
+              </span>
+            </span>
           </label>
         </div>
 

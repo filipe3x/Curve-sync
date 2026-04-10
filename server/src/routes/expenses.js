@@ -9,7 +9,7 @@ const router = Router();
 router.get('/', async (req, res) => {
   try {
     const { page = 1, limit = 20, sort = '-date', search } = req.query;
-    const filter = {};
+    const filter = { user_id: req.userId };
     if (search) {
       const regex = new RegExp(search, 'i');
       filter.$or = [{ entity: regex }, { card: regex }];
@@ -45,7 +45,7 @@ router.get('/', async (req, res) => {
 // POST /api/expenses
 router.post('/', async (req, res) => {
   try {
-    const { entity, amount, date, card, user_id } = req.body;
+    const { entity, amount, date, card } = req.body;
     const digest = computeDigest({ entity, amount, date, card });
     const category_id = await assignCategory(entity);
 
@@ -55,7 +55,7 @@ router.post('/', async (req, res) => {
       date,
       card,
       digest,
-      user_id,
+      user_id: req.userId,
       category_id,
     });
 

@@ -26,15 +26,8 @@ Dropdown de pasta IMAP populado pelo servidor (POST /test-connection), com banne
 
 - **Implementado:** `CurveConfigPage.jsx`, `CurveConfig.imap_folder_confirmed_at`
 
-### 1.5 Sincronização automática (node-cron)
-Activar o scheduler com `node-cron` para executar o sync periodicamente conforme o intervalo definido em `curve_configs.sync_interval_minutes`. Incluir lock para impedir execuções simultâneas.
-
-- **Destino:** `server/src/services/scheduler.js`
-
-### 1.6 Autenticação / Scoping por utilizador
-Actualmente a config é single-user (retorna a primeira `CurveConfig`). Implementar identificação do utilizador (API key, token, ou sessão) e fazer scoping de todas as queries por `user_id`.
-
-- **Afecta:** Todos os routes (`expenses`, `curve/*`, `autocomplete`)
+### 1.5 Autenticação e Multi-User Support
+→ Ver **secção dedicada "Multi-User Support"** abaixo — detalha 5 fases desde auth middleware até scheduler per-user.
 
 ---
 
@@ -109,11 +102,107 @@ Na página de Logs, permitir re-trigger do parsing para logs com status `parse_e
 
 ---
 
+## Multi-User Support
+
+Secção dedicada à evolução de single-user para multi-user. Substitui os antigos items 1.5/1.6.
+
+### Estado actual
+
+| Camada | Multi-user pronto? | Notas |
+|--------|-------------------|-------|
+| **Schemas (modelos)** | ✅ Sim | `user_id` required em `Expense`, `CurveConfig` (unique), `CurveLog` |
+| **Sync Orchestrator** | ✅ Sim | Recebe `config.user_id`, valida-o, usa-o em todos os writes; lock per-user via `Set` |
+| **Routes (API)** | ✅ Sim | Todos os endpoints filtram por `req.userId` via middleware authenticate |
+| **Auth middleware** | ✅ Sim | Bearer token → Session lookup → `req.userId`; session expiry 1 dia |
+| **Frontend** | ✅ Sim | AuthContext, LoginPage, ProtectedRoute, 401 auto-logout |
+| **Cron/Scheduler** | ✅ Sim | `node-cron` itera configs com `sync_enabled: true`; auto-start no boot |
+| **Hardening** | ✅ Sim | AES-256-GCM para IMAP passwords, rate limiting, CORS, audit logging |
+
+### MU-1 — Auth Foundation (backend)
+
+Criar a camada de autenticação. Opção escolhida: **login próprio replicando o hash SHA-256 do Embers** (ver `docs/AUTH.md` Opção 1).
+
+- [x] **Modelo Session** — `server/src/models/Session.js` (read-write, `strict: false`, collection `sessions`)
+- [x] **Actualizar modelo User** — campos `encrypted_password` e `salt` (read-only)
+- [x] **Serviço auth** — `server/src/services/auth.js` com `sha256()` e `verifyPassword(password, salt, encryptedPassword)`
+- [x] **Middleware authenticate** — `server/src/middleware/auth.js`: extrai Bearer token → lookup Session → define `req.userId`
+- [x] **Routes auth** — `server/src/routes/auth.js`: `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+
+**Dependências:** Nenhuma — pode ser desenvolvido de forma independente.
+**Referência:** `docs/AUTH.md` (código quasi-pronto para cada peça).
+
+### MU-2 — Route Scoping (backend)
+
+Aplicar o middleware `authenticate` a todas as routes e fazer scoping por `req.userId`.
+
+- [x] **GET /api/expenses** — `{ user_id: req.userId }` no filter
+- [x] **POST /api/expenses** — usa `req.userId` em vez de `req.body.user_id`
+- [x] **GET /api/curve/config** — `CurveConfig.findOne({ user_id: req.userId })`
+- [x] **PUT /api/curve/config** — `findOneAndUpdate({ user_id: req.userId }, ...)`; email→user lookup removido
+- [x] **POST /api/curve/sync** — `CurveConfig.findOne({ user_id: req.userId })`
+- [x] **GET /api/curve/sync/status** — idem
+- [x] **POST /api/curve/test-connection** — idem
+- [x] **GET /api/curve/logs** — `CurveLog.find({ user_id: req.userId })`; suporta `?type=audit|sync`
+- [x] **GET /api/autocomplete/:field** — `Expense.distinct(field, { user_id: req.userId })`
+
+**Dependências:** MU-1 (middleware authenticate).
+
+### MU-3 — Frontend Auth
+
+Adicionar login/logout e protecção de rotas no frontend.
+
+- [x] **AuthContext** — `client/src/contexts/AuthContext.jsx`: estado `user`/`token`, persist em `localStorage`, `login()`/`logout()`
+- [x] **API interceptor** — `client/src/services/api.js`: `Authorization: Bearer <token>` em todos os pedidos; 401 → auto-logout via custom event
+- [x] **LoginPage** — `client/src/pages/LoginPage.jsx`: form email + password → `POST /api/auth/login`
+- [x] **ProtectedRoute** — wrapper em `App.jsx` que redireciona para `/login` se não autenticado
+- [x] **App.jsx** — routes envolvidas em AuthContext + ProtectedRoute
+- [x] **Layout** — email do utilizador + role na sidebar; botão logout
+
+**Dependências:** MU-1 (endpoints auth), MU-2 (routes protegidas retornam 401 sem token).
+
+### MU-4 — Per-User Sync e Scheduler
+
+Tornar o sync concorrente entre utilizadores e implementar o cron scheduler.
+
+- [x] **Lock per-user** — `syncOrchestrator.js`: `const running = new Set()` de `config._id`; `running.has()` / `running.add()` / `running.delete()`
+- [x] **Unique index composto** — `{ digest: 1, user_id: 1 }` em `Expense` (mantém compatibilidade com curve.py)
+- [x] **Scheduler** — `server/src/services/scheduler.js`: `node-cron` 5min; itera configs com `sync_enabled: true`; skip se lock activo
+- [x] **Routes scheduler** — `POST start`, `POST stop`, `GET status`
+- [x] **Arranque automático** — scheduler inicia no boot se existirem configs com `sync_enabled: true`
+
+**Dependências:** MU-2 (routes scoped); MU-1 (auth para rotas admin).
+
+### MU-5 — Hardening
+
+Segurança e robustez para ambiente multi-user em produção.
+
+- [x] **Encriptação IMAP passwords** — AES-256-GCM at rest; decrypt on-the-fly para IMAP; chave em `IMAP_ENCRYPTION_KEY`; backwards-compat com plaintext
+- [x] **Rate limiting** — `express-rate-limit`: login 10/15min, sync 3/min, API 100/min
+- [x] **Session expiry** — TTL 1 dia via `expires_at` + lazy cleanup no middleware (sem TTL index — collection partilhada com Embers)
+- [x] **Audit logging** — login/logout/session_expired/config_updated/password_changed/sync_manual → `curve_logs` com IP; `?type=audit` filter
+- [x] **CORS restritivo** — `CORS_ORIGIN` env var; lista de origens separadas por vírgula
+
+**Dependências:** MU-1 a MU-4 concluídas.
+
+### Impacto nos recursos do servidor
+
+| Recurso | Impacto (5–20 users) | Mitigação |
+|---------|----------------------|-----------|
+| Conexões IMAP | 1 conexão por sync (~10-30s cada); serializado = sem pico | Scheduler sequencial (FIFO) |
+| Memória | `async *fetchUnseen()` já é generator — 1 email de cada vez | Nenhuma mudança necessária |
+| MongoDB | 1× `Category.find()` cache por run + N inserts | Negligível |
+| CPU (cheerio) | ~1-5ms por email parse | Negligível |
+| Cron overhead | 1 timer `node-cron` + iteração por configs | Zero overhead extra vs single-user |
+
+**Para 100+ users (improvável):** promover para BullMQ + Redis (queue com 2-3 workers concorrentes) e lock Mongo-level (`findOneAndUpdate` atómico em `is_syncing`).
+
+---
+
 ## Decisões técnicas em aberto
 
 | Questão | Opções | Notas |
 |---------|--------|-------|
-| Autenticação | API key simples vs JWT vs sessão partilhada com Embers | API key é o mais simples; JWT permite expansão futura |
+| ~~Autenticação~~ | ~~API key simples vs JWT vs sessão partilhada com Embers~~ | **Decidido:** Login próprio com SHA-256 do Embers (Opção 1 do `AUTH.md`) |
 | IMAP library | `imapflow` vs `node-imap` | `imapflow` é mais moderno e mantido |
 | Scheduler | `node-cron` (in-process) vs `bull` + Redis (queue) | `node-cron` suficiente para single-instance; `bull` se precisar de retry/concurrency |
 | Password encryption | `crypto.createCipheriv` (AES-256-GCM) | Chave de encriptação em variável de ambiente |

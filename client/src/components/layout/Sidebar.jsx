@@ -1,9 +1,11 @@
 import { NavLink } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 import {
   HomeIcon,
   BanknotesIcon,
   CogIcon,
   ClipboardDocumentListIcon,
+  ArrowRightOnRectangleIcon,
 } from './Icons';
 
 const links = [
@@ -14,6 +16,8 @@ const links = [
 ];
 
 export default function Sidebar() {
+  const { user, logout } = useAuth();
+
   return (
     <aside className="flex w-64 flex-col border-r border-sand-200 bg-white">
       {/* Brand */}
@@ -47,9 +51,23 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer */}
-      <div className="border-t border-sand-200 px-6 py-4">
-        <p className="text-xs text-sand-400">Curve Sync v1.0</p>
+      {/* User + Logout */}
+      <div className="border-t border-sand-200 px-4 py-4">
+        <div className="flex items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="truncate text-sm font-medium text-sand-800">
+              {user?.email}
+            </p>
+            <p className="text-xs text-sand-400">{user?.role}</p>
+          </div>
+          <button
+            onClick={logout}
+            title="Terminar sessão"
+            className="rounded-lg p-1.5 text-sand-400 transition-colors hover:bg-sand-100 hover:text-sand-700"
+          >
+            <ArrowRightOnRectangleIcon className="h-5 w-5" />
+          </button>
+        </div>
       </div>
     </aside>
   );

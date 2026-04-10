@@ -1,16 +1,46 @@
 const BASE = '/api';
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
+  const token = localStorage.getItem('token');
+  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const { timeoutMs, ...fetchOpts } = options;
+  let signal = fetchOpts.signal;
+  let controller;
+  if (timeoutMs && !signal) {
+    controller = new AbortController();
+    signal = controller.signal;
+    setTimeout(() => controller.abort(), timeoutMs);
+  }
+
+  let res;
+  try {
+    res = await fetch(`${BASE}${path}`, { ...fetchOpts, headers, signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('Pedido expirou — o servidor não respondeu a tempo.');
+    }
+    throw err;
+  }
+
+  if (res.status === 401 && !path.startsWith('/auth/')) {
+    window.dispatchEvent(new Event('auth:logout'));
+    throw new Error('Sessão expirada.');
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Request failed: ${res.status}`);
   }
   return res.json();
 }
+
+// Auth
+export const login = (data) =>
+  request('/auth/login', { method: 'POST', body: JSON.stringify(data) });
 
 // Expenses
 export const getExpenses = (params) =>
@@ -29,11 +59,14 @@ export const updateCurveConfig = (data) =>
   request('/curve/config', { method: 'PUT', body: JSON.stringify(data) });
 
 export const testConnection = () =>
-  request('/curve/test-connection', { method: 'POST' });
+  request('/curve/test-connection', { method: 'POST', timeoutMs: 15_000 });
 
 // Curve Sync
-export const triggerSync = () =>
-  request('/curve/sync', { method: 'POST' });
+export const triggerSync = (params) =>
+  request(`/curve/sync${params ? '?' + new URLSearchParams(params) : ''}`, {
+    method: 'POST',
+    timeoutMs: 120_000,
+  });
 
 // Curve Logs
 export const getCurveLogs = (params) =>

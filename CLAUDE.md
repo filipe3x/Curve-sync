@@ -99,6 +99,71 @@ Key documentation:
 - `docs/MONGODB_SCHEMA.md` — Complete schema with Mongoose equivalents, relationships, indexes, and consistency rules
 - `docs/expense-tracking.md` — Full system documentation including savings score, monthly cycle logic, TODOs, and proposed standalone architecture
 
+## Dev Database
+
+A full MongoDB dump of the shared Embers database can be placed at `dev/db/embers-dump.tar.gz` for local development. The data is bogus/test accounts — safe to commit.
+
+### Setup
+
+```bash
+# 1. Export (on the server running MongoDB)
+mongodump --db=embers_db_dev --out=/tmp/mongodump
+tar czf embers-dump.tar.gz -C /tmp/mongodump embers_db_dev
+
+# 2. Place the file
+cp embers-dump.tar.gz dev/db/
+
+# 3. Import into local MongoDB
+tar xzf dev/db/embers-dump.tar.gz -C /tmp
+mongorestore --db=embers_db_dev /tmp/embers_db_dev --drop
+```
+
+### What it contains
+
+| Collection | Used by | Dev relevance |
+|------------|---------|---------------|
+| `users` | Embers (owner) | `email`, `encrypted_password`, `salt` — needed to test auth (MU-1) |
+| `categories` | Embers (owner) | Category list for auto-assignment |
+| `expenses` | Both | Existing expenses for testing queries and dedup |
+| `sessions` | Embers (owner) | Session tokens — needed to test session validation |
+| `curve_configs` | Curve Sync | IMAP config per user |
+| `curve_logs` | Curve Sync | Audit trail |
+
+### Inspecting BSON files without MongoDB
+
+When `mongorestore` is not available, inspect `.bson` files directly via the `bson` npm package:
+
+```bash
+npm install --no-save bson
+tar xzf dev/db/embers-dump.tar.gz -C /tmp
+```
+
+```javascript
+const fs = require('fs');
+const { BSON } = require('bson');
+
+function readBson(file) {
+  const buf = fs.readFileSync(file);
+  const docs = [];
+  let offset = 0;
+  while (offset < buf.length) {
+    const size = buf.readInt32LE(offset);
+    docs.push(BSON.deserialize(buf.slice(offset, offset + size)));
+    offset += size;
+  }
+  return docs;
+}
+
+const users = readBson('/tmp/embers_db_dev/users.bson');
+console.log(users);
+```
+
+### Important
+
+- The data is test/bogus accounts — safe to track in git
+- The `MONGODB_URI` in `server/.env` should point to the local instance where the dump was restored
+- The `users` collection contains `encrypted_password` and `salt` fields using the Embers custom SHA-256 hash: `SHA256("password--salt")` — this is what MU-1 auth will validate against
+
 ## API Endpoints (Target)
 
 - `GET/POST /api/expenses` — List and create expenses

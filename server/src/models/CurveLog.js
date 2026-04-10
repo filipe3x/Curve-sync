@@ -14,6 +14,13 @@ const curveLogSchema = new mongoose.Schema(
     // from real syncs. Dry runs still write CurveLog entries for visibility, but
     // the audit UI should filter them out of normal views by default.
     dry_run: { type: Boolean, default: false },
+    // Audit logging fields (MU-5). When `action` is set, the entry represents
+    // a security/admin event rather than a sync result.
+    action: { type: String, enum: [
+      'login', 'login_failed', 'logout', 'session_expired',
+      'config_updated', 'sync_manual', 'password_changed',
+    ]},
+    ip: String,
   },
   {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },

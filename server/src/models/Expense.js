@@ -6,7 +6,7 @@ const expenseSchema = new mongoose.Schema(
     amount: { type: Number, required: true },
     date: { type: String, required: true },
     card: { type: String },
-    digest: { type: String, required: true, unique: true },
+    digest: { type: String, required: true },
     user_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     category_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
   },
@@ -15,5 +15,10 @@ const expenseSchema = new mongoose.Schema(
     collection: 'expenses',
   },
 );
+
+// Compound index: same digest is allowed across different users, but
+// the same user cannot have two expenses with the same digest. This
+// replaces the old `{ digest: 1 }` unique index.
+expenseSchema.index({ digest: 1, user_id: 1 }, { unique: true });
 
 export default mongoose.model('Expense', expenseSchema);

@@ -409,11 +409,20 @@ export class ImapReader {
  * @returns {Promise<{ folders: string[] }>}
  * @throws {ImapError} on any failure (caller maps `code` to HTTP status)
  */
-export async function testConnection(config) {
+export async function testConnection(config, { timeoutMs = 10_000 } = {}) {
   const reader = new ImapReader(config);
+  const timer = new Promise((_, reject) =>
+    setTimeout(() => reject(new ImapError(
+      `connection test timed out after ${timeoutMs / 1000}s`,
+      { code: 'CONNECT' },
+    )), timeoutMs),
+  );
   try {
-    await reader.connect();
-    const folders = await reader.listFolders();
+    const work = async () => {
+      await reader.connect();
+      return reader.listFolders();
+    };
+    const folders = await Promise.race([work(), timer]);
     return { folders };
   } finally {
     await reader.close();
