@@ -107,15 +107,15 @@ A full MongoDB dump of the shared Embers database can be placed at `dev/db/ember
 
 ```bash
 # 1. Export (on the server running MongoDB)
-mongodump --db=embers_db --out=/tmp/mongodump
-tar czf embers-dump.tar.gz -C /tmp/mongodump embers_db
+mongodump --db=embers_db_dev --out=/tmp/mongodump
+tar czf embers-dump.tar.gz -C /tmp/mongodump embers_db_dev
 
 # 2. Place the file
 cp embers-dump.tar.gz dev/db/
 
 # 3. Import into local MongoDB
 tar xzf dev/db/embers-dump.tar.gz -C /tmp
-mongorestore --db=embers_db /tmp/embers_db --drop
+mongorestore --db=embers_db_dev /tmp/embers_db_dev --drop
 ```
 
 ### What it contains

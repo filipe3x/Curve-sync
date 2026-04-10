@@ -5,15 +5,15 @@ This directory holds MongoDB dumps for local development. Data is bogus/test acc
 ## Export (on production server)
 
 ```bash
-mongodump --db=embers_db --out=/tmp/mongodump
-tar czf embers-dump.tar.gz -C /tmp/mongodump embers_db
+mongodump --db=embers_db_dev --out=/tmp/mongodump
+tar czf embers-dump.tar.gz -C /tmp/mongodump embers_db_dev
 ```
 
 ## Import (on dev machine)
 
 ```bash
 tar xzf dev/db/embers-dump.tar.gz -C /tmp
-mongorestore --db=embers_db /tmp/embers_db --drop
+mongorestore --db=embers_db_dev /tmp/embers_db_dev --drop
 ```
 
 ## Expected files
