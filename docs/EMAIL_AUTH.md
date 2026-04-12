@@ -947,93 +947,388 @@ state machine e comportamento.
 
 ### 5.2 Step 0 — Boas-vindas
 
-- Copy sem jargão: banlist = OAuth, IMAP, token, proxy, config, refresh
-  token, XOAUTH2; replacelist = autorização, acesso, ligação, recibos
-- 3 blocos curtos (porquê / o quê / como)
-- Botão único: "Começar"
-- Design detalhes na §11
+**Objectivo UX:** transformar um processo que o user pode achar
+intimidante numa narrativa simples. O user não conhece "OAuth" e não
+precisa de conhecer. Deve sentir que está a configurar o Curve Sync
+como configuraria o Thunderbird ou o Outlook no telemóvel.
+
+**Copy sugerido:**
+
+> **Configurar acesso ao email**
+>
+> Os serviços de email deixaram de aceitar passwords directas por
+> questões de segurança. Para ler os teus recibos do Curve Pay, o Curve
+> Sync precisa que autorizes o acesso — é o mesmo processo que fazes
+> quando adicionas uma conta de email num telemóvel novo.
+>
+> Demora cerca de 2 minutos. Vais inserir o teu email, autorizar o
+> acesso uma vez, e o Curve Sync trata do resto automaticamente.
+
+**Banlist de vocabulário:** OAuth, IMAP, token, proxy, config, refresh
+token, XOAUTH2, device code, authorization code, PKCE, cache.
+
+**Replacelist:** "autorização" (não "OAuth"), "acesso ao email"
+(não "IMAP"), "ligação" (não "connection"), "recibos" (não "emails").
+
+**Layout:**
+
+- Card centrado, `max-w-lg`, sem sidebar (full-focus)
+- Ícone hero (64px) — envelope com escudo ou cadeado
+- Copy em 3 parágrafos com `space-y-3`
+- Um único botão primário full-width: "Começar"
+- Sem "Cancelar" neste step (não há nada para cancelar ainda)
+- Step indicator (5 dots) discreto no topo da card
 
 ### 5.3 Step 1 — Email + detecção de provider
 
-- Input email com validação local (format, trim, lowercase, debounce 500ms)
-- Backend check: `GET /api/curve/oauth/check-email?email=X`
-  - Response: `{ exists, conflict, provider_hint }`
-  - `exists=true conflict=false` (mesmo user) → "Já tens esta conta,
-    queres re-autorizar?" → leva directamente a `/curve/setup?reauth=1`
-  - `exists=true conflict=true` (outro user) → bloqueio, mensagem clara
-  - `exists=false` → proceed
-- Auto-detecção de provider por sufixo do domínio
-  (`@outlook.*` / `@hotmail.*` / `@live.*` / `@msn.com` → microsoft;
-  `@gmail.com` / `@googlemail.com` → google; outro → unknown)
-- Override manual: toggle "A minha empresa usa Microsoft 365" para
-  domínios custom com O365
-- Badge visual do provider detectado (§11)
+**Objectivo UX:** recolher o email e dar feedback imediato de que o
+Curve Sync reconhece o provider. O user deve sentir que o sistema
+"sabe o que está a fazer".
+
+**Copy sugerido:**
+
+- Título: "Qual é o email que recebe os recibos?"
+- Label: "Email"
+- Placeholder: `o-teu-email@exemplo.com`
+- Helper text (cinza, pequeno): "Este é o email que recebe os recibos
+  do Curve Pay — não é necessariamente a tua conta Embers."
+- Toggle override (aparece para domínios não-reconhecidos):
+  "A minha empresa usa Microsoft 365"
+- Botão primário: "Continuar"
+- Botão secundário: "Cancelar" (volta a `/curve/config` se existir,
+  ou a `/`)
+
+**Comportamento do input (estados visuais):**
+
+| Estado | Border | Trailing icon | Helper |
+|--------|--------|---------------|--------|
+| Default | `sand-300` | — | padrão |
+| Focus | `curve-500` ring | — | padrão |
+| Typing (debouncing) | `sand-300` | — | padrão |
+| Checking backend | `sand-400` | spinner `curve-300` | "A verificar..." |
+| Valid + novo | `emerald-400` | check `emerald-600` | badge de provider |
+| Valid + já tem config | `amber-400` | warning `amber-600` | "Já tens esta conta. [Re-autorizar]" |
+| Valid + conflito user | `red-400` | cross `red-600` | "Este email já está associado a outra conta" |
+| Invalid format | `red-400` | cross `red-600` | "Email inválido" |
+
+**Badge de provider** (aparece abaixo do input após validação):
+
+- Microsoft: `bg-blue-50 text-blue-700` + ícone Outlook — "Conta Microsoft detectada"
+- Google: `bg-red-50 text-red-700` + ícone Gmail — "Conta Google detectada"
+- Unknown: `bg-sand-100 text-sand-600` + ícone `?` — "Provider não reconhecido — vamos tentar"
+
+**Backend contract:** `GET /api/curve/oauth/check-email?email=X` →
+`{ exists, conflict, provider_hint }`
+- `exists=true conflict=false` (mesmo user) → estado amber, link directo
+  para re-auth
+- `exists=true conflict=true` (outro user) → estado red, avançar bloqueado
+- `exists=false` → estado emerald, "Continuar" habilitado
+
+**Auto-detecção por domínio (frontend-side, instantâneo):**
+- `@outlook.*` / `@hotmail.*` / `@live.*` / `@msn.com` → microsoft
+- `@gmail.com` / `@googlemail.com` → google
+- outro → unknown (mostra toggle override)
+
+**Pitfalls a mitigar:**
+- Typo no email → só descoberto no step 2; ter confirmação visual aqui
+  (badge) ajuda a apanhar cedo
+- User copia com espaços → trim + lowercase antes de validar
+- Tenant O365 com domínio próprio → toggle manual converte unknown → microsoft
 
 ### 5.4 Step 2 — Autorização OAuth
 
-- Dois sub-variants auto-seleccionados pelo `provider_hint`
-- **Variante A (DAG — Microsoft):**
-  - `POST /api/curve/oauth/start` → `{ flowId, userCode, verificationUri,
-    expiresIn }`
-  - Exibir userCode em destaque + botão copiar + botão "Abrir
-    microsoft.com/devicelogin" em nova tab
-  - Countdown visual (barra ou texto "Expira em X:XX")
-  - Polling: `GET /api/curve/oauth/poll?flowId=X` a cada 5s
-  - Estados: `pending` / `authorized` / `expired` / `declined` / `error`
-  - Banner explicativo sobre a app "Thunderbird" (colapsável)
-- **Variante B (External-auth — Gmail / fallback):**
-  - `POST /api/curve/oauth/start` → `{ flowId, authorizeUrl }`
-  - Botão "Abrir página de autorização" em nova tab
-  - Textarea para paste-back do URL da address bar
-  - Validação frontend: regex `code=` antes de enviar
-  - `POST /api/curve/oauth/complete` → `{ flowId, redirectUrl }`
-  - Aviso destacado: "O browser vai mostrar 'localhost refused to
-    connect' — é normal, copia o URL antes de fechar"
-- Abortar step 2 → `DELETE /oauth/abort` → volta ao step 1
+**Objectivo UX:** conseguir o consent sem o user se perder. É o step mais
+complexo — duas variantes, múltiplos sub-estados, countdown — e o que
+mais beneficia de micro-copy cuidada e feedback visual imediato.
+
+Dois sub-variants auto-seleccionados pelo `provider_hint` do step 1.
+
+---
+
+#### 5.4.A — Variante DAG (Microsoft)
+
+**Copy sugerido:**
+
+> **Autoriza o acesso ao teu email**
+>
+> Clica no botão abaixo para abrir a página da Microsoft. Vais precisar
+> de inserir este código:
+>
+> `[ A1B2 C3D4 ]`  ← destaque visual
+>
+> [Copiar código]  [Abrir microsoft.com/devicelogin →]
+>
+> **1.** Abre o link acima
+> **2.** Insere o código quando pedido
+> **3.** Faz login com a tua conta de email
+> **4.** Autoriza o acesso (vai aparecer uma app chamada "Thunderbird"
+> — é normal)
+> **5.** Volta a esta página — detectamos automaticamente quando
+> terminas
+>
+> ⏳ À espera da tua autorização… `12:34` restantes
+
+**Explainer colapsável "Thunderbird" (banner amber discreto):**
+
+> ℹ️ **Porque aparece "Thunderbird"?**
+>
+> O Curve Sync usa a mesma identificação que clientes de email como o
+> Thunderbird para aceder aos teus recibos. É uma prática comum em
+> ferramentas que leem email via OAuth, e não partilha nenhum dado com
+> terceiros.
+
+**Layout:**
+
+- Código em card `bg-curve-50 rounded-xl px-6 py-4`, fonte mono
+  `text-3xl font-bold text-curve-700 tracking-[0.3em]`, centrado
+- Botão "Copiar código" abaixo do código, `btn-secondary` pequeno.
+  Ao copiar: ícone transiciona para check + texto muda para "Copiado!"
+  durante 2s
+- Botão "Abrir microsoft.com/devicelogin" em destaque (`btn-primary`),
+  com ícone de external link e `target="_blank" rel="noopener"`
+- Lista numerada com `list-decimal`, passos curtos
+- Countdown: texto `text-sand-600 → amber-600 → red-600` conforme
+  expira. Formato `M:SS`.
+- Polling status card no fundo: `bg-sand-50` a pulsar suavemente
+  durante `pending`, transiciona para `bg-emerald-50` ao `authorized`
+
+**Backend contract:**
+- `POST /api/curve/oauth/start { email, provider: 'microsoft' }`
+  → `{ flowId, userCode, verificationUri, expiresIn }`
+- `GET /api/curve/oauth/poll?flowId=X` a cada 5s
+  → `{ status: 'pending' | 'authorized' | 'expired' | 'declined' | 'error', expiresIn? }`
+- `DELETE /api/curve/oauth/abort?flowId=X` (botão "Cancelar")
+
+**Estados UX do polling:**
+
+| Status | Visual | Acção |
+|--------|--------|-------|
+| `pending` | spinner `curve-300`, countdown | polling continua |
+| `authorized` | card border `emerald-400`, check animado | avançar ao step 3 com fade |
+| `expired` | card border `red-300`, cross | botão "Tentar de novo" → novo flowId |
+| `declined` | card border `red-300` | "A autorização foi recusada" + retry |
+| `error` | card border `red-300` | "Algo correu mal" + retry |
+
+---
+
+#### 5.4.B — Variante External-auth (Gmail / fallback)
+
+**Copy sugerido:**
+
+> **Autoriza o acesso ao teu email**
+>
+> O Google pede-te para autorizar num processo separado.
+>
+> [Abrir página de autorização Google →]
+>
+> **1.** Clica no botão para abrir a página do Google numa nova tab
+> **2.** Faz login e autoriza o acesso
+> **3.** O browser vai mostrar "localhost refused to connect" —
+>    **é perfeitamente normal**
+> **4.** Copia o endereço **completo** da barra do browser
+> **5.** Cola aqui em baixo
+>
+> ┌────────────────────────────────────┐
+> │ http://localhost?code=...          │ ← textarea para paste
+> └────────────────────────────────────┘
+>
+> [Validar]  [Cancelar]
+
+**Layout:**
+
+- Botão "Abrir página de autorização" em destaque (`btn-primary`)
+- Lista numerada com passo 3 realçado: `font-semibold text-amber-700`
+  no "É perfeitamente normal" para evitar pânico
+- Aviso persistente `bg-amber-50 border-amber-200`:
+  > ⚠️ Copia o URL **antes** de fechar a página de erro — depois de
+  > fechar, perdes o código e tens de recomeçar.
+- Textarea: `font-mono text-xs`, 3 rows, resize-none, placeholder
+  `http://localhost?code=...`
+- Botão "Validar" disabled até o textarea conter `code=`
+  (validação regex frontend antes de enviar ao backend)
+- Mini-ilustração opcional: screenshot estilizado da address bar com
+  highlight na zona do URL
+
+**Backend contract:**
+- `POST /api/curve/oauth/start { email, provider: 'google' }`
+  → `{ flowId, authorizeUrl }`
+- `POST /api/curve/oauth/complete { flowId, redirectUrl }`
+  → `{ status: 'authorized', accountId } | { status: 'error', code }`
+
+**Erros comuns e recuperação:**
+
+| Erro | Mensagem | Recuperação |
+|------|----------|-------------|
+| Textarea vazio | "Cola o URL no campo acima" | focus no textarea |
+| Sem `code=` no URL | "O URL não parece correcto — confirma que copiaste o endereço completo" | re-edit |
+| URL contém `error=access_denied` | "A autorização foi recusada" | tentar de novo ou cancelar |
+| Código já expirado | "O código expirou — abre a página de novo" | reset do flow |
+| Network / 5xx | "Não conseguimos validar — tenta outra vez" | retry button |
+
+---
+
+**Transição step 2 → step 3:** ao receber `authorized`, fade-out da card
+(200ms), fade-in do step 3 (300ms) com leve slide-up. Nunca teleportar.
 
 ### 5.5 Step 3 — Verificação e selecção de pasta
 
+**Objectivo UX:** confirmar visualmente que tudo funciona e deixar o
+user escolher onde vão ser lidos os recibos. Deve ser rápido — o user
+acabou de autorizar, quer ver sucesso.
+
 **Simplificado vs V1** — sem proxy a configurar, sem restart de serviço.
 
-- Checklist sequencial, apenas 2 items:
-  - `⏳ A testar ligação ao email...` → `✓ Ligação OK`
-  - `⏳ A obter lista de pastas...` → `✓ N pastas encontradas`
-- Internamente:
-  1. Carrega CurveConfig (já populado pelo complete do step 2)
-  2. `getOAuthToken(config)` valida que os tokens funcionam
-     (`acquireTokenSilent` cache hit imediato)
-  3. `testConnection(config)` — connect, list folders, disconnect
-- Dropdown de pasta após checklist:
-  - Pre-seleccionar "Curve Receipts" se existir (com hint verde
-    "Pasta recomendada detectada")
-  - Fallback INBOX com hint amber "Não encontrámos Curve Receipts..."
-- Auto-save da selecção (debounce 300ms, igual ao comportamento actual
-  do CurveConfig)
-- Erros possíveis:
-  - `getOAuthToken` lança `OAuthReAuthRequired` → "A autorização falhou,
-    tentar de novo" → recuar ao step 2
-  - Network / timeout → retry button
-  - Folder list empty → provider estranho, mostrar hint
+**Copy sugerido:**
+
+> **A confirmar tudo…**
+>
+> ⏳ A testar ligação ao teu email…
+> ✓ Ligação estabelecida
+>
+> ⏳ A procurar a pasta dos recibos…
+> ✓ Encontrámos 17 pastas
+>
+> **Qual é a pasta que recebe os recibos do Curve Pay?**
+>
+> [Dropdown: Curve Receipts ✓]  ← pre-seleccionado
+>
+> 💡 Pasta recomendada detectada automaticamente.
+>
+> [Voltar]  [Continuar]
+
+**Layout da checklist:**
+
+- Vertical stack, cada item `flex items-center gap-3`
+- Ícones `h-5 w-5`:
+  - Pending: spinner SVG `text-curve-300 animate-spin`
+  - Success: check SVG `text-emerald-600`, com animação de "draw-in"
+    (stroke-dasharray)
+  - Error: cross SVG `text-red-500`
+- Texto: `text-sm text-sand-700` durante pending, `text-sand-900`
+  quando completo
+- Items aparecem sequencialmente com `animate-fade-in` (cada um com
+  `delay` de 200ms após o anterior completar) — nunca tudo de uma vez
+
+**Comportamento interno:**
+
+1. Carrega CurveConfig (já populado pelo complete do step 2)
+2. `getOAuthToken(config)` — valida que os tokens funcionam
+   (`acquireTokenSilent`, cache hit imediato). **Se falhar, lança
+   `OAuthReAuthRequired`** — o step recua para 2 com mensagem clara
+3. `testConnection(config)` — open IMAP connection + list folders +
+   close. Devolve array de folder paths.
+
+**Dropdown de pasta (aparece após checklist completa):**
+
+- `animate-fade-in-up` com delay 200ms após último check
+- Border `border-emerald-200` (sucesso visual subtil)
+- Pre-seleccionar "Curve Receipts" se existir (ou variantes:
+  "INBOX/Curve Receipts", "Curve", etc — matching case-insensitive)
+- Hint verde abaixo: "Pasta recomendada detectada"
+- Fallback: INBOX seleccionada, hint amber:
+  "Não encontrámos 'Curve Receipts'. Podes usar INBOX ou criar uma
+  regra no teu email para mover os recibos para uma pasta específica."
+- Auto-save da selecção (debounce 300ms, consistente com
+  comportamento actual do CurveConfig)
+
+**Estados de erro:**
+
+| Erro | Mensagem | Recuperação |
+|------|----------|-------------|
+| `OAuthReAuthRequired` | "A autorização falhou — vamos tentar de novo" | auto-recuo ao step 2 após 3s |
+| `CONNECT` (network) | "Não conseguimos ligar ao servidor de email" | retry button |
+| `AUTH` (tokens rejeitados) | "O teu email rejeitou o acesso" | recuo ao step 2 |
+| Folder list vazia | "O teu email não retornou nenhuma pasta" | contactar admin, detalhes colapsáveis |
+| Timeout (>10s) | "A ligação está muito lenta" | retry |
+
+Detalhes técnicos colapsáveis (`<details>`) em caso de erro, `font-mono
+text-xs text-sand-500 bg-sand-50 rounded p-3` — úteis para debug sem
+poluir o UX normal.
 
 ### 5.6 Step 4 — Activar sincronização
 
-- Card resumo (read-only):
-  - Email
-  - Provider (com ícone)
-  - Pasta seleccionada
-  - "Autorização válida até ~YYYY-MM-DD" (estimativa: hoje + 90 dias
-    para MS, baseado no refresh token lifetime; se o provider não
-    expõe explicitamente, esconder a linha)
-- Inputs editáveis:
-  - Intervalo sync (number, 1-60, default 5)
-  - Toggle "Sincronização automática activa" (default on)
-- Botão final: "Activar Curve Sync"
-  - Idempotência: vira "A activar..." durante o request, protegido
-    contra double-click
-  - Backend PUT é idempotente (re-enviar com os mesmos valores não tem
-    efeito adverso)
-- Success UX: card transiciona para border emerald, checkmark animado,
-  auto-redirect para dashboard após 3s
+**Objectivo UX:** momento de conclusão. O user já fez o trabalho todo
+— este step é essencialmente uma confirmação visual + ajustes finos +
+celebração subtil quando termina.
+
+**Copy sugerido:**
+
+> **Tudo pronto!**
+>
+> ┌─────────────────────────────────────────┐
+> │ EMAIL                                   │
+> │ user@outlook.com                        │
+> │                                         │
+> │ PROVIDER                                │
+> │ Microsoft  [ícone]                      │
+> │                                         │
+> │ PASTA                                   │
+> │ Curve Receipts                          │
+> │                                         │
+> │ AUTORIZAÇÃO                             │
+> │ Válida até 12 Julho 2026                │
+> └─────────────────────────────────────────┘
+>
+> **De quanto em quanto tempo verificamos?**
+> [5] minutos
+>
+> [×] Sincronizar automaticamente
+>
+> [  Activar Curve Sync  ]
+
+**Layout do card resumo:**
+
+- Grid 2 colunas (label + value) em `sm:`, stacked em mobile
+- Labels: `text-xs text-sand-400 uppercase tracking-wide`
+- Valores: `text-sm font-medium text-sand-900`
+- Separator entre resumo e inputs: `border-t border-sand-100 my-4`
+- Ícone do provider à esquerda do nome (16px)
+
+**Inputs editáveis:**
+
+- Intervalo sync: number input com steppers, `min=1 max=60`, default 5
+- Toggle "Sincronização automática activa": switch component, default
+  `on` — se `off`, o scheduler não arranca mas a config é guardada na
+  mesma (user pode activar mais tarde em `/curve/config`)
+
+**"Autorização válida até":**
+- Apenas para Microsoft (refresh token tem TTL conhecido: 90 dias
+  desde última utilização)
+- Formato: "Válida até 12 Julho 2026" (Intl.DateTimeFormat `pt-PT`)
+- Para Google: esconder a linha (Google não expõe TTL de refresh token
+  e eles são efectivamente permanentes enquanto o user não revoga)
+- Tooltip (`title`): "Vais receber um aviso antes de expirar para
+  re-autorizares sem perder sincronizações."
+
+**Botão final — estados:**
+
+| Estado | Visual | Texto |
+|--------|--------|-------|
+| Default | `btn-primary w-full py-3 text-base font-semibold` | "Activar Curve Sync" |
+| Loading | mesma classe, com spinner inline, disabled | "A activar…" |
+| Success | border `emerald-400`, fade | "Activado" + checkmark animado |
+| Error | border `red-300` | "Algo correu mal — tentar de novo" |
+
+**Idempotência:**
+- Botão vira `disabled` + "A activar…" no click (protecção anti
+  double-click)
+- Backend `PUT /api/curve/config` é idempotente (re-enviar os mesmos
+  valores não tem efeito adverso)
+
+**Success UX completo:**
+
+1. Click "Activar" → botão vira spinner
+2. Backend retorna OK → card transiciona border para `emerald-200`
+   (duração 300ms)
+3. Checkmark grande aparece centrado com `animate-fade-in-up`
+4. Texto muda para "Curve Sync activo!" em
+   `text-emerald-700 text-xl font-semibold`
+5. Sub-texto: "A primeira sincronização vai correr dentro de 5 minutos.
+   Vais ser redireccionado para o dashboard."
+6. Progress bar subtil de 3s a contar para baixo
+7. Auto-redirect para `/`
+8. Dashboard mostra badge "Sync activo" na sidebar por 10s para
+   continuidade visual
 
 ### 5.7 Re-auth flow (entry point especial)
 
@@ -1069,31 +1364,187 @@ Exemplos para expandir na implementação:
 | 3 | Network timeout | "Não conseguimos ligar ao servidor" | Retry |
 | 4 | PUT /config 5xx | "Erro ao guardar a configuração" | Retry |
 
-### 5.9 Cross-cutting UX
+### 5.9 Layout & information architecture
 
-- **Copy guidelines** — banlist / replacelist aplicada a todo o wizard
-- **Progress indicator** — 5 dots (`sand-300` / `curve-700`), transição
-  `duration-300`
-- **Mobile / responsive** — card full-width abaixo de `sm:`, textarea do
-  step 2 mais alto em mobile, botões stack verticalmente
-- **Focus management** — auto-focus no primeiro input de cada step,
-  `Esc` = cancelar wizard, `Enter` = continuar (quando válido)
-- **Accessibility** — aria-live nas mensagens de erro, aria-busy nos
-  spinners, role=progressbar no countdown do step 2
+- **Container do wizard** — `max-w-lg mx-auto` (mais estreito do que as
+  outras páginas do Curve Sync; foco total, sem distracções laterais)
+- **Sem sidebar / sem navegação** — o wizard é um modo à parte. A
+  sidebar normal do Curve Sync é escondida durante `/curve/setup` para
+  reforçar que o user está num fluxo linear
+- **Card único por step** — não full-page, sem header próprio. Tudo
+  vive dentro de um `bg-white rounded-2xl shadow-sm border border-sand-200 p-8`
+  centrado verticalmente
+- **Progress indicator no topo da card** — 5 dots `h-2 w-2 rounded-full`,
+  `sand-300` inactivos, `curve-700` activo, com `transition-colors
+  duration-300`. Não é click-to-navigate — é apenas indicador.
+- **Zona de acção no fundo** — botões stacked verticalmente em mobile,
+  side-by-side em `sm+`. "Voltar" como `btn-secondary` à esquerda,
+  "Continuar" / acção primária como `btn-primary` à direita. Excepção
+  step 0 (só "Começar") e step 4 (só "Activar").
+- **Sem scroll dentro da card** — se o conteúdo não cabe, aumentar a
+  altura da card ou partir o passo. Nunca ter scroll interno num
+  wizard step (quebra o sentido de "uma tarefa, uma vista").
 
-### 5.10 Telemetria
+### 5.10 Voice, tone & copy guidelines
 
-Events minimais no CurveLog para perceber onde users desistem:
+**Voice:**
 
-- `wizard_started`
+- **Singular, informal** — "tu", "o teu email", "vamos fazer isto".
+  Consistente com o tom de toda a UI do Curve Sync.
+- **Confiante sem ser arrogante** — "o Curve Sync trata do resto" em
+  vez de "é super fácil!". Evitar entusiasmo falso.
+- **Transparente sobre privacidade** — quando relevante, explicar o
+  que é lido e o que não é. Exemplo no step 0: "vamos ler apenas os
+  recibos que o Curve Pay te envia".
+- **Reconhece fricção em vez de a esconder** — passo 3 do external-auth
+  diz "vai mostrar um erro — é normal!" em vez de fingir que não
+  acontece.
+- **Zero emoji** (confirmado no CLAUDE.md do projecto — não adicionar
+  emoji ao UI a menos que explicitamente pedido). Usar SVG icons.
+
+**Banlist de vocabulário** (nunca usar no UI user-facing):
+
+- OAuth, OAuth 2.0, XOAUTH2, SASL, PKCE
+- IMAP, SMTP, POP, TLS, SSL
+- token, access token, refresh token, cache
+- proxy, bridge, config, systemd
+- device code, authorization code, device flow
+- endpoint, callback, API, JSON
+- registration, tenant, client ID, client secret
+
+**Replacelist** (usar em vez disso):
+
+| Em vez de | Dizer |
+|-----------|-------|
+| "configurar OAuth" | "autorizar o acesso" |
+| "obter access token" | "autorizar o email" |
+| "IMAP connection" | "ligação ao email" |
+| "refresh token expirado" | "a autorização expirou" |
+| "token inválido" | "o email rejeitou o acesso" |
+| "proxy" | (não mencionar — é invisível) |
+| "folder" / "mailbox" | "pasta" |
+| "sync" (quando dirigido ao user) | "verificar recibos" ou "sincronizar" |
+
+**Strings-chave do wizard:**
+
+```
+Título wizard      "Configurar acesso ao email"
+Step 0 título      "Vamos ligar o Curve Sync ao teu email"
+Step 1 título      "Qual é o email que recebe os recibos?"
+Step 2 título      "Autoriza o acesso"
+Step 3 título      "A confirmar tudo…"
+Step 4 título      "Tudo pronto!"
+Botão cancelar     "Cancelar"
+Botão voltar       "Voltar"
+Botão continuar    "Continuar"
+Botão activar      "Activar Curve Sync"
+Success toast      "Curve Sync activo!"
+Error genérico     "Algo correu mal — tenta outra vez"
+```
+
+### 5.11 Transições entre steps
+
+- **Animação padrão de entrada:** `animate-fade-in-up` (opacity
+  0 → 1 + translateY 8px → 0) com `duration-400 ease-out`
+- **Animação de saída:** fade-out rápido (`duration-200`) antes do
+  novo step fazer fade-in — não cross-fade (evita flicker)
+- **Transição avançar vs recuar:**
+  - Avançar: novo step slide-in da direita (subtil, +12px → 0)
+  - Recuar: novo step slide-in da esquerda (−12px → 0)
+  - Simbolicamente alinha com a "direcção" do fluxo
+- **Não mudar de página / rota** — todo o wizard vive em `/curve/setup`;
+  as transições acontecem dentro do mesmo container. Histórico browser
+  tratado via `replaceState` (sem entradas no back button para cada step)
+- **Exceção: success do step 4** — a transição para `/` é uma navegação
+  real, precedida de 3s de celebração no próprio card
+- **Reduzido motion** — respeitar `prefers-reduced-motion` e cair em
+  fades simples sem translate
+
+### 5.12 Micro-interactions & feedback
+
+- **Copy-to-clipboard (step 2 DAG):** botão "Copiar código" → ao
+  click, ícone SVG transiciona para check verde + texto muda para
+  "Copiado!" durante 2s, depois reverte. Haptics no mobile via
+  `navigator.vibrate(10)` quando disponível.
+- **Countdown do step 2:** cor muda conforme aproxima de 0:
+  `sand-600` (>5 min) → `amber-600` (1–5 min) → `red-600` (<1 min).
+  Pulsação subtil (scale 1 ↔ 1.02) no último minuto.
+- **Input validation do step 1:** debounce 500ms antes de chamar
+  backend. Durante a espera: spinner pequeno à direita do input
+  (substitui temporariamente check/cross). Transições entre estados
+  com `transition-colors duration-200`.
+- **Checklist do step 3:** cada item faz "draw-in" do checkmark via
+  `stroke-dasharray` animado (SVG) — sensação de "foi mesmo feito
+  agora". Delay de 200ms entre items para cadência natural.
+- **Botão "Activar" do step 4:** hover com `scale-[1.01]` subtil,
+  active com `scale-[0.99]`. Loading state troca texto + adiciona
+  spinner inline.
+- **Success do step 4:** card faz pulso verde `bg-emerald-50 →
+  bg-white` por 300ms, depois checkmark desenha-se, depois texto de
+  sucesso aparece. Sequência encadeada, não tudo de uma vez.
+
+### 5.13 Empty states & edge cases
+
+- **Primeiro visit sem config:** ao aceder `/curve/config` pela
+  primeira vez, redirect automático para `/curve/setup`. Sem página
+  intermédia.
+- **Mid-flow refresh:** state local perdido, user cai no step 0. Uma
+  pequena nota (sand-600, `text-xs`) na primeira card: "Começámos do
+  início — só demora 2 minutos." Sem acusação, sem fricção.
+- **Network offline:** banner persistente no topo da card `bg-red-50
+  text-red-700`: "Sem ligação à internet — religa para continuar".
+  Todos os CTAs ficam `disabled` até `navigator.onLine` voltar.
+- **Provider desconhecido (step 1):** copy neutral — "Vamos tentar o
+  método padrão". Fallback silencioso para external-auth sem explicar
+  porquê (o user não precisa de saber a taxonomia de flows).
+- **Azure AD app não configurada (erro de deployment):** step 2
+  falha com erro genérico + `<details>` técnico. Copy: "Algo não
+  está configurado no lado do Curve Sync. Contacta o administrador."
+  Não culpar o user.
+- **Wizard abandonado a meio (telemetria):** sem garbage collection
+  necessário — `authFlows` tem TTL automático, nada persiste em DB
+  a não ser tokens após step 2 complete (e mesmo esses ficam inócuos
+  sem `oauth_provider` set).
+
+### 5.14 Accessibility
+
+- **Focus management:** auto-focus no primeiro input/botão de cada
+  step. Ao mudar de step, mover focus para o título (h2) com `tabindex=-1`
+  para anunciar em screen readers.
+- **Keyboard shortcuts:**
+  - `Enter` = continuar (quando o form é válido)
+  - `Esc` = cancelar (com confirmação no step 2+ para evitar perda
+    acidental)
+  - `Tab` / `Shift+Tab` navegam entre inputs e botões dentro da card
+- **ARIA:**
+  - `aria-live="polite"` nas mensagens de erro e no texto de status do
+    polling (step 2)
+  - `aria-busy="true"` nos spinners durante operações
+  - `role="progressbar"` + `aria-valuenow` / `aria-valuemax` no
+    countdown do step 2
+  - `aria-describedby` ligando inputs aos helper texts
+- **Contraste:** todos os textos cumprem WCAG AA (4.5:1) — a paleta
+  `sand-*` já está calibrada para isto, mas verificar especificamente
+  os helper texts em `sand-400` / `sand-500`
+- **Screen reader hints:** o código DAG é lido carácter a carácter
+  (`aria-label="código A, 1, B, 2, C, 3, D, 4"`) para facilitar
+  transcrição
+
+### 5.15 Telemetria
+
+Events mínimos no CurveLog para perceber onde users desistem:
+
+- `wizard_started` — quando o step 0 monta
 - `wizard_step_reached` com `{ step: 0..4 }`
-- `wizard_completed`
-- `wizard_abandoned_at` com `{ step, reason }` — detectado via heartbeat
-  ou via timeout no lado do cliente
-- `wizard_reauth_completed`
+- `wizard_completed` — submit bem-sucedido do step 4
+- `wizard_abandoned_at` com `{ step, reason }` — detectado via
+  beforeunload ou timeout no lado do cliente. `reason` pode ser
+  `refresh`, `close_tab`, `explicit_cancel`, `navigation_away`.
+- `wizard_reauth_completed` — distinguível de setups iniciais
 - `wizard_reauth_failed` com motivo
 
----
+Não enviar PII nos eventos — `user_id` basta, o email vive no
+CurveConfig. Agregar no dashboard com queries simples sobre o CurveLog.
 
 ---
 
