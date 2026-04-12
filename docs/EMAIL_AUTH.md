@@ -1550,19 +1550,348 @@ CurveConfig. Agregar no dashboard com queries simples sobre o CurveLog.
 
 ## 6. Backend — Novos Endpoints
 
-> _[Placeholder]_ Apenas endpoints OAuth + integração com endpoints
-> existentes. **Desaparecem todos os endpoints de proxy management**
-> (`/api/curve/proxy/status`, `/api/curve/proxy/accounts/*`,
-> `/api/curve/proxy/restart`). Ficam:
->
-> - `POST /api/curve/oauth/start` — inicia DAG ou gera authorize URL
-> - `GET  /api/curve/oauth/poll` — status do DAG em curso
-> - `POST /api/curve/oauth/complete` — paste-back do external-auth
-> - `GET  /api/curve/oauth/status` — estado dos tokens do user (válidos?
->   próximos de expirar? precisa de re-auth?)
-> - `DELETE /api/curve/oauth` — revogar tokens e limpar cache
-> - Integração com `PUT /api/curve/config`, `POST /api/curve/test-connection`,
->   `POST /api/curve/sync` (inalterados)
+Listagem concentrada. Só endpoints OAuth + integração com os existentes.
+**Todos os endpoints de proxy management desaparecem** (`/api/curve/proxy/*`
+deixa de existir).
+
+Todos os endpoints abaixo estão montados em `/api/curve/oauth/*`, exigem
+autenticação (cookie de sessão Embers, como os outros endpoints do Curve
+Sync), e são scoped ao `user_id` da sessão — nunca aceitam `user_id` no
+body/query.
+
+### 6.1 OAuth flow — novos
+
+#### `GET /api/curve/oauth/check-email`
+
+Verifica se um email já está associado a alguma `CurveConfig`. Usado no
+step 1 do wizard para bloquear duplicados e oferecer re-auth inline.
+
+```
+Request:
+  GET /api/curve/oauth/check-email?email=user@outlook.com
+
+Response 200:
+  {
+    "exists": false,
+    "provider_hint": "microsoft"   // microsoft | google | unknown
+  }
+
+Response 200 (same user, already configured):
+  {
+    "exists": true,
+    "conflict": false,
+    "provider_hint": "microsoft"
+  }
+
+Response 200 (different user owns this email):
+  {
+    "exists": true,
+    "conflict": true,
+    "provider_hint": "microsoft"
+  }
+```
+
+**Implementação:** lookup por `CurveConfig.imap_username`, cross-check
+com `user_id` da sessão, derivar `provider_hint` do sufixo do domínio.
+
+---
+
+#### `POST /api/curve/oauth/start`
+
+Inicia um fluxo OAuth (DAG ou authorization code). O comportamento muda
+conforme `provider` / `flow` — a response é polimórfica.
+
+```
+Request:
+  {
+    "email": "user@outlook.com",
+    "provider": "microsoft"        // microsoft | google
+  }
+```
+
+**Response para Microsoft (DAG):**
+
+```
+Response 200:
+  {
+    "flow": "device_code",
+    "flowId": "f5a7c2e1-...",
+    "userCode": "A1B2C3D4",
+    "verificationUri": "https://microsoft.com/devicelogin",
+    "expiresIn": 900,
+    "message": "To sign in, use a web browser..."
+  }
+```
+
+**Response para Google (external-auth):**
+
+```
+Response 200:
+  {
+    "flow": "authorization_code",
+    "flowId": "f5a7c2e1-...",
+    "authorizeUrl": "https://accounts.google.com/o/oauth2/auth?...",
+    "expiresIn": 600
+  }
+```
+
+**Response 429 / 400:**
+
+```
+  { "error": "too_many_active_flows" }     // max 3 flows pendentes por user
+  { "error": "invalid_provider" }
+  { "error": "email_in_use_by_other_user" }
+```
+
+**Implementação:**
+- Instancia `PublicClientApplication` via `buildMsalApp(config)` (ver §3)
+- DAG: chama `acquireTokenByDeviceCode` com `deviceCodeCallback` que
+  resolve um deferred; guarda a promise top-level em `authFlows` para
+  polling posterior (ver §4.1 e o snippet completo de
+  `startDeviceCodeFlow`)
+- External-auth: gera PKCE via `cryptoProvider.generatePkceCodes()`,
+  chama `getAuthCodeUrl`, guarda `verifier` em `authFlows`
+- `flowId = crypto.randomUUID()`, TTL automático via `setTimeout`
+
+---
+
+#### `GET /api/curve/oauth/poll`
+
+Polling para flows DAG. Frontend chama a cada 5 segundos durante o
+step 2. Para external-auth **não é usado** — o sucesso chega via
+`/complete`.
+
+```
+Request:
+  GET /api/curve/oauth/poll?flowId=f5a7c2e1-...
+
+Response 200 (pending):
+  {
+    "status": "pending",
+    "expiresIn": 845
+  }
+
+Response 200 (authorized):
+  {
+    "status": "authorized",
+    "accountId": "00000000-0000-0000-0000-000000000000.xxxxxxxx-..."
+  }
+
+Response 200 (terminal error):
+  { "status": "expired" }
+  { "status": "declined" }
+  { "status": "error", "error": "AADSTS..." }
+
+Response 404:
+  { "error": "flow_not_found" }             // flowId TTL'd ou inválido
+```
+
+**Side effect ao primeiro `authorized`:** actualiza o `CurveConfig` do
+user com:
+- `oauth_provider`
+- `oauth_account_id`
+- `oauth_client_id`
+- `oauth_tenant_id`
+- `imap_server`, `imap_port`, `imap_tls`, `imap_username`
+  (hardcoded para o provider)
+- `imap_password` set para `null`
+
+Os tokens em si **já foram persistidos** pelo cache plugin durante a
+resolução do `acquireTokenByDeviceCode` — este endpoint só escreve a
+metadata para o `CurveConfig` saber que conta usar no
+`acquireTokenSilent` futuro.
+
+---
+
+#### `POST /api/curve/oauth/complete`
+
+Finaliza um fluxo external-auth (Gmail e providers sem DAG). Recebe o
+URL de redirect colado pelo user e executa o token exchange.
+
+```
+Request:
+  {
+    "flowId": "f5a7c2e1-...",
+    "redirectUrl": "http://localhost?code=4/0AX4X...&state=..."
+  }
+
+Response 200:
+  {
+    "status": "authorized",
+    "accountId": "103...@gmail.com"
+  }
+
+Response 400:
+  { "error": "no_code_in_url" }
+  { "error": "access_denied" }
+  { "error": "invalid_grant" }             // código expirado / usado
+  { "error": "flow_expired" }              // passaram > 10 min desde /start
+
+Response 404:
+  { "error": "flow_not_found" }
+```
+
+**Implementação:**
+1. Lookup do `flowId` em `authFlows`
+2. Parse do `redirectUrl` (URL nativo), extrair `code` e `error`
+3. Se `error` → devolver terminal error
+4. Chamar `app.acquireTokenByCode({ code, codeVerifier, redirectUri, scopes })`
+5. Tokens persistem automaticamente via cache plugin
+6. Actualizar `CurveConfig` com a mesma metadata do `/poll` authorized
+7. Remover entry do `authFlows`
+
+---
+
+#### `DELETE /api/curve/oauth/abort`
+
+Cancela um flow em curso (botão "Cancelar" no step 2 do wizard).
+Idempotente — chamar com um `flowId` inexistente não é erro.
+
+```
+Request:
+  DELETE /api/curve/oauth/abort?flowId=f5a7c2e1-...
+
+Response 200:
+  { "cancelled": true }
+```
+
+**Implementação:**
+- DAG: lookup, mutar `request.cancel = true` no request armazenado,
+  depois `authFlows.delete`. MSAL vai detectar a flag no próximo poll
+  interno e rejeitar a promise com `DEVICE_CODE_CANCEL`.
+- External-auth: `authFlows.delete` (nada mais a cancelar —
+  `getAuthCodeUrl` é uma chamada síncrona que já terminou)
+
+---
+
+#### `GET /api/curve/oauth/status`
+
+Estado dos tokens do user actual. Usado pelo dashboard para decidir se
+mostra banner de "Re-autorizar necessário" e pelo wizard para detectar
+se o user já completou o setup.
+
+```
+Request:
+  GET /api/curve/oauth/status
+
+Response 200 (user sem OAuth configurado — usa App Password ou nada):
+  {
+    "configured": false,
+    "provider": null
+  }
+
+Response 200 (OAuth configurado e funcional):
+  {
+    "configured": true,
+    "provider": "microsoft",
+    "email": "user@outlook.com",
+    "tokenState": "valid",                 // valid | refreshed | reauth_required
+    "lastCheckedAt": "2026-04-12T14:32:00Z",
+    "estimatedExpiresAt": "2026-07-11T14:32:00Z"
+  }
+
+Response 200 (token expirado — precisa de re-auth):
+  {
+    "configured": true,
+    "provider": "microsoft",
+    "email": "user@outlook.com",
+    "tokenState": "reauth_required",
+    "lastCheckedAt": "2026-04-12T14:32:00Z",
+    "error": "refresh_token_expired"
+  }
+```
+
+**Implementação:** chama `getOAuthToken(config)` em modo "probe" — se
+devolve token → `valid`; se lança `OAuthReAuthRequired` → `reauth_required`.
+Resultado cacheado por 60s em memória para evitar chamadas a MSAL em
+cada render do dashboard.
+
+---
+
+#### `DELETE /api/curve/oauth`
+
+Desliga OAuth do user: revoga tokens (best-effort, chama o endpoint de
+revocação do provider), limpa o cache, e reseta os campos OAuth do
+`CurveConfig` para null. Usado por um "Desligar conta" explícito nas
+definições.
+
+```
+Request:
+  DELETE /api/curve/oauth
+
+Response 200:
+  { "disconnected": true }
+```
+
+**Implementação:**
+1. Lookup do CurveConfig do user
+2. Best-effort revocation: POST ao `/revoke` do provider com o refresh
+   token (se for Google) ou skip (MS não tem revoke público para
+   public clients)
+3. `CurveConfig.updateOne({ user_id }, { $unset: { oauth_token_cache,
+   oauth_account_id, oauth_client_id, oauth_tenant_id }, $set: {
+   oauth_provider: null, sync_enabled: false } })`
+4. Log no CurveLog (`oauth_disconnected`)
+
+**Nota:** desligar OAuth não apaga expenses nem logs históricos — só
+para a sync e desassocia a conta.
+
+---
+
+### 6.2 Endpoints existentes — integração com o wizard
+
+Estes endpoints já existem e **não mudam**. O wizard apenas os chama
+na sequência certa.
+
+| Endpoint | Step | Uso no wizard |
+|----------|------|---------------|
+| `GET /api/curve/config` | bootstrap | Detectar se user já tem config → decidir rota (`/setup` vs `/config`) |
+| `PUT /api/curve/config` | 5.6 (step 4) | Guardar `imap_folder`, `sync_interval_minutes`, `sync_enabled`, `imap_folder_confirmed_at`. **Não** escreve `oauth_*` fields (esses vêm do `/poll` ou `/complete`) |
+| `POST /api/curve/test-connection` | 5.5 (step 3) | Validar ligação IMAP + listar pastas. **Importante:** internamente passa a usar o branch `accessToken` via `createImapReader(config)` quando `oauth_provider` está set |
+| `POST /api/curve/sync` | — | Não usado directamente pelo wizard. Pode ser chamado pós-step 4 para correr a primeira sync imediatamente em vez de esperar pelo scheduler |
+| `GET /api/curve/logs` | — | Não usado pelo wizard |
+
+**Nota sobre `test-connection`:** é o único endpoint existente que
+precisa de um pequeno refactor — actualmente instancia `ImapReader`
+directamente (síncrono). Passa a chamar `createImapReader(config)`
+(async factory do §3.5) para que o branch OAuth resolva o access
+token antes de abrir a ligação.
+
+### 6.3 Rate limiting
+
+| Endpoint | Limite | Motivo |
+|----------|--------|--------|
+| `POST /oauth/start` | 5 / hora / user | Prevenir enumeration e abuso do Azure AD / Google |
+| `POST /oauth/complete` | 10 / hora / user | Proteger contra paste-back brute force |
+| `GET /oauth/poll` | sem limite | Polling legítimo (5s) |
+| `GET /oauth/check-email` | 30 / hora / user | Prevenir enumeration de emails configurados |
+| `GET /oauth/status` | sem limite (já cacheado) | Dashboard refresh |
+| `DELETE /oauth` | 3 / hora / user | Operação destrutiva |
+| `DELETE /oauth/abort` | sem limite | Cancelamento é user-driven e infrequente |
+
+Implementação: middleware `express-rate-limit` com memory store (Pi é
+single-instance, não precisa de Redis). Chaves compostas por
+`user_id + endpoint`.
+
+### 6.4 Audit trail
+
+Todos os endpoints OAuth registam no `CurveLog`:
+
+| Evento | Endpoint | Campos extra |
+|--------|----------|--------------|
+| `oauth_flow_started` | `/start` | `flowId`, `provider`, `flow_type` |
+| `oauth_flow_completed` | `/poll`, `/complete` | `flowId`, `provider`, `accountId` |
+| `oauth_flow_cancelled` | `/abort` | `flowId` |
+| `oauth_flow_expired` | (TTL cleanup) | `flowId`, `last_status` |
+| `oauth_flow_failed` | `/poll`, `/complete` | `flowId`, `error_code` |
+| `oauth_token_refreshed` | sync background | `provider` |
+| `oauth_reauth_required` | sync background | `provider`, `error_code` |
+| `oauth_disconnected` | `DELETE /oauth` | `provider` |
+
+Nunca logar valores de tokens, code verifiers, ou URLs de redirect
+completas (podem conter `code=`). Logar apenas metadata.
+
+---
 
 ---
 
