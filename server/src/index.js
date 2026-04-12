@@ -45,8 +45,34 @@ const syncLimiter = rateLimit({
   message: { error: 'Demasiados pedidos de sync. Aguarda um momento.' },
 });
 
-// Routes — auth is public, everything else requires a valid token
+// OAuth DAG start is intentionally rate-limited tighter than the rest
+// of the API. `POST /api/curve/oauth/start` kicks off a Microsoft
+// Device Authorization Grant, which:
+//   - holds an in-memory flow slot with a 15 min TTL per user,
+//   - consumes Azure AD quota against our single public-client app_id,
+//   - cannot be meaningfully retried at sub-hour cadence by a real human.
+// Anything faster than a handful per hour is either a frontend bug or
+// a script hammering the endpoint. The spec in
+// docs/EMAIL_AUTH_MVP.md §4 PR 5 calls for 5/hour explicitly.
+const oauthStartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,                    // 5 DAG kickoffs per hour per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error:
+      'Demasiados pedidos de autorização. Tenta novamente daqui a uma hora.',
+  },
+});
+
+// Routes — auth is public, everything else requires a valid token.
+// Order matters: express-rate-limit runs for every middleware whose
+// path prefix matches, so mount the most specific limiters BEFORE the
+// catch-all apiLimiter. That way /oauth/start counts against both its
+// own 5/h bucket and the 100/min bucket, and whichever fires first
+// wins — which is what we want.
 app.use('/api/auth/login', loginLimiter);
+app.use('/api/curve/oauth/start', oauthStartLimiter);
 app.use('/api/curve/sync', syncLimiter);
 app.use('/api', apiLimiter);
 app.use('/api/auth', authRouter);
