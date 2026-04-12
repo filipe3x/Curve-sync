@@ -911,13 +911,189 @@ oferece retry).
 
 ## 5. Wizard — Passos do Frontend
 
-> _[Placeholder]_ Mantém 5 passos (0 boas-vindas, 1 email, 2 autorização,
-> 3 verificação, 4 activar). Diferença-chave:
->
-> - **Passo 3 simplificado:** o checklist fica apenas `test-connection →
->   listar pastas`. Sai: "configurar proxy", "reiniciar serviço", espera
->   de 2s. Entra: fade-in directo para o dropdown de pastas.
-> - **Passos 0, 1, 2, 4:** cópia e design inalterados do V1.
+Topic outline. Expandir na fase de implementação com copy final, design
+específico, e handlers por caso de erro. A parte visual/design per-step
+vive na §11 (Design Tips por Passo), esta secção é sobre estrutura,
+state machine e comportamento.
+
+### 5.1 Estrutura geral
+
+- **Rotas e entry points**
+  - `/curve/setup` — wizard completo (users sem config)
+  - `/curve/config` — settings simplificados (users já configurados:
+    pasta, intervalo, toggle sync)
+  - `/curve/setup?reauth=1&email=X` — re-auth entry point (salta steps
+    0 + 1, começa no step 2 com email pré-preenchido)
+  - Redirect rules: `/curve/config` redirige para `/curve/setup` se
+    `oauth_provider` null ou `oauth_token_cache` null
+- **State machine** (5 estados: 0 → 1 → 2 → 3 → 4 → done)
+  - Transições: avançar / recuar / abortar
+  - State ownership: wizard state no frontend (Zustand ou useReducer),
+    backend é stateless excepto pelo `authFlows` Map do step 2
+  - Não persistir em localStorage — mid-flow refresh implica recomeçar
+    (aceitável, wizard é curto). Excepção: `flowId` em sessionStorage
+    para sobreviver a F5 acidental no step 2.
+- **Abort / cancelar**
+  - Botão "Cancelar" presente em todos os steps
+  - `DELETE /api/curve/oauth/abort?flowId=X`
+  - DAG: mutação `request.cancel = true` no objecto guardado em
+    `authFlows` → MSAL pára o polling e a promise rejeita
+  - External-auth: `authFlows.delete(flowId)` (sem efeito upstream,
+    só liberta memória + verifier)
+- **Multi-tab concurrency**
+  - `authFlows` é keyed por `flowId` (não por user), cada tab tem o
+    seu → não há conflito
+  - Última tab a completar ganha — o CurveConfig é overwritten. Aceitável.
+
+### 5.2 Step 0 — Boas-vindas
+
+- Copy sem jargão: banlist = OAuth, IMAP, token, proxy, config, refresh
+  token, XOAUTH2; replacelist = autorização, acesso, ligação, recibos
+- 3 blocos curtos (porquê / o quê / como)
+- Botão único: "Começar"
+- Design detalhes na §11
+
+### 5.3 Step 1 — Email + detecção de provider
+
+- Input email com validação local (format, trim, lowercase, debounce 500ms)
+- Backend check: `GET /api/curve/oauth/check-email?email=X`
+  - Response: `{ exists, conflict, provider_hint }`
+  - `exists=true conflict=false` (mesmo user) → "Já tens esta conta,
+    queres re-autorizar?" → leva directamente a `/curve/setup?reauth=1`
+  - `exists=true conflict=true` (outro user) → bloqueio, mensagem clara
+  - `exists=false` → proceed
+- Auto-detecção de provider por sufixo do domínio
+  (`@outlook.*` / `@hotmail.*` / `@live.*` / `@msn.com` → microsoft;
+  `@gmail.com` / `@googlemail.com` → google; outro → unknown)
+- Override manual: toggle "A minha empresa usa Microsoft 365" para
+  domínios custom com O365
+- Badge visual do provider detectado (§11)
+
+### 5.4 Step 2 — Autorização OAuth
+
+- Dois sub-variants auto-seleccionados pelo `provider_hint`
+- **Variante A (DAG — Microsoft):**
+  - `POST /api/curve/oauth/start` → `{ flowId, userCode, verificationUri,
+    expiresIn }`
+  - Exibir userCode em destaque + botão copiar + botão "Abrir
+    microsoft.com/devicelogin" em nova tab
+  - Countdown visual (barra ou texto "Expira em X:XX")
+  - Polling: `GET /api/curve/oauth/poll?flowId=X` a cada 5s
+  - Estados: `pending` / `authorized` / `expired` / `declined` / `error`
+  - Banner explicativo sobre a app "Thunderbird" (colapsável)
+- **Variante B (External-auth — Gmail / fallback):**
+  - `POST /api/curve/oauth/start` → `{ flowId, authorizeUrl }`
+  - Botão "Abrir página de autorização" em nova tab
+  - Textarea para paste-back do URL da address bar
+  - Validação frontend: regex `code=` antes de enviar
+  - `POST /api/curve/oauth/complete` → `{ flowId, redirectUrl }`
+  - Aviso destacado: "O browser vai mostrar 'localhost refused to
+    connect' — é normal, copia o URL antes de fechar"
+- Abortar step 2 → `DELETE /oauth/abort` → volta ao step 1
+
+### 5.5 Step 3 — Verificação e selecção de pasta
+
+**Simplificado vs V1** — sem proxy a configurar, sem restart de serviço.
+
+- Checklist sequencial, apenas 2 items:
+  - `⏳ A testar ligação ao email...` → `✓ Ligação OK`
+  - `⏳ A obter lista de pastas...` → `✓ N pastas encontradas`
+- Internamente:
+  1. Carrega CurveConfig (já populado pelo complete do step 2)
+  2. `getOAuthToken(config)` valida que os tokens funcionam
+     (`acquireTokenSilent` cache hit imediato)
+  3. `testConnection(config)` — connect, list folders, disconnect
+- Dropdown de pasta após checklist:
+  - Pre-seleccionar "Curve Receipts" se existir (com hint verde
+    "Pasta recomendada detectada")
+  - Fallback INBOX com hint amber "Não encontrámos Curve Receipts..."
+- Auto-save da selecção (debounce 300ms, igual ao comportamento actual
+  do CurveConfig)
+- Erros possíveis:
+  - `getOAuthToken` lança `OAuthReAuthRequired` → "A autorização falhou,
+    tentar de novo" → recuar ao step 2
+  - Network / timeout → retry button
+  - Folder list empty → provider estranho, mostrar hint
+
+### 5.6 Step 4 — Activar sincronização
+
+- Card resumo (read-only):
+  - Email
+  - Provider (com ícone)
+  - Pasta seleccionada
+  - "Autorização válida até ~YYYY-MM-DD" (estimativa: hoje + 90 dias
+    para MS, baseado no refresh token lifetime; se o provider não
+    expõe explicitamente, esconder a linha)
+- Inputs editáveis:
+  - Intervalo sync (number, 1-60, default 5)
+  - Toggle "Sincronização automática activa" (default on)
+- Botão final: "Activar Curve Sync"
+  - Idempotência: vira "A activar..." durante o request, protegido
+    contra double-click
+  - Backend PUT é idempotente (re-enviar com os mesmos valores não tem
+    efeito adverso)
+- Success UX: card transiciona para border emerald, checkmark animado,
+  auto-redirect para dashboard após 3s
+
+### 5.7 Re-auth flow (entry point especial)
+
+- Trigger: sync falha com `OAuthReAuthRequired` → `last_sync_status=error`
+  com code `AUTH` → banner vermelho no dashboard com link
+- URL: `/curve/setup?reauth=1&email=X` (email vem do CurveConfig)
+- Wizard:
+  - Skip step 0 (sem boas-vindas — user já conhece o processo)
+  - Skip step 1 (email já conhecido, validação implícita)
+  - Começa directamente no step 2 com o provider_hint já resolvido
+  - Após step 2 success, step 3 é fast-path (só confirma ligação, não
+    mostra dropdown — folder já está set)
+  - Step 4 pode ser skipado completamente, ou mostrado read-only
+    com botão "Voltar ao dashboard"
+- CurveLog: log especial `wizard_reauth_completed` para distinguir
+  de setups iniciais
+
+### 5.8 Error recovery matrix
+
+Cada step tem uma tabela de erros esperados → mensagem user-facing →
+acção de recuperação. **Golden rule:** nunca deixar o user num beco sem
+saída; sempre oferecer "Tentar de novo" ou "Voltar".
+
+Exemplos para expandir na implementação:
+
+| Step | Erro | Mensagem | Recuperação |
+|------|------|----------|-------------|
+| 1 | Email em uso por outro user | "Este email já está associado a outra conta" | Cancelar, contactar admin |
+| 2 | DAG expired | "O código expirou" | Tentar de novo (novo flowId) |
+| 2 | Paste-back sem `code=` | "O URL não parece correcto" | Editar textarea |
+| 2 | `access_denied` | "A autorização foi recusada" | Tentar de novo ou cancelar |
+| 3 | `OAuthReAuthRequired` | "A autorização falhou" | Voltar ao step 2 |
+| 3 | Network timeout | "Não conseguimos ligar ao servidor" | Retry |
+| 4 | PUT /config 5xx | "Erro ao guardar a configuração" | Retry |
+
+### 5.9 Cross-cutting UX
+
+- **Copy guidelines** — banlist / replacelist aplicada a todo o wizard
+- **Progress indicator** — 5 dots (`sand-300` / `curve-700`), transição
+  `duration-300`
+- **Mobile / responsive** — card full-width abaixo de `sm:`, textarea do
+  step 2 mais alto em mobile, botões stack verticalmente
+- **Focus management** — auto-focus no primeiro input de cada step,
+  `Esc` = cancelar wizard, `Enter` = continuar (quando válido)
+- **Accessibility** — aria-live nas mensagens de erro, aria-busy nos
+  spinners, role=progressbar no countdown do step 2
+
+### 5.10 Telemetria
+
+Events minimais no CurveLog para perceber onde users desistem:
+
+- `wizard_started`
+- `wizard_step_reached` com `{ step: 0..4 }`
+- `wizard_completed`
+- `wizard_abandoned_at` com `{ step, reason }` — detectado via heartbeat
+  ou via timeout no lado do cliente
+- `wizard_reauth_completed`
+- `wizard_reauth_failed` com motivo
+
+---
 
 ---
 
