@@ -1897,102 +1897,156 @@ completas (podem conter `code=`). Logar apenas metadata.
 
 ## 7. Pitfalls e Rastreabilidade
 
-> _[Placeholder]_ Versão mais curta. Remove: 7.2 (config file concurrency),
-> 7.3 (proxy restart), 7.4 (Fernet encryption password), 7.7 (proxy não
-> instalado), 7.8 (subprocess cleanup). Mantém: 7.1 (duplicação de contas),
-> 7.5 (token lifecycle), 7.6 (Azure AD app registration), 7.9 (personal vs
-> organizational).
->
-> **Acrescenta:**
->
-> - **Token cache corruption:** se a desserialização do `oauth_token_cache`
->   falhar (schema mudou, AES key rodou, bytes corrompidos), tratar como
->   "cache vazio" em vez de crashar — força re-auth graceful
-> - **`acquireTokenSilent` falha:** refresh token expirado (90d de
->   inactividade MS) → exception específica → sync marca
->   `last_sync_status=error` com code `AUTH` → banner no dashboard com link
->   directo para wizard re-auth
+Sub-tópicos a cobrir:
+
+- **7.1 Duplicação de contas** — mesmo email autorizado duas vezes gera
+  `homeAccountId` diferente; política de overwrite vs. conflito
+- **7.2 Token lifecycle** — access token 1h, refresh token ~90d de
+  inactividade MS, como detectar e expor ao user
+- **7.3 Azure AD app registration** — redirect URIs permitidos (`http://localhost`),
+  public client flag, scopes delegados, platform "Mobile and desktop"
+- **7.4 Personal vs. organizational accounts** — tenant `common` vs. tenant
+  específico, comportamento quando o tenant admin bloqueou IMAP
+- **7.5 Token cache corruption** — desserialização falha (schema mudou, AES
+  key rodou, bytes corrompidos) → tratar como cache vazio → re-auth graceful
+- **7.6 `acquireTokenSilent` falha** — refresh token expirado → exception
+  `InteractionRequiredAuthError` → sync marca `last_sync_status=error` code
+  `AUTH` → banner com link directo para wizard re-auth
+- **7.7 Clock skew** — Pi com hora errada faz MSAL rejeitar tokens
+  (`nbf`/`exp` fora de janela); checar NTP antes de diagnosticar AUTH
+- **7.8 Rastreabilidade** — correlação entre CurveLog `oauth_flow_*`, Azure
+  sign-in logs e mailbox audit logs quando algo corre mal em produção
 
 ---
 
 ## 8. Segurança
 
-> _[Placeholder]_ Simplificado. Tokens encriptados em MongoDB com o
-> AES-256-GCM já usado para `imap_password` (reutilizar
-> `server/src/utils/crypto.js`). Client secret em env vars, nunca
-> enviado ao frontend. Audit trail no CurveLog. Rate limiting nos
-> endpoints OAuth.
+Sub-tópicos a cobrir:
+
+- **8.1 Encryption at rest** — tokens em `oauth_token_cache` encriptados
+  com AES-256-GCM (reutilizar `server/src/services/crypto.js`); mesma key
+  que já encripta `imap_password` (env `IMAP_ENCRYPTION_KEY`)
+- **8.2 Isolamento por user** — cache plugin é factory, não singleton;
+  `beforeCacheAccess` lê sempre o doc do user do request
+- **8.3 Secrets em env vars** — `AZURE_CLIENT_ID` / `CLIENT_SECRET` /
+  `TENANT_ID` nunca enviados ao frontend; checklist de `.env.example`
+- **8.4 PKCE verifier** — vive só no `authFlows` in-memory, nunca persistido
+  nem enviado ao browser; TTL de 10min
+- **8.5 Audit trail** — todos os eventos OAuth em CurveLog (ver §6.4) com
+  retenção TTL 90d
+- **8.6 Rate limiting** — tabela §6.3 + justificação (anti-abuse do flow
+  start/poll/complete)
+- **8.7 Revogação** — `DELETE /api/curve/oauth` limpa cache local; docs de
+  como o user revoga no lado do provider (account.microsoft.com,
+  myaccount.google.com)
+- **8.8 Threat model (curto)** — que acontece se atacante ganha acesso ao
+  MongoDB? Ao `.env`? À sessão web? Nenhuma destas dá acesso completo
+  sozinha — precisa de duas
 
 ---
 
 ## 9. Variáveis de Ambiente
 
-> _[Placeholder]_ Apenas 3 vars, todas já existentes no contexto OAuth:
->
-> | Variável | Descrição |
-> |----------|-----------|
-> | `AZURE_CLIENT_ID` | Client ID do Azure AD app registration |
-> | `AZURE_CLIENT_SECRET` | Client secret (só necessário para confidential flows — DAG não precisa) |
-> | `AZURE_TENANT_ID` | `common` (default) para multi-tenant + contas pessoais |
->
-> **Removidas:** `EMAIL_PROXY_CONFIG_PATH`, `EMAIL_PROXY_VENV_PATH`,
-> `EMAIL_PROXY_SERVICE_NAME`.
+Sub-tópicos a cobrir:
+
+- **9.1 Azure AD (Microsoft)** — `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
+  (opcional — só para confidential flows; DAG/PKCE não precisam),
+  `AZURE_TENANT_ID` (default `common`)
+- **9.2 Google OAuth (Gmail)** — `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`;
+  condicional (só se Gmail for suportado na V2 — decisão em §12)
+- **9.3 Encryption** — `IMAP_ENCRYPTION_KEY` (já existe; reutilizado para
+  cache de tokens)
+- **9.4 Removidas vs. V1** — `EMAIL_PROXY_CONFIG_PATH`, `EMAIL_PROXY_VENV_PATH`,
+  `EMAIL_PROXY_SERVICE_NAME` desaparecem
+- **9.5 `.env.example`** — actualizar com as novas vars + comentários
+  explicando quais são mandatory vs. optional
+- **9.6 Validação no boot** — server falha fast se `AZURE_CLIENT_ID` estiver
+  em falta e qualquer user tiver `oauth_provider='microsoft'`
 
 ---
 
 ## 10. Migração da Implementação Actual
 
-> _[Placeholder]_ Passos:
->
-> 1. `CurveConfig` ganha campos OAuth (aditivos, nullable)
-> 2. `imapReader.js` ganha branch `if (config.oauth_provider)` para usar
->    accessToken (mudança de ~5 linhas)
-> 3. Novo serviço `server/src/services/oauthManager.js` encapsula MSAL +
->    cache plugin
-> 4. Novos endpoints `/api/curve/oauth/*` e route handler
-> 5. Frontend: novo wizard em `/curve/setup`, simplificação de
->    `/curve/config`
-> 6. Backwards-compat: users com `imap_password` continuam a funcionar
->    (Caminho A). O branch OAuth só activa se `oauth_provider` estiver set.
+Sub-tópicos a cobrir:
+
+- **10.1 Schema additions** — campos OAuth em `CurveConfig` (todos
+  aditivos/nullable, sem migration destrutiva); ordem dos PRs
+- **10.2 `imapReader.js` refactor** — factory `createImapReader(config)`
+  async; branch `if (config.oauth_provider)` resolve token antes de
+  construir `ImapFlow`; call-sites a actualizar
+- **10.3 Novo serviço `oauthManager.js`** — encapsula MSAL
+  (`buildMsalApp`, `createCachePlugin`, `getOAuthToken`,
+  `OAuthReAuthRequired`)
+- **10.4 Novos endpoints** — route handler `/api/curve/oauth/*` (§6.1)
+  e integração com os existentes (§6.2)
+- **10.5 Frontend** — novo wizard em `/curve/setup`; simplificação de
+  `/curve/config` (retira campos server/port/tls/username/password do
+  path OAuth, mantém-nos para o path App Password legado)
+- **10.6 Dependências npm** — `@azure/msal-node`; remoção futura de
+  qualquer código/docs que invoquem `email-oauth2-proxy`
+- **10.7 Backwards compatibility** — users com `imap_password` continuam
+  a funcionar (Caminho A / App Password); branch OAuth só activa se
+  `oauth_provider != null`
+- **10.8 Roll-out & rollback** — feature-flag `ENABLE_OAUTH_WIZARD`;
+  plano de rollback se algo correr mal em produção (desactivar flag,
+  users OAuth ficam sem sync, users App Password inalterados)
+- **10.9 Deprecation path do V1** — quando remover
+  `docs/email-oauth2-proxy.service`, `EMAIL_AUTH_V1_PROXY.md`, secção
+  Caminho B do `EMAIL.md`
 
 ---
 
 ## 11. Design Tips por Passo
 
-> _[Placeholder]_ Mantém integralmente os design tips do V1 (paleta
-> curve/sand, animações fade-in, layout do wizard, copy dos passos 0–4).
->
-> **Dois ajustes minor:**
->
-> - **Passo 3 checklist:** remove `✓ Proxy configurado` e
->   `✓ Serviço reiniciado`. Fica apenas `⏳ A testar ligação IMAP...` →
->   `✓ X pastas encontradas`.
-> - **Passo 4 resumo:** remove a linha `Proxy  127.0.0.1:1993 activo`.
->   Substitui por `Autorização  válida até YYYY-MM-DD` (com base no
->   refresh token, que expira ~90 dias após última utilização).
+Sub-tópicos a cobrir (complemento prático ao §5):
+
+- **11.1 Paleta e tokens** — curve/sand do Tailwind config, semantic
+  colours emerald/amber/red, quando cada uma entra
+- **11.2 Animações** — fade-in por step, crossfade entre variantes
+  DAG/external-auth, skeleton loading para poll
+- **11.3 Passo 0 — Boas-vindas** — hero copy, ilustração minimal, CTA
+  primário vs. link secundário "já usei antes"
+- **11.4 Passo 1 — Email** — validação live, hint de provider detectado,
+  fallback para conta corporativa
+- **11.5 Passo 2 — Autorização (DAG)** — code box grande, countdown, botão
+  "Abrir Microsoft" com copy-to-clipboard fallback
+- **11.6 Passo 2 — Autorização (external-auth)** — link único, textarea
+  paste-back, validação do URL
+- **11.7 Passo 3 — Verificação** — checklist animada; remove items de
+  proxy do V1 (`✓ Proxy configurado`, `✓ Serviço reiniciado`); fica
+  `⏳ A testar ligação IMAP...` → `✓ X pastas encontradas`
+- **11.8 Passo 4 — Activar sync** — resumo com `Autorização válida até
+  YYYY-MM-DD` (substitui `Proxy 127.0.0.1:1993 activo` do V1); toggle
+  sync + CTA final
+- **11.9 Re-auth banner** — estado visual no dashboard quando
+  `OAuthReAuthRequired` dispara; um clique para wizard
+- **11.10 Responsive & mobile** — wizard funciona em mobile (paste-back
+  especialmente)
 
 ---
 
 ## 12. Decisões em Aberto
 
-> _[Placeholder]_
->
-> - [ ] MSAL cache strategy: um `PublicClientApplication` por user
->       (construído on-demand) ou singleton com multi-account? On-demand é
->       mais simples mas re-cria o objecto a cada sync. Singleton partilha
->       cache em memória mas precisa de gestão manual por `homeAccountId`.
-> - [ ] Scopes: `https://outlook.office.com/IMAP.AccessAsUser.All` +
->       `offline_access` chega? Testar em conta pessoal vs tenant.
-> - [ ] DAG para Gmail: confirmar que não é suportado e forçar external-auth
->       para `@gmail.com` / `@googlemail.com`
-> - [ ] Re-auth flow: quando `acquireTokenSilent` falha, o wizard deve
->       arrancar automaticamente ou mostrar banner "Clica aqui para
->       re-autorizar"?
-> - [ ] AES key rotation: plano para rodar a master key sem perder tokens
->       (provavelmente: re-encriptar todos os caches no primeiro access
->       após rotação)
-> - [ ] Gmail OAuth app registration: precisa de Google Cloud billing?
->       OAuth consent screen review?
+Sub-tópicos a decidir antes de merge:
+
+- [ ] **12.1 MSAL cache strategy** — `PublicClientApplication` por user
+  (on-demand) vs. singleton multi-account por `homeAccountId`
+- [ ] **12.2 Scopes Microsoft** — confirmar que
+  `https://outlook.office.com/IMAP.AccessAsUser.All` + `offline_access`
+  chega em conta pessoal vs. tenant
+- [ ] **12.3 Suporte Gmail na V2** — in-scope ou deferir? Google Cloud
+  billing, OAuth consent screen review, DAG não suportado →
+  external-auth obrigatório
+- [ ] **12.4 Re-auth UX** — banner passivo vs. redirect automático para
+  wizard quando `OAuthReAuthRequired` dispara
+- [ ] **12.5 AES key rotation** — plano para rodar `IMAP_ENCRYPTION_KEY`
+  sem perder token caches (re-encrypt on first access pós-rotação?)
+- [ ] **12.6 Feature flag** — `ENABLE_OAUTH_WIZARD` como gate ou
+  soft-launch? (relacionado com 10.8)
+- [ ] **12.7 Testes** — estratégia para testar MSAL sem bater no Azure
+  real (mock do `PublicClientApplication`? test tenant?)
+- [ ] **12.8 Monitorização** — métricas úteis pós-launch
+  (taxa de re-auth, AUTH errors/day, flow completion rate por provider)
 
 ---
 
