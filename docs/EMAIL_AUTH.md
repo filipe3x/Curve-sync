@@ -1,8 +1,16 @@
-# EMAIL_AUTH.md — OAuth Setup Wizard for Multi-User IMAP Proxy
+# EMAIL_AUTH.md — OAuth Setup Wizard (V2, direct XOAUTH2)
 
 > Levantamento de requisitos para substituir `/curve/config` por um wizard
-> passo-a-passo que configura automaticamente o `email-oauth2-proxy` por
-> cada utilizador, eliminando a necessidade de acesso ao terminal.
+> passo-a-passo que autoriza o acesso ao email de cada utilizador directamente
+> a partir do Node backend, sem proxy intermédio, eliminando qualquer
+> necessidade de acesso ao terminal.
+>
+> **V2 vs V1:** a implementação original (Caminho B com `email-oauth2-proxy`
+> Python + ficheiro INI + systemd) está preservada em
+> [`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md) para referência
+> histórica. Este documento descreve a arquitectura alvo: `imapflow` fala
+> XOAUTH2 directamente contra `outlook.office365.com:993`, e `@azure/msal-node`
+> gere o lifecycle de tokens com cache persistido em MongoDB.
 
 ---
 
@@ -20,7 +28,7 @@ contínua de access/refresh tokens.
 ### Como o Embers resolvia
 
 O pipeline original usava `offlineimap` (cliente IMAP) ligado a
-`email-oauth2-proxy` (bridge local), que traduzia plain IMAP LOGIN em
+`email-oauth2-proxy` (bridge local Python), que traduzia plain IMAP LOGIN em
 XOAUTH2 contra os servidores Microsoft. O setup era inteiramente por
 terminal: editar `emailproxy.config`, correr o proxy interactivamente para
 obter o consent, depois instalar como serviço systemd. Funcionou para um
@@ -30,6 +38,8 @@ user, mas:
   **silenciosamente** — sem erros no log
 - Re-autorização exigia SSH ao servidor + interacção com prompt interactivo
 - Adicionar um segundo user significava editar ficheiros de configuração à mão
+- O proxy precisava de systemd, venv Python, sudoers para restart, e um
+  ficheiro INI partilhado entre processos com locking manual
 
 ### O que o Curve Sync precisa
 
@@ -40,1208 +50,2020 @@ Um onboarding **web-only** onde o utilizador:
 3. Autoriza o acesso ao email num wizard guiado com linguagem simples
 4. Pode re-autorizar se os tokens expirarem, pela mesma via
 
-O backend gere o `emailproxy.config` automaticamente, reinicia o proxy
-quando necessário, e monitoriza o estado dos tokens por conta.
+### Porque deixamos cair o proxy
+
+O `imapflow` (que o Curve Sync já usa em `server/src/services/imapReader.js`)
+suporta XOAUTH2 nativamente via `auth: { user, accessToken }`. O
+`@azure/msal-node` trata de todo o lifecycle OAuth (device code, authorization
+code, automatic refresh) e oferece um `ICachePlugin` interface para persistir
+tokens em qualquer backing store — no nosso caso, MongoDB. A combinação
+elimina o proxy por completo:
+
+- Sem processo Python, sem venv, sem systemd unit
+- Sem ficheiro INI partilhado, sem `flock`, sem restart após cada mudança
+- Sem sudoers entries
+- Sem três fontes de verdade (DB + config file + tokens em memória do proxy)
+- Tokens vivem num único sítio: `CurveConfig.oauth_token_cache`, encriptado
+  com o mesmo AES-256-GCM que já protege `CurveConfig.imap_password`
+
+O backend faz tudo em processo Node: inicia o fluxo OAuth, guarda tokens,
+refresh automático, fala IMAP directamente. Uma dependência Python a menos,
+um modo de falha silenciosa a menos.
 
 ---
 
 ## 2. Arquitectura Geral
 
-### 2.1 Topologia actual (single-user, terminal)
+### 2.1 Topologia legacy (V1, proxy-based)
 
 ```
-Curve Sync → 127.0.0.1:1993 → email-oauth2-proxy → XOAUTH2 → outlook.com
-                                  emailproxy.config (1 conta, tokens encriptados)
+Curve Sync ──plain LOGIN──▶ 127.0.0.1:1993 ──XOAUTH2──▶ outlook.office365.com:993
+              (imap_password                email-oauth2-proxy
+               = Fernet key)                emailproxy.config
+                                            (1 secção por conta,
+                                             tokens encriptados com PBKDF2+Fernet)
 ```
 
-### 2.2 Topologia alvo (multi-user, web wizard)
+- Bridge Python local traduz plain LOGIN em XOAUTH2
+- Tokens vivem no ficheiro INI (`emailproxy.config`)
+- `imap_password` do CurveConfig é na verdade a key de decriptação dos tokens
+- Restart do systemd necessário para aplicar mudanças de config
+- Documentação preservada em `EMAIL_AUTH_V1_PROXY.md`
+
+### 2.2 Topologia alvo (V2, direct XOAUTH2)
 
 ```
-User A ─┐
-User B ─┼→ Curve Sync → 127.0.0.1:1993 → email-oauth2-proxy → XOAUTH2 → outlook.com
-User C ─┘                                  emailproxy.config (N contas, mesma porta)
+┌────────────┐
+│  User A    │
+│ CurveConfig│────┐
+│ oauth_*    │    │
+└────────────┘    │
+                  │    ┌──────────────┐
+┌────────────┐    │    │              │
+│  User B    │    ├───▶│ imapflow +   │──XOAUTH2──▶ outlook.office365.com:993
+│ CurveConfig│    │    │ msal-node    │              (ou Gmail, etc)
+│ oauth_*    │────┤    │ (in-process) │
+└────────────┘    │    │              │
+                  │    └──────┬───────┘
+┌────────────┐    │           │
+│  User C    │    │           │ MSAL cache plugin
+│ CurveConfig│────┘           ▼
+│ oauth_*    │         ┌──────────────┐
+└────────────┘         │  MongoDB     │
+                       │ curve_configs│
+                       │ .oauth_token_│
+                       │  cache       │
+                       │ (AES-256-GCM)│
+                       └──────────────┘
 ```
 
-### 2.3 Porta partilhada — sem porta por user
+- Sem proxy, sem 127.0.0.1:1993, sem systemd unit, sem ficheiro INI
+- `imapflow` liga directamente ao servidor IMAP do provider com TLS
+- `@azure/msal-node` trata do consent flow e guarda tokens em MongoDB via
+  cache plugin (`beforeCacheAccess` / `afterCacheAccess`)
+- Cada `CurveConfig` é totalmente self-contained: tem tudo o que é preciso
+  para reconstruir um `PublicClientApplication` e ligar ao IMAP
 
-- Proxy diferencia contas pelo username no IMAP LOGIN
-- Todos os Outlook partilham `[IMAP-1993]`, todos os Gmail partilham `[IMAP-2993]`
-- Secção server define-se uma vez; secções account multiplicam-se
+### 2.3 Isolamento por user
+
+Com o proxy havia uma secção INI partilhada por email e locking global. Em
+V2 cada user tem o seu próprio `CurveConfig`, o seu próprio MSAL account, e
+o seu próprio token cache em DB. Não há ficheiros partilhados, não há
+conflitos de escrita, não há necessidade de coordenação entre requests
+concorrentes de users diferentes.
+
+O único recurso verdadeiramente partilhado é o **app registration** no
+Azure AD (`AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` em env vars), que é
+o mesmo para todos os users — é apenas a identidade da aplicação junto da
+Microsoft, não tem estado por user.
 
 ### 2.4 Componentes envolvidos
 
-- Frontend: wizard React (nova página ou sub-rota de `/curve/config`)
-- Backend Express: novos endpoints `/api/curve/proxy/*`
-- emailproxy.config: INI file gerido pelo backend (ConfigParser-compatible)
-- systemd unit: `email-oauth2-proxy.service` (restart após config change)
-- Azure AD App Registration: um app partilhado por todos os users
+- **Frontend:** wizard React em `/curve/setup` (nova página), configuração
+  simplificada em `/curve/config` (pasta, intervalo, toggle)
+- **Backend Express:** endpoints novos `/api/curve/oauth/*` (start, poll,
+  complete, status). Nenhum endpoint de gestão de proxy.
+- **`@azure/msal-node`:** lifecycle OAuth (device code grant, authorization
+  code grant, silent refresh)
+- **MSAL cache plugin:** `ICachePlugin` que serializa/deserializa o cache
+  para `CurveConfig.oauth_token_cache` com encriptação AES-256-GCM
+- **`imapflow`:** cliente IMAP com `auth: { user, accessToken }` para XOAUTH2
+- **MongoDB `curve_configs`:** acrescenta os campos `oauth_provider`,
+  `oauth_token_cache`, `oauth_account_id`
+- **Azure AD App Registration:** single app partilhado, configurado para
+  "public client flows" (DAG) e redirect URI `http://localhost` (external auth)
+
+### 2.5 Comparação lado-a-lado
+
+| Aspecto | V1 (proxy) | V2 (directo) |
+|---------|-----------|--------------|
+| Processo extra | `email-oauth2-proxy` (Python + systemd) | nenhum |
+| Onde ficam os tokens | `emailproxy.config` (INI, Fernet) | `curve_configs.oauth_token_cache` (MongoDB, AES-256-GCM) |
+| Refresh automático | pelo proxy, opaco | pelo MSAL, observável em logs Node |
+| Aplicar nova conta | restart systemd (ou SIGHUP) | nenhuma acção — next sync usa novos tokens |
+| Concorrência | `flock` no ficheiro INI | nenhuma — cada user tem o seu documento |
+| Falha silenciosa conhecida | sim (refresh expirado → zero emails sem erro) | não — `acquireTokenSilent` lança erro |
+| Linguagens no pipeline | Node + Python | Node |
+| Dependências de sistema | venv, systemd, sudoers | zero |
+| Portabilidade | precisa de Linux + systemd | corre em qualquer sítio onde o Node corre |
+
+### 2.6 Implicações para o `imapReader.js`
+
+A única mudança significativa no reader é no construtor:
+
+```javascript
+// server/src/services/imapReader.js (V2)
+const authConfig = config.oauth_provider
+  ? { user: config.imap_username, accessToken: await getOAuthToken(config) }
+  : { user: config.imap_username, pass: config.imap_password };
+
+this.client = new ImapFlow({
+  host: config.imap_server,
+  port: config.imap_port ?? 993,
+  secure: true,
+  auth: authConfig,
+  logger: false,
+  disableAutoIdle: true,
+});
+```
+
+Tudo o resto (`fetchUnseen`, `markSeenBatch`, `classifyError`, `openFolder`)
+fica inalterado. O branch `config.imap_password` continua a funcionar para
+quem ainda usa App Passwords (Gmail legacy, contas sem OAuth). A mudança é
+aditiva, não destrutiva.
 
 ---
 
-## 3. Fluxos OAuth Suportados
+## 3. OAuth directo via imapflow + MSAL
 
-### 3.1 Device Authorization Grant (DAG) — recomendado para Outlook
+Esta secção descreve as três peças que substituem o
+`email-oauth2-proxy`:
 
-O fluxo mais simples para o utilizador. Não envolve redirect URIs nem
-copy-paste de URLs longas.
+1. **`imapflow`** (já instalado) — fala XOAUTH2 nativamente quando recebe
+   um access token em vez de password
+2. **`@azure/msal-node`** (nova dependência) — gere o consent flow
+   (device code ou authorization code) e faz refresh silencioso dos
+   access tokens
+3. **Cache plugin** (código novo, ~80 linhas) — intermedia o MSAL e o
+   MongoDB, reutilizando o `server/src/services/crypto.js` existente para
+   encriptar o cache em repouso
 
-**Sequência técnica:**
+A integração entre as três é pequena: um helper `getOAuthToken(config)`
+que reconstrói um `PublicClientApplication` a partir de um CurveConfig,
+chama `acquireTokenSilent`, e devolve uma string. O `imapReader.js` passa
+essa string no `auth.accessToken` e o resto do pipeline continua inalterado.
 
-1. Backend faz POST ao device authorization endpoint:
-   ```
-   POST https://login.microsoftonline.com/common/oauth2/v2.0/devicecode
-   Content-Type: application/x-www-form-urlencoded
+### 3.1 imapflow suporta XOAUTH2 out of the box
 
-   client_id=<AZURE_CLIENT_ID>&scope=https://outlook.office.com/IMAP.AccessAsUser.All offline_access
-   ```
+O `ImapFlow` constructor aceita dois formatos de `auth`:
 
-2. Resposta contém:
-   ```json
-   {
-     "device_code": "GAB...long-opaque-string",
-     "user_code": "A1B2C3D4",
-     "verification_uri": "https://microsoft.com/devicelogin",
-     "expires_in": 900,
-     "interval": 5
-   }
-   ```
+```javascript
+// Basic auth (modo actual — App Password / plain)
+new ImapFlow({
+  host: 'imap.gmail.com',
+  port: 993,
+  secure: true,
+  auth: { user: 'foo@gmail.com', pass: 'abcd efgh ijkl mnop' },
+});
 
-3. Frontend exibe `user_code` em destaque + link para `verification_uri`.
+// XOAUTH2 (modo V2 — access token do MSAL)
+new ImapFlow({
+  host: 'outlook.office365.com',
+  port: 993,
+  secure: true,
+  auth: { user: 'foo@outlook.com', accessToken: 'eyJ0eXAiOiJKV1QiLC...' },
+});
+```
 
-4. User abre `microsoft.com/devicelogin` (em qualquer dispositivo — telefone,
-   tablet, outro PC), insere o código, faz login, e autoriza a app.
-   A app aparece como o nome registado no Azure AD (e.g. "Thunderbird" ou
-   "Curve Sync" conforme o app registration usado).
+Internamente o imapflow detecta a presença de `accessToken` e emite o
+comando SASL `AUTHENTICATE XOAUTH2` com a string
+`"user=foo@outlook.com\x01auth=Bearer eyJ0...\x01\x01"` em base64.
+É o mesmo formato que o `email-oauth2-proxy` constrói — a diferença é que
+passa a acontecer no próprio processo Node, sem traduzir plain LOGIN
+intermédio.
 
-5. Backend faz polling ao token endpoint a cada `interval` segundos:
-   ```
-   POST https://login.microsoftonline.com/common/oauth2/v2.0/token
-   Content-Type: application/x-www-form-urlencoded
+**Implicações directas:**
 
-   grant_type=urn:ietf:params:oauth:grant-type:device_code
-   &client_id=<AZURE_CLIENT_ID>
-   &device_code=<device_code>
-   ```
+- `imap_server` passa a ser `outlook.office365.com` (ou `imap.gmail.com`)
+  em vez de `127.0.0.1`
+- `imap_port` passa a ser `993` em vez de `1993`
+- `imap_tls` passa a ser `true` em vez de `false`
+- `imap_password` deixa de ser usado quando `oauth_provider` está set
+- O check de loopback em `imapReader.js`
+  (`isLoopbackHost` / `LOOPBACK_HOSTS`) deixa de ter sentido no branch
+  OAuth — mantém-se para o branch App Password mas o branch OAuth força
+  TLS sempre
 
-6. Enquanto o user não autorizar, a resposta é `{ "error": "authorization_pending" }`.
-   Após autorizar: `{ "access_token": "...", "refresh_token": "...", "expires_in": 3600 }`.
+### 3.2 @azure/msal-node — os três métodos que usamos
 
-7. Backend escreve os tokens encriptados no `emailproxy.config` (ver secção 4).
+O `@azure/msal-node` expõe um `PublicClientApplication` (sem client secret)
+e um `ConfidentialClientApplication` (com client secret). Para o nosso
+caso o `PublicClientApplication` chega: DAG e authorization code grant
+funcionam ambos com apps "public client".
 
-**Vantagens:** zero copy-paste, funciona cross-device, timeout generoso (15 min).
-**Limitação:** só funciona com Microsoft (Azure AD). Google não suporta DAG
-para IMAP scopes em apps não-verificadas.
+Os três métodos relevantes:
 
-### 3.2 External Auth (paste-back) — fallback universal
+| Método | Quando | Output |
+|--------|--------|--------|
+| `acquireTokenByDeviceCode` | Fluxo DAG no wizard (primeira autorização) | `AuthenticationResult` com `accessToken` + `account` + escreve no cache |
+| `acquireTokenByCode` | Fluxo external-auth no wizard (primeira autorização) | idem |
+| `acquireTokenSilent` | Cada sync — reutiliza ou faz refresh do cache | idem (transparent) |
 
-Fluxo standard OAuth 2.0 authorization_code adaptado para headless. O proxy
-já suporta nativamente com a flag `--external-auth`.
+O ciclo de vida é:
 
-**Sequência técnica:**
+```
+┌─────────────────┐
+│  Wizard step 2  │   1ª vez: acquireTokenByDeviceCode ou acquireTokenByCode
+│  (user consent) │   ─────────▶ tokens guardados no cache plugin ─────▶ MongoDB
+└─────────────────┘
+        │
+        ▼
+┌─────────────────┐
+│  Sync (N×/hora) │   acquireTokenSilent
+│                 │   ├─ access token ainda válido → devolve o que está em cache
+│                 │   └─ access token expirado → usa refresh token → novo access
+│                 │      ├─ sucesso → actualiza cache → MongoDB
+│                 │      └─ refresh também expirou → InteractionRequiredAuthError
+└─────────────────┘                                      │
+                                                         ▼
+                                            Dashboard banner: "Re-autoriza"
+```
 
-1. Backend constrói a permission URL:
-   ```
-   https://login.microsoftonline.com/common/oauth2/v2.0/authorize
-     ?client_id=<AZURE_CLIENT_ID>
-     &redirect_uri=http://localhost
-     &scope=https://outlook.office.com/IMAP.AccessAsUser.All offline_access
-     &response_type=code
-     &login_hint=user@example.com
-   ```
+O refresh é **transparente**: o `acquireTokenSilent` trata de validar a
+expiração do access token, pedir um novo ao endpoint `/token`, e persistir
+no cache — tudo dentro da mesma chamada. O caller (getOAuthToken) não
+precisa de saber se foi cache-hit ou refresh.
 
-2. Frontend mostra URL clicável. User abre no browser, faz login, autoriza.
+**Config mínima do `PublicClientApplication`:**
 
-3. Browser tenta redirigir para `http://localhost?code=ABC123&state=XYZ`.
-   Como não há nada a escutar no localhost do user, a página mostra
-   "localhost refused to connect" — **isto é esperado e normal**.
+```javascript
+import { PublicClientApplication, LogLevel } from '@azure/msal-node';
 
-4. O user copia o URL completo da barra de endereço do browser
-   (incluindo o `?code=...`).
+const app = new PublicClientApplication({
+  auth: {
+    clientId: process.env.AZURE_CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID || 'common'}`,
+  },
+  cache: {
+    cachePlugin,  // instância do cache plugin MongoDB (§3.4)
+  },
+  system: {
+    loggerOptions: {
+      loggerCallback: (level, message) => {
+        if (level <= LogLevel.Warning) console.log(`[msal] ${message}`);
+      },
+      logLevel: LogLevel.Warning,
+    },
+  },
+});
+```
 
-5. User cola o URL no campo de input do wizard.
+**Scopes:**
 
-6. Backend extrai o `code`, troca-o por tokens via POST ao token endpoint,
-   encripta-os, e escreve no `emailproxy.config`.
+```javascript
+const OUTLOOK_SCOPES = [
+  'https://outlook.office.com/IMAP.AccessAsUser.All',
+  'offline_access',   // pede refresh token — crítico, sem isto cada access dura 1h e acabou
+];
 
-**Alternativa subprocess:** em vez de o backend fazer o token exchange
-directamente, pode spawnar o proxy com `--external-auth --no-gui` e
-alimentar o redirect URL via stdin. Isto garante que a encriptação dos
-tokens usa exactamente o algoritmo do proxy (PBKDF2-HMAC-SHA256 → Fernet).
-Tradeoff: mais complexo, mas zero risco de incompatibilidade cripto.
+const GMAIL_SCOPES = [
+  'https://mail.google.com/',
+  // Gmail devolve refresh token automaticamente na 1ª autorização
+  // desde que access_type=offline e prompt=consent
+];
+```
 
-**Vantagens:** funciona com qualquer provider OAuth 2.0.
-**Desvantagem:** exige copy-paste de URL (passo extra manual).
+### 3.3 Novos campos no CurveConfig
 
-### 3.3 Quando usar qual
+O schema actual (`server/src/models/CurveConfig.js`) ganha cinco campos,
+todos nullable por default para não afectar users que continuam com
+App Password:
 
-| Domínio do email | Fluxo | Motivo |
-|------------------|-------|--------|
-| `@outlook.*`, `@hotmail.*`, `@live.*`, `@microsoft.com` | DAG | UX superior, suportado nativamente |
-| `@gmail.com`, `@googlemail.com` | External Auth | Google não suporta DAG para IMAP |
-| Outros (`@empresa.com` com O365) | DAG (tentar) → External Auth (fallback) | Depende do tenant |
+```javascript
+const curveConfigSchema = new mongoose.Schema({
+  // ... campos existentes ...
 
-O wizard auto-detecta pelo domínio e pré-selecciona o fluxo, com opção
-de override manual (link "Usar método alternativo" discreto).
+  // OAuth provider name. null = this user uses App Password (V1 / Gmail
+  // legacy). When set, imapReader.js takes the OAuth branch and uses
+  // getOAuthToken() instead of imap_password.
+  oauth_provider: {
+    type: String,
+    enum: ['microsoft', 'google', null],
+    default: null,
+  },
+
+  // Serialized MSAL token cache, encrypted with AES-256-GCM via
+  // server/src/services/crypto.js. MSAL serializes its cache as a JSON
+  // blob (~2-4 KB) containing accessTokens, refreshTokens, idTokens and
+  // account records. The cache plugin encrypts this blob before storing
+  // and decrypts on read. Never exposed to the frontend.
+  oauth_token_cache: {
+    type: String,
+    default: null,
+  },
+
+  // MSAL `homeAccountId` for this user's account within the cache. MSAL
+  // supports multiple accounts per cache — we only ever have one per
+  // CurveConfig, but we still need to remember which homeAccountId it is
+  // so acquireTokenSilent can look it up. Format: `<uid>.<utid>`.
+  oauth_account_id: {
+    type: String,
+    default: null,
+  },
+
+  // Azure AD client ID used for THIS specific account. Normally matches
+  // process.env.AZURE_CLIENT_ID, but stored per-config so that a future
+  // key rotation doesn't invalidate all existing caches — you can keep
+  // old configs running on the old client_id until re-auth.
+  oauth_client_id: {
+    type: String,
+    default: null,
+  },
+
+  // Azure AD tenant (`common`, `consumers`, `organizations`, or a GUID).
+  // Defaults to `common` for multi-tenant + personal accounts. Stored
+  // per-config because a single Curve Sync instance may serve users
+  // from different tenants.
+  oauth_tenant_id: {
+    type: String,
+    default: 'common',
+  },
+});
+```
+
+**Porque 5 campos e não 1 blob:**
+
+- `oauth_token_cache` é opaco (serializado pelo MSAL); precisamos de
+  metadata do nosso lado para saber "este user já fez consent?" sem
+  desserializar
+- `oauth_account_id` é o único identificador estável para
+  `acquireTokenSilent({ account })` — não dá para inferir do cache
+  sem o abrir
+- `oauth_client_id` / `oauth_tenant_id` permitem migração gradual
+  (registration nova vs antiga) sem tocar em configs que ainda funcionam
+
+**Backwards compat:**
+
+- User sem `oauth_provider` → branch App Password (comportamento actual)
+- User com `oauth_provider = 'microsoft'` + `oauth_token_cache` != null →
+  branch OAuth
+- User com `oauth_provider` set mas `oauth_token_cache` null → wizard
+  incompleto, tratar como "não configurado" e mandar para `/curve/setup`
+
+### 3.4 MSAL cache plugin para MongoDB
+
+O `@azure/msal-node` define a interface `ICachePlugin` com dois métodos:
+
+```typescript
+interface ICachePlugin {
+  beforeCacheAccess(context: TokenCacheContext): Promise<void>;
+  afterCacheAccess(context: TokenCacheContext): Promise<void>;
+}
+```
+
+O contrato é simples:
+
+- **`beforeCacheAccess`** — MSAL chama antes de cada operação de cache
+  (read ou write). O plugin tem de chamar `context.tokenCache.deserialize(json)`
+  com o JSON mais recente do storage
+- **`afterCacheAccess`** — MSAL chama depois. Se
+  `context.cacheHasChanged` for true, o plugin tem de chamar
+  `context.tokenCache.serialize()` e persistir o resultado
+
+Implementação (`server/src/services/oauthCachePlugin.js`):
+
+```javascript
+import CurveConfig from '../models/CurveConfig.js';
+import { encrypt, decrypt } from './crypto.js';
+
+/**
+ * MSAL cache plugin bound to a specific user_id. Each sync creates a
+ * fresh instance scoped to the CurveConfig being used — we do NOT share
+ * a singleton plugin across users, because the plugin holds a user_id
+ * closure and any shared state would risk cross-user token leakage.
+ *
+ * The plugin is cheap to create (one closure), so the cost of
+ * per-request instantiation is negligible.
+ */
+export function createCachePlugin(userId) {
+  return {
+    async beforeCacheAccess(context) {
+      const config = await CurveConfig.findOne({ user_id: userId }).lean();
+      if (!config?.oauth_token_cache) {
+        // No cache yet (first auth) — leave MSAL's empty in-memory cache
+        // alone. MSAL treats an empty cache as "no accounts".
+        return;
+      }
+      try {
+        const plaintext = decrypt(config.oauth_token_cache);
+        context.tokenCache.deserialize(plaintext);
+      } catch (err) {
+        // Corrupted or un-decryptable cache. Log once, treat as empty
+        // cache, and let acquireTokenSilent fail naturally — the
+        // orchestrator will surface a "re-authorize" banner. See §7
+        // (Pitfalls — Token cache corruption).
+        console.warn(
+          `[oauth] token cache unreadable for user ${userId}: ${err.message}. ` +
+          `Treating as empty — user will need to re-auth.`,
+        );
+      }
+    },
+
+    async afterCacheAccess(context) {
+      if (!context.cacheHasChanged) return;
+      const serialized = context.tokenCache.serialize();
+      const ciphertext = encrypt(serialized);
+      await CurveConfig.updateOne(
+        { user_id: userId },
+        { $set: { oauth_token_cache: ciphertext } },
+      );
+    },
+  };
+}
+```
+
+**Porque não partilhar o plugin entre users:**
+
+Cada `PublicClientApplication` tem um único cache in-memory que é
+populado por `beforeCacheAccess`. Se partilhássemos o plugin (e portanto
+o mesmo PCA) entre users, o cache acabaria com os tokens de vários users
+misturados — o `acquireTokenSilent` funcionaria por azar (graças ao
+`homeAccountId`) mas o `afterCacheAccess` escreveria tudo no storage do
+primeiro user que tivesse chamado. Isolamento por user é a única forma
+segura.
+
+**Alternativa considerada (rejeitada):** singleton PCA com um plugin que
+usa uma Map keyed by `homeAccountId`. Mais eficiente mas muito mais
+fácil de introduzir bugs de cross-user leakage. Vamos com per-request
+instantiation — é barato o suficiente (um object literal + closure)
+para não valer a pena optimizar.
+
+### 3.5 Helper `getOAuthToken(config)`
+
+O ponto de integração entre o `imapReader.js` e o MSAL:
+
+```javascript
+// server/src/services/oauthManager.js
+import { PublicClientApplication, InteractionRequiredAuthError } from '@azure/msal-node';
+import { createCachePlugin } from './oauthCachePlugin.js';
+
+const SCOPES_BY_PROVIDER = {
+  microsoft: [
+    'https://outlook.office.com/IMAP.AccessAsUser.All',
+    'offline_access',
+  ],
+  google: ['https://mail.google.com/'],
+};
+
+/**
+ * Build a PublicClientApplication bound to a specific CurveConfig.
+ * Called on every sync — cheap because MSAL's init is stateless and
+ * the cache is populated lazily via the plugin.
+ */
+function buildMsalApp(config) {
+  return new PublicClientApplication({
+    auth: {
+      clientId: config.oauth_client_id || process.env.AZURE_CLIENT_ID,
+      authority: `https://login.microsoftonline.com/${config.oauth_tenant_id || 'common'}`,
+    },
+    cache: { cachePlugin: createCachePlugin(config.user_id) },
+  });
+}
+
+/**
+ * Get a fresh access token for the account associated with `config`.
+ *
+ * On the happy path this is a cache hit and returns instantly. If the
+ * cached access token is expired, MSAL silently exchanges the refresh
+ * token for a new one and writes the updated cache back via the plugin.
+ *
+ * Throws OAuthReAuthRequired when the refresh token itself is expired
+ * (90 days of inactivity for Microsoft). The sync orchestrator maps
+ * this to `last_sync_status=error` with code `AUTH` and the dashboard
+ * shows the re-auth banner. See §7.
+ */
+export async function getOAuthToken(config) {
+  if (!config.oauth_provider) {
+    throw new Error('getOAuthToken called on a config without oauth_provider');
+  }
+  if (!config.oauth_account_id) {
+    throw new OAuthReAuthRequired('no account in cache — wizard not completed');
+  }
+
+  const app = buildMsalApp(config);
+  const account = await app.getTokenCache().getAccountByHomeId(config.oauth_account_id);
+  if (!account) {
+    throw new OAuthReAuthRequired('account not found in cache (cache corrupted or wiped)');
+  }
+
+  try {
+    const result = await app.acquireTokenSilent({
+      account,
+      scopes: SCOPES_BY_PROVIDER[config.oauth_provider],
+    });
+    return result.accessToken;
+  } catch (err) {
+    if (err instanceof InteractionRequiredAuthError) {
+      throw new OAuthReAuthRequired(err.errorCode || err.message);
+    }
+    throw err;
+  }
+}
+
+export class OAuthReAuthRequired extends Error {
+  constructor(message) {
+    super(`OAuth re-authorization required: ${message}`);
+    this.name = 'OAuthReAuthRequired';
+    this.code = 'OAUTH_REAUTH';
+  }
+}
+```
+
+**Integração no `imapReader.js`:**
+
+```javascript
+// server/src/services/imapReader.js — constructor excerpt (V2)
+import { getOAuthToken } from './oauthManager.js';
+
+async function buildAuthConfig(config) {
+  if (config.oauth_provider) {
+    return {
+      user: config.imap_username,
+      accessToken: await getOAuthToken(config),
+    };
+  }
+  return {
+    user: config.imap_username,
+    pass: config.imap_password,
+  };
+}
+
+// The constructor becomes async-aware via a factory:
+export async function createImapReader(config) {
+  const auth = await buildAuthConfig(config);
+  return new ImapReader(config, auth);
+}
+```
+
+Nota: o `ImapReader` actual é um constructor síncrono. O branch OAuth
+exige uma chamada assíncrona (o `acquireTokenSilent` pode ir à rede fazer
+refresh), portanto a migração adiciona um factory assíncrono
+`createImapReader(config)` e o orchestrator passa a usar a factory em
+vez de `new ImapReader(config)`. A assinatura do constructor fica
+`ImapReader(config, prebuiltAuth)` para manter testes síncronos com
+fixtures.
+
+### 3.6 Fluxo em runtime — primeiro sync após wizard
+
+Sequência completa desde o user clicar "Activar Curve Sync" no passo 4
+até o primeiro expense aparecer:
+
+```
+1. Wizard concluído
+   └─▶ CurveConfig tem:
+         oauth_provider = 'microsoft'
+         oauth_account_id = '00000000-xxxx-xxxx-xxxx-xxxxxxxxxxxx.xxxx-...'
+         oauth_token_cache = <AES-256-GCM(JSON blob com access+refresh)>
+         imap_server = 'outlook.office365.com'
+         imap_port = 993
+         imap_tls = true
+         imap_password = null
+
+2. Scheduler dispara sync (cron, 5 min)
+   └─▶ syncOrchestrator.js chama createImapReader(config)
+       └─▶ buildAuthConfig(config) → oauth branch
+           └─▶ getOAuthToken(config)
+               ├─▶ buildMsalApp(config) → novo PCA com cachePlugin(user_id)
+               ├─▶ app.getTokenCache().getAccountByHomeId(oauth_account_id)
+               │   └─▶ beforeCacheAccess → MongoDB → decrypt → deserialize
+               ├─▶ app.acquireTokenSilent({ account, scopes })
+               │   ├─ cache hit (access token ainda válido)
+               │   │  └─▶ devolve access token
+               │   └─ cache miss (access token expirado)
+               │      ├─▶ POST /token com refresh_token
+               │      ├─▶ recebe novo access token
+               │      ├─▶ afterCacheAccess → serialize → encrypt → MongoDB updateOne
+               │      └─▶ devolve access token
+               └─▶ return accessToken
+
+3. ImapReader constrói cliente com auth: { user, accessToken }
+   └─▶ imapflow envia AUTHENTICATE XOAUTH2 para outlook.office365.com:993
+       └─▶ autenticação OK → SELECT folder → SEARCH UNSEEN SINCE ...
+           └─▶ fetch loop → markSeenBatch → close
+```
+
+**Custos típicos:**
+
+- Cache hit (90%+ dos syncs): ~50 ms para `getOAuthToken` (MongoDB read +
+  deserialize + lookup)
+- Cache miss / refresh (~1×/hora): ~300-500 ms extra (roundtrip ao token
+  endpoint MS)
+- Primeiro sync após wizard: cache miss garantido se demorou > 1h entre
+  consent e primeiro sync, cache hit caso contrário
+
+### 3.7 Erros e mapeamento
+
+| Erro MSAL | Quando | Mapeamento Curve Sync |
+|-----------|--------|----------------------|
+| `InteractionRequiredAuthError` (code `invalid_grant`) | Refresh token expirado (90d inactividade) | `OAuthReAuthRequired` → `last_sync_status='error'`, code `AUTH`, banner no dashboard |
+| `InteractionRequiredAuthError` (code `consent_required`) | Admin revogou consent do tenant | idem |
+| `ClientAuthError` (code `no_tokens_found`) | Cache corrupto ou vazio | `OAuthReAuthRequired('no account in cache')` |
+| `ServerError` (code `temporarily_unavailable`) | Azure AD down temporariamente | Deixar o sync falhar normalmente; retry no próximo schedule — não marcar como re-auth |
+| Network timeout ao `/token` endpoint | Rede intermitente | idem |
+
+O `OAuthReAuthRequired` é uma classe de erro nossa que o orchestrator
+detecta e traduz em `last_sync_status='error'` + `last_error_code='AUTH'`
++ log dedicado. O frontend pinta um banner vermelho no dashboard com
+botão "Re-autorizar" que manda o user directo para o passo 2 do wizard
+(salta o passo 1 porque o email já é conhecido).
 
 ---
 
-## 4. Gestão do `emailproxy.config`
+## 4. Fluxos OAuth Suportados
 
-### 4.1 Formato do ficheiro (INI / ConfigParser)
+Dois fluxos, lado a lado — DAG para Microsoft, external-auth (authorization
+code + PKCE + loopback) para Gmail e fallback universal. O diagrama abaixo
+mostra quem fala com quem em cada um, onde entra o MSAL, e onde os tokens
+aterram.
 
-O `emailproxy.config` usa formato INI standard (Python `configparser`,
-`interpolation=None`). Três tipos de secção:
+```
+╔══════════════════════════════════════════════════════════════════════════╗
+║  FLUXO A — DEVICE AUTHORIZATION GRANT (DAG)    — Microsoft primário     ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
-**Secções server** — definem o listener local e o servidor remoto:
-```ini
-[IMAP-1993]
-server_address = outlook.office365.com
-server_port = 993
-local_address = 127.0.0.1
+  Frontend            Backend Express         @azure/msal-node      Microsoft
+  (wizard)            /api/curve/oauth/*      (in-process)          login.*
+     │                       │                      │                   │
+     │  POST /start          │                      │                   │
+     │  {email}              │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │                       │ app.acquireToken     │                   │
+     │                       │   ByDeviceCode({     │                   │
+     │                       │     deviceCode       │                   │
+     │                       │     Callback, ... }) │                   │
+     │                       ├─────────────────────▶│                   │
+     │                       │                      │  POST /devicecode │
+     │                       │                      ├──────────────────▶│
+     │                       │                      │   {userCode,      │
+     │                       │                      │    deviceCode,    │
+     │                       │                      │    verifUri, ...} │
+     │                       │                      │◀──────────────────┤
+     │                       │  deviceCodeCallback  │                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │  (MSAL começa poll   │                   │
+     │                       │   interno cada 5s)   │                   │
+     │  {flowId, userCode,   │                      │                   │
+     │   verificationUri,    │                      │                   │
+     │   expiresIn}          │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  ┌─────────────────────────────────────────────────────────────┐ │
+     │  │ Wizard mostra userCode em destaque + link verificationUri   │ │
+     │  │                                                             │ │
+     │  │ User (noutro dispositivo ou mesma máquina):                 │ │
+     │  │   1. abre microsoft.com/devicelogin                         │ │
+     │  │   2. insere userCode                                        │ │
+     │  │   3. faz login                                              │ │
+     │  │   4. consente                                               │ │
+     │  └─────────────────────────────────────────────────────────────┘ │
+     │                       │                      │                   │
+     │  GET /poll?flowId=X   │                      │  poll /token      │
+     │  (cada 5s)            │                      ├──────────────────▶│
+     ├──────────────────────▶│                      │ authorization_    │
+     │  {pending, ...}       │                      │   pending         │
+     │◀──────────────────────┤                      │◀──────────────────┤
+     │                       │                      │                   │
+     │                       │                      │  (user consentiu) │
+     │                       │                      ├──────────────────▶│
+     │                       │                      │ {access_token,    │
+     │                       │                      │  refresh_token,   │
+     │                       │                      │  account, ...}    │
+     │                       │                      │◀──────────────────┤
+     │                       │                      │                   │
+     │                       │ ┌── afterCacheAccess ──▶┐                │
+     │                       │ │  encrypt + updateOne  │─▶ MongoDB       │
+     │                       │ │  curve_configs        │   oauth_token_  │
+     │                       │ └───────────────────────┘    cache        │
+     │                       │                      │                   │
+     │                       │  AuthResult          │                   │
+     │                       │  {account:           │                   │
+     │                       │    homeAccountId}    │                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │ authFlows.set(flowId,│                   │
+     │                       │   status=authorized) │                   │
+     │  GET /poll?flowId=X   │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │  {authorized,         │                      │                   │
+     │   accountId}          │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  avança para passo 3  │                      │                   │
+
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  FLUXO B — AUTHORIZATION CODE + PKCE + LOOPBACK   — Gmail / fallback    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Frontend            Backend Express         @azure/msal-node      Provider
+  (wizard)            /api/curve/oauth/*      (in-process)          (Google/MS)
+     │                       │                      │                   │
+     │  POST /start          │                      │                   │
+     │  {email}              │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │                       │ cryptoProvider       │                   │
+     │                       │  .generatePkceCodes()│                   │
+     │                       ├─────────────────────▶│                   │
+     │                       │ {verifier, challenge}│                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │                      │                   │
+     │                       │ app.getAuthCodeUrl({ │                   │
+     │                       │   scopes,            │                   │
+     │                       │   redirectUri:       │                   │
+     │                       │     'http://localhost│                   │
+     │                       │   codeChallenge,     │                   │
+     │                       │   codeChallengeMethod│                   │
+     │                       │     = 'S256',        │                   │
+     │                       │   loginHint: email })│                   │
+     │                       ├─────────────────────▶│                   │
+     │                       │ authorizeUrl         │                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │                      │                   │
+     │                       │ authFlows.set(flowId,│                   │
+     │                       │   {verifier,         │                   │
+     │                       │    status=pending,   │                   │
+     │                       │    expiresAt})       │                   │
+     │  {flowId,             │                      │                   │
+     │   authorizeUrl}       │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  ┌─────────────────────────────────────────────────────────────┐ │
+     │  │ Wizard abre authorizeUrl em nova tab.                       │ │
+     │  │                                                             │ │
+     │  │ Browser do user:                                            │ │
+     │  │   1. login no provider                                      │ │
+     │  │   2. consent screen                                         │ │
+     │  │   3. provider redirect →                                    │ │
+     │  │      http://localhost?code=XYZ&state=...                    │ │
+     │  │   4. browser: "localhost refused to connect" (normal)       │ │
+     │  │   5. user copia URL da address bar                          │ │
+     │  │   6. cola no textarea do wizard                             │ │
+     │  └─────────────────────────────────────────────────────────────┘ │
+     │                       │                      │                   │
+     │  POST /complete       │                      │                   │
+     │  {flowId,             │                      │                   │
+     │   redirectUrl}        │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │                       │ extract `code` do URL│                   │
+     │                       │ lookup authFlows →   │                   │
+     │                       │   verifier           │                   │
+     │                       │                      │                   │
+     │                       │ app.acquireTokenBy   │                   │
+     │                       │   Code({             │                   │
+     │                       │     code,            │                   │
+     │                       │     codeVerifier,    │                   │
+     │                       │     redirectUri,     │                   │
+     │                       │     scopes })        │                   │
+     │                       ├─────────────────────▶│  POST /token      │
+     │                       │                      ├──────────────────▶│
+     │                       │                      │ {access_token,    │
+     │                       │                      │  refresh_token,   │
+     │                       │                      │  account, ...}    │
+     │                       │                      │◀──────────────────┤
+     │                       │                      │                   │
+     │                       │ ┌── afterCacheAccess ──▶┐                │
+     │                       │ │  encrypt + updateOne  │─▶ MongoDB       │
+     │                       │ │  curve_configs        │   oauth_token_  │
+     │                       │ └───────────────────────┘    cache        │
+     │                       │                      │                   │
+     │                       │  AuthResult          │                   │
+     │                       │◀─────────────────────┤                   │
+     │  {authorized,         │                      │                   │
+     │   accountId}          │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  avança para passo 3  │                      │                   │
 ```
 
-**Secções account** — uma por email, com OAuth params e tokens cached:
-```ini
-[user@outlook.com]
-permission_url = https://login.microsoftonline.com/common/oauth2/v2.0/authorize
-token_url = https://login.microsoftonline.com/common/oauth2/v2.0/token
-oauth2_scope = https://outlook.office.com/IMAP.AccessAsUser.All offline_access
-redirect_uri = http://localhost
-client_id = xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-client_secret = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+**Pontos-chave do diagrama:**
 
-; --- campos auto-geridos pelo proxy (nunca editar manualmente) ---
-token_salt = <base64>
-token_iterations = 1200000
-access_token = <fernet-encrypted>
-access_token_expiry = 1712345678
-refresh_token = <fernet-encrypted>
-last_activity = 1712345678
-```
+1. **MSAL é in-process** — nunca sai do Node, não há comunicação HTTP
+   entre o backend Express e o MSAL. As chamadas `app.acquireToken*` são
+   imports directos.
 
-Para DAG, adicionar: `oauth2_flow = device`
+2. **Tokens aterram em MongoDB automaticamente** — via
+   `afterCacheAccess` do cache plugin (§3.4), dentro da mesma chamada
+   `acquireTokenByDeviceCode` / `acquireTokenByCode`. O route handler
+   não precisa de escrever os tokens manualmente.
 
-**Secção global** (opcional):
-```ini
-[emailproxy]
-delete_account_token_on_password_error = True
-allow_catch_all_accounts = False
-```
+3. **DAG: bridge callback → HTTP polling** — MSAL resolve uma única
+   promise quando o user consente. Para devolver o `userCode` ao
+   frontend imediatamente, o backend usa um deferred: espera pelo
+   `deviceCodeCallback` (poucos ms), guarda a promise em `authFlows`
+   para poll posterior, e devolve 202 com o `userCode`.
 
-### 4.2 Templates pré-preenchidos
+4. **External-auth: PKCE manual, verifier em memória** —
+   `generatePkceCodes()` é async e **não é feito automaticamente** pelo
+   `getAuthCodeUrl`. O verifier fica no `authFlows` (Map in-memory)
+   entre `/start` e `/complete` — não pode ir para MongoDB
+   (desnecessário) nem ser enviado ao frontend (quebra PKCE).
 
-O backend mantém templates por provider. Ao adicionar uma conta, preenche
-tudo excepto os tokens (que vêm do fluxo OAuth).
+5. **Loopback redirect** — `http://localhost` é aceite por Azure AD e
+   Google para "Desktop app" clients (RFC 8252). O browser tenta
+   redirigir mas não há nada a escutar — é esperado, e o user copia o
+   URL manualmente.
 
-**Outlook (O365 + personal):**
-```ini
-permission_url = https://login.microsoftonline.com/common/oauth2/v2.0/authorize
-token_url = https://login.microsoftonline.com/common/oauth2/v2.0/token
-oauth2_scope = https://outlook.office.com/IMAP.AccessAsUser.All offline_access
-redirect_uri = http://localhost
-client_id = ${AZURE_CLIENT_ID}
-client_secret = ${AZURE_CLIENT_SECRET}
-oauth2_flow = device
-```
+6. **`request.cancel = true`** — para abortar um DAG em curso (ex.: user
+   cancela o wizard), basta mutar a flag no mesmo objecto request que
+   passámos ao `acquireTokenByDeviceCode`. MSAL verifica entre polls.
 
-**Gmail:**
-```ini
-permission_url = https://accounts.google.com/o/oauth2/auth
-token_url = https://oauth2.googleapis.com/token
-oauth2_scope = https://mail.google.com/
-redirect_uri = http://localhost
-client_id = ${GOOGLE_CLIENT_ID}
-client_secret = ${GOOGLE_CLIENT_SECRET}
-```
+**Estado in-memory (`authFlows`):**
 
-Os valores `${...}` são substituídos por env vars na escrita do ficheiro —
-nunca ficam literalmente no config.
+| Campo | DAG | External-auth |
+|-------|-----|---------------|
+| `status` | pending / authorized / expired / declined / error | pending / authorized / expired / error |
+| `userId` | ✓ | ✓ |
+| `expiresAt` | ✓ (expires_in do MS) | ✓ (10 min) |
+| `request` (mutable) | ✓ (para `cancel = true`) | — |
+| `verifier` | — | ✓ (secret PKCE) |
+| `accountId` | após resolve | após resolve |
 
-### 4.3 Operações CRUD sobre o config
+TTL automático via `setTimeout`; não persiste entre restarts do server
+(restart durante flow pending → user vê `flow_not_found` no poll, wizard
+oferece retry).
 
-O backend implementa um serviço `ProxyConfigManager` que encapsula:
+**Detalhe da API (verificado contra o source do `@azure/msal-node`):**
 
-| Operação | Detalhes |
-|----------|----------|
-| **Read** | Parse INI com `ini` npm package (ou regex simples — não precisa de full parser). Listar secções `[email@]`, verificar se email existe, ler `last_activity` para health check. |
-| **Create** | Adicionar secção `[email@...]` com template do provider. Se secção server (`[IMAP-1993]`) não existir, criá-la também. |
-| **Update** | Reescrever campos de uma secção (e.g. mudar `oauth2_flow`). Nunca tocar nos campos `token_*` / `access_token` / `refresh_token`. |
-| **Delete** | Remover secção `[email@...]` inteira (incluindo tokens). Útil para cleanup ou re-setup. |
-| **Locking** | `flock()` no file descriptor durante read-modify-write para evitar race conditions com o proxy (que também escreve tokens) e com outros wizards concorrentes. |
-
-**Implementação recomendada:** ler ficheiro → parse com regex por secção →
-manipular como Map de secções → serializar → escrever atómicamente (write
-to temp + rename). O proxy usa `configparser` que tolera BOM, comentários
-`#` e `;`, e linhas em branco entre secções.
-
-### 4.4 Localização e permissões
-
-| Aspecto | Valor |
-|---------|-------|
-| Path | `EMAIL_PROXY_CONFIG_PATH` env var, default `/home/pi/email-oauth2-proxy/emailproxy.config` |
-| Permissions | `0600` (owner read+write only) |
-| Owner | Mesmo user que corre o proxy (e.g. `pi`) |
-| Backend access | Leitura e escrita directa (o Express corre como `pi` ou tem permissão) |
-| Proxy access | Leitura e escrita (guarda tokens após auth e refresh) |
-| Symlink | Suportado — o path pode ser um symlink para outro directório |
-
-**Se o backend correr como user diferente do proxy:** usar um grupo
-partilhado (e.g. `curve-sync`) com permissions `0660` e garantir que
-ambos os processos pertencem ao grupo.
+- `DeviceCodeRequest.deviceCodeCallback` recebe `DeviceCodeResponse`
+  com `userCode`, `deviceCode`, `verificationUri`, `expiresIn`,
+  `interval`, `message`. É síncrono do ponto de vista do MSAL.
+- `DeviceCodeRequest.cancel` é um **boolean mutável** no próprio objecto
+  request, não um token de cancelamento. Além disso há `timeout`
+  (segundos) para hard ceiling.
+- `CryptoProvider.generatePkceCodes()` é **async** — precisa de
+  `await`. PKCE **não** é automático no manual auth-code flow (é no
+  `acquireTokenInteractive`, que é outro método).
+- `TokenCacheContext` expõe `cacheHasChanged` (getter) e `hasChanged`
+  (property directa) — ambos funcionam, §3.4 usa `cacheHasChanged`
+  por consistência.
 
 ---
 
 ## 5. Wizard — Passos do Frontend
 
-### 5.0 Boas-vindas / Splash
+Topic outline. Expandir na fase de implementação com copy final, design
+específico, e handlers por caso de erro. A parte visual/design per-step
+vive na §11 (Design Tips por Passo), esta secção é sobre estrutura,
+state machine e comportamento.
 
-**Objectivo:** Explicar porquê, o quê, como — sem jargão técnico.
-Transformar um processo intimidante ("OAuth IMAP proxy config") numa
-narrativa simples.
+### 5.1 Estrutura geral
 
-**Conteúdo sugerido (3 blocos):**
+- **Rotas e entry points**
+  - `/curve/setup` — wizard completo (users sem config)
+  - `/curve/config` — settings simplificados (users já configurados:
+    pasta, intervalo, toggle sync)
+  - `/curve/setup?reauth=1&email=X` — re-auth entry point (salta steps
+    0 + 1, começa no step 2 com email pré-preenchido)
+  - Redirect rules: `/curve/config` redirige para `/curve/setup` se
+    `oauth_provider` null ou `oauth_token_cache` null
+- **State machine** (5 estados: 0 → 1 → 2 → 3 → 4 → done)
+  - Transições: avançar / recuar / abortar
+  - State ownership: wizard state no frontend (Zustand ou useReducer),
+    backend é stateless excepto pelo `authFlows` Map do step 2
+  - Não persistir em localStorage — mid-flow refresh implica recomeçar
+    (aceitável, wizard é curto). Excepção: `flowId` em sessionStorage
+    para sobreviver a F5 acidental no step 2.
+- **Abort / cancelar**
+  - Botão "Cancelar" presente em todos os steps
+  - `DELETE /api/curve/oauth/abort?flowId=X`
+  - DAG: mutação `request.cancel = true` no objecto guardado em
+    `authFlows` → MSAL pára o polling e a promise rejeita
+  - External-auth: `authFlows.delete(flowId)` (sem efeito upstream,
+    só liberta memória + verifier)
+- **Multi-tab concurrency**
+  - `authFlows` é keyed por `flowId` (não por user), cada tab tem o
+    seu → não há conflito
+  - Última tab a completar ganha — o CurveConfig é overwritten. Aceitável.
 
-> **Porquê** — "Os serviços de email como Outlook e Gmail deixaram de
-> aceitar passwords directas por questões de segurança."
+### 5.2 Step 0 — Boas-vindas
+
+**Objectivo UX:** transformar um processo que o user pode achar
+intimidante numa narrativa simples. O user não conhece "OAuth" e não
+precisa de conhecer. Deve sentir que está a configurar o Curve Sync
+como configuraria o Thunderbird ou o Outlook no telemóvel.
+
+**Copy sugerido:**
+
+> **Configurar acesso ao email**
 >
-> **O quê** — "O Curve Sync precisa de ler os teus recibos do Curve Pay.
-> Para isso, vais autorizar o acesso como se estivesses a configurar o
-> Thunderbird — é um processo standard e seguro."
+> Os serviços de email deixaram de aceitar passwords directas por
+> questões de segurança. Para ler os teus recibos do Curve Pay, o Curve
+> Sync precisa que autorizes o acesso — é o mesmo processo que fazes
+> quando adicionas uma conta de email num telemóvel novo.
 >
-> **Como** — "O setup demora menos de 2 minutos. Vais inserir o teu email,
-> autorizar o acesso uma vez, e o Curve Sync trata do resto automaticamente."
+> Demora cerca de 2 minutos. Vais inserir o teu email, autorizar o
+> acesso uma vez, e o Curve Sync trata do resto automaticamente.
 
-**Acção:** botão "Começar" → passo 1.
+**Banlist de vocabulário:** OAuth, IMAP, token, proxy, config, refresh
+token, XOAUTH2, device code, authorization code, PKCE, cache.
 
-**Design:**
-- Card centrado, max-width `32rem`, `animate-fade-in-up`
-- Ícone de envelope com escudo (segurança + email) no topo — SVG inline,
-  `text-curve-700`, `h-16 w-16`, centrado
-- Texto: `text-sm text-sand-700`, parágrafos com `space-y-3`
-- Botão: `btn-primary` full-width, texto "Começar"
-- Fundo: sem card border, floating no `sand-50` global
-- Step indicator (0/4) discreto no topo — pills ou dots em `sand-300`,
-  activo em `curve-700`
+**Replacelist:** "autorização" (não "OAuth"), "acesso ao email"
+(não "IMAP"), "ligação" (não "connection"), "recibos" (não "emails").
+
+**Layout:**
+
+- Card centrado, `max-w-lg`, sem sidebar (full-focus)
+- Ícone hero (64px) — envelope com escudo ou cadeado
+- Copy em 3 parágrafos com `space-y-3`
+- Um único botão primário full-width: "Começar"
+- Sem "Cancelar" neste step (não há nada para cancelar ainda)
+- Step indicator (5 dots) discreto no topo da card
+
+### 5.3 Step 1 — Email + detecção de provider
+
+**Objectivo UX:** recolher o email e dar feedback imediato de que o
+Curve Sync reconhece o provider. O user deve sentir que o sistema
+"sabe o que está a fazer".
+
+**Copy sugerido:**
+
+- Título: "Qual é o email que recebe os recibos?"
+- Label: "Email"
+- Placeholder: `o-teu-email@exemplo.com`
+- Helper text (cinza, pequeno): "Este é o email que recebe os recibos
+  do Curve Pay — não é necessariamente a tua conta Embers."
+- Toggle override (aparece para domínios não-reconhecidos):
+  "A minha empresa usa Microsoft 365"
+- Botão primário: "Continuar"
+- Botão secundário: "Cancelar" (volta a `/curve/config` se existir,
+  ou a `/`)
+
+**Comportamento do input (estados visuais):**
+
+| Estado | Border | Trailing icon | Helper |
+|--------|--------|---------------|--------|
+| Default | `sand-300` | — | padrão |
+| Focus | `curve-500` ring | — | padrão |
+| Typing (debouncing) | `sand-300` | — | padrão |
+| Checking backend | `sand-400` | spinner `curve-300` | "A verificar..." |
+| Valid + novo | `emerald-400` | check `emerald-600` | badge de provider |
+| Valid + já tem config | `amber-400` | warning `amber-600` | "Já tens esta conta. [Re-autorizar]" |
+| Valid + conflito user | `red-400` | cross `red-600` | "Este email já está associado a outra conta" |
+| Invalid format | `red-400` | cross `red-600` | "Email inválido" |
+
+**Badge de provider** (aparece abaixo do input após validação):
+
+- Microsoft: `bg-blue-50 text-blue-700` + ícone Outlook — "Conta Microsoft detectada"
+- Google: `bg-red-50 text-red-700` + ícone Gmail — "Conta Google detectada"
+- Unknown: `bg-sand-100 text-sand-600` + ícone `?` — "Provider não reconhecido — vamos tentar"
+
+**Backend contract:** `GET /api/curve/oauth/check-email?email=X` →
+`{ exists, conflict, provider_hint }`
+- `exists=true conflict=false` (mesmo user) → estado amber, link directo
+  para re-auth
+- `exists=true conflict=true` (outro user) → estado red, avançar bloqueado
+- `exists=false` → estado emerald, "Continuar" habilitado
+
+**Auto-detecção por domínio (frontend-side, instantâneo):**
+- `@outlook.*` / `@hotmail.*` / `@live.*` / `@msn.com` → microsoft
+- `@gmail.com` / `@googlemail.com` → google
+- outro → unknown (mostra toggle override)
+
+**Pitfalls a mitigar:**
+- Typo no email → só descoberto no step 2; ter confirmação visual aqui
+  (badge) ajuda a apanhar cedo
+- User copia com espaços → trim + lowercase antes de validar
+- Tenant O365 com domínio próprio → toggle manual converte unknown → microsoft
+
+### 5.4 Step 2 — Autorização OAuth
+
+**Objectivo UX:** conseguir o consent sem o user se perder. É o step mais
+complexo — duas variantes, múltiplos sub-estados, countdown — e o que
+mais beneficia de micro-copy cuidada e feedback visual imediato.
+
+Dois sub-variants auto-seleccionados pelo `provider_hint` do step 1.
 
 ---
 
-### 5.1 Email do Curve Pay
+#### 5.4.A — Variante DAG (Microsoft)
 
-**Objectivo:** Recolher o email que recebe os recibos Curve e auto-detectar
-o provider para escolher o fluxo OAuth certo.
+**Copy sugerido:**
 
-**Input:** campo email com validação em tempo real:
-- Formato email (regex básico, não over-engineer)
-- Trim whitespace, lowercase
-- Debounce 500ms antes de chamar backend
+> **Autoriza o acesso ao teu email**
+>
+> Clica no botão abaixo para abrir a página da Microsoft. Vais precisar
+> de inserir este código:
+>
+> `[ A1B2 C3D4 ]`  ← destaque visual
+>
+> [Copiar código]  [Abrir microsoft.com/devicelogin →]
+>
+> **1.** Abre o link acima
+> **2.** Insere o código quando pedido
+> **3.** Faz login com a tua conta de email
+> **4.** Autoriza o acesso (vai aparecer uma app chamada "Thunderbird"
+> — é normal)
+> **5.** Volta a esta página — detectamos automaticamente quando
+> terminas
+>
+> ⏳ À espera da tua autorização… `12:34` restantes
 
-**Backend check:** `GET /api/curve/proxy/accounts/:email/exists`
-- Se email já existe no `emailproxy.config`:
-  - Para o **mesmo** user_id → "Esta conta já está configurada. Queres
-    re-autorizar?" com opção de avançar (re-auth) ou cancelar
-  - Para **outro** user_id → "Este email já está associado a outra conta
-    do Curve Sync." Bloqueio. Link para contactar admin.
-- Se email não existe → proceed
+**Explainer colapsável "Thunderbird" (banner amber discreto):**
 
-**Auto-detect de provider:**
+> ℹ️ **Porque aparece "Thunderbird"?**
+>
+> O Curve Sync usa a mesma identificação que clientes de email como o
+> Thunderbird para aceder aos teus recibos. É uma prática comum em
+> ferramentas que leem email via OAuth, e não partilha nenhum dado com
+> terceiros.
+
+**Layout:**
+
+- Código em card `bg-curve-50 rounded-xl px-6 py-4`, fonte mono
+  `text-3xl font-bold text-curve-700 tracking-[0.3em]`, centrado
+- Botão "Copiar código" abaixo do código, `btn-secondary` pequeno.
+  Ao copiar: ícone transiciona para check + texto muda para "Copiado!"
+  durante 2s
+- Botão "Abrir microsoft.com/devicelogin" em destaque (`btn-primary`),
+  com ícone de external link e `target="_blank" rel="noopener"`
+- Lista numerada com `list-decimal`, passos curtos
+- Countdown: texto `text-sand-600 → amber-600 → red-600` conforme
+  expira. Formato `M:SS`.
+- Polling status card no fundo: `bg-sand-50` a pulsar suavemente
+  durante `pending`, transiciona para `bg-emerald-50` ao `authorized`
+
+**Backend contract:**
+- `POST /api/curve/oauth/start { email, provider: 'microsoft' }`
+  → `{ flowId, userCode, verificationUri, expiresIn }`
+- `GET /api/curve/oauth/poll?flowId=X` a cada 5s
+  → `{ status: 'pending' | 'authorized' | 'expired' | 'declined' | 'error', expiresIn? }`
+- `DELETE /api/curve/oauth/abort?flowId=X` (botão "Cancelar")
+
+**Estados UX do polling:**
+
+| Status | Visual | Acção |
+|--------|--------|-------|
+| `pending` | spinner `curve-300`, countdown | polling continua |
+| `authorized` | card border `emerald-400`, check animado | avançar ao step 3 com fade |
+| `expired` | card border `red-300`, cross | botão "Tentar de novo" → novo flowId |
+| `declined` | card border `red-300` | "A autorização foi recusada" + retry |
+| `error` | card border `red-300` | "Algo correu mal" + retry |
+
+---
+
+#### 5.4.B — Variante External-auth (Gmail / fallback)
+
+**Copy sugerido:**
+
+> **Autoriza o acesso ao teu email**
+>
+> O Google pede-te para autorizar num processo separado.
+>
+> [Abrir página de autorização Google →]
+>
+> **1.** Clica no botão para abrir a página do Google numa nova tab
+> **2.** Faz login e autoriza o acesso
+> **3.** O browser vai mostrar "localhost refused to connect" —
+>    **é perfeitamente normal**
+> **4.** Copia o endereço **completo** da barra do browser
+> **5.** Cola aqui em baixo
+>
+> ┌────────────────────────────────────┐
+> │ http://localhost?code=...          │ ← textarea para paste
+> └────────────────────────────────────┘
+>
+> [Validar]  [Cancelar]
+
+**Layout:**
+
+- Botão "Abrir página de autorização" em destaque (`btn-primary`)
+- Lista numerada com passo 3 realçado: `font-semibold text-amber-700`
+  no "É perfeitamente normal" para evitar pânico
+- Aviso persistente `bg-amber-50 border-amber-200`:
+  > ⚠️ Copia o URL **antes** de fechar a página de erro — depois de
+  > fechar, perdes o código e tens de recomeçar.
+- Textarea: `font-mono text-xs`, 3 rows, resize-none, placeholder
+  `http://localhost?code=...`
+- Botão "Validar" disabled até o textarea conter `code=`
+  (validação regex frontend antes de enviar ao backend)
+- Mini-ilustração opcional: screenshot estilizado da address bar com
+  highlight na zona do URL
+
+**Backend contract:**
+- `POST /api/curve/oauth/start { email, provider: 'google' }`
+  → `{ flowId, authorizeUrl }`
+- `POST /api/curve/oauth/complete { flowId, redirectUrl }`
+  → `{ status: 'authorized', accountId } | { status: 'error', code }`
+
+**Erros comuns e recuperação:**
+
+| Erro | Mensagem | Recuperação |
+|------|----------|-------------|
+| Textarea vazio | "Cola o URL no campo acima" | focus no textarea |
+| Sem `code=` no URL | "O URL não parece correcto — confirma que copiaste o endereço completo" | re-edit |
+| URL contém `error=access_denied` | "A autorização foi recusada" | tentar de novo ou cancelar |
+| Código já expirado | "O código expirou — abre a página de novo" | reset do flow |
+| Network / 5xx | "Não conseguimos validar — tenta outra vez" | retry button |
+
+---
+
+**Transição step 2 → step 3:** ao receber `authorized`, fade-out da card
+(200ms), fade-in do step 3 (300ms) com leve slide-up. Nunca teleportar.
+
+### 5.5 Step 3 — Verificação e selecção de pasta
+
+**Objectivo UX:** confirmar visualmente que tudo funciona e deixar o
+user escolher onde vão ser lidos os recibos. Deve ser rápido — o user
+acabou de autorizar, quer ver sucesso.
+
+**Simplificado vs V1** — sem proxy a configurar, sem restart de serviço.
+
+**Copy sugerido:**
+
+> **A confirmar tudo…**
+>
+> ⏳ A testar ligação ao teu email…
+> ✓ Ligação estabelecida
+>
+> ⏳ A procurar a pasta dos recibos…
+> ✓ Encontrámos 17 pastas
+>
+> **Qual é a pasta que recebe os recibos do Curve Pay?**
+>
+> [Dropdown: Curve Receipts ✓]  ← pre-seleccionado
+>
+> 💡 Pasta recomendada detectada automaticamente.
+>
+> [Voltar]  [Continuar]
+
+**Layout da checklist:**
+
+- Vertical stack, cada item `flex items-center gap-3`
+- Ícones `h-5 w-5`:
+  - Pending: spinner SVG `text-curve-300 animate-spin`
+  - Success: check SVG `text-emerald-600`, com animação de "draw-in"
+    (stroke-dasharray)
+  - Error: cross SVG `text-red-500`
+- Texto: `text-sm text-sand-700` durante pending, `text-sand-900`
+  quando completo
+- Items aparecem sequencialmente com `animate-fade-in` (cada um com
+  `delay` de 200ms após o anterior completar) — nunca tudo de uma vez
+
+**Comportamento interno:**
+
+1. Carrega CurveConfig (já populado pelo complete do step 2)
+2. `getOAuthToken(config)` — valida que os tokens funcionam
+   (`acquireTokenSilent`, cache hit imediato). **Se falhar, lança
+   `OAuthReAuthRequired`** — o step recua para 2 com mensagem clara
+3. `testConnection(config)` — open IMAP connection + list folders +
+   close. Devolve array de folder paths.
+
+**Dropdown de pasta (aparece após checklist completa):**
+
+- `animate-fade-in-up` com delay 200ms após último check
+- Border `border-emerald-200` (sucesso visual subtil)
+- Pre-seleccionar "Curve Receipts" se existir (ou variantes:
+  "INBOX/Curve Receipts", "Curve", etc — matching case-insensitive)
+- Hint verde abaixo: "Pasta recomendada detectada"
+- Fallback: INBOX seleccionada, hint amber:
+  "Não encontrámos 'Curve Receipts'. Podes usar INBOX ou criar uma
+  regra no teu email para mover os recibos para uma pasta específica."
+- Auto-save da selecção (debounce 300ms, consistente com
+  comportamento actual do CurveConfig)
+
+**Estados de erro:**
+
+| Erro | Mensagem | Recuperação |
+|------|----------|-------------|
+| `OAuthReAuthRequired` | "A autorização falhou — vamos tentar de novo" | auto-recuo ao step 2 após 3s |
+| `CONNECT` (network) | "Não conseguimos ligar ao servidor de email" | retry button |
+| `AUTH` (tokens rejeitados) | "O teu email rejeitou o acesso" | recuo ao step 2 |
+| Folder list vazia | "O teu email não retornou nenhuma pasta" | contactar admin, detalhes colapsáveis |
+| Timeout (>10s) | "A ligação está muito lenta" | retry |
+
+Detalhes técnicos colapsáveis (`<details>`) em caso de erro, `font-mono
+text-xs text-sand-500 bg-sand-50 rounded p-3` — úteis para debug sem
+poluir o UX normal.
+
+### 5.6 Step 4 — Activar sincronização
+
+**Objectivo UX:** momento de conclusão. O user já fez o trabalho todo
+— este step é essencialmente uma confirmação visual + ajustes finos +
+celebração subtil quando termina.
+
+**Copy sugerido:**
+
+> **Tudo pronto!**
+>
+> ┌─────────────────────────────────────────┐
+> │ EMAIL                                   │
+> │ user@outlook.com                        │
+> │                                         │
+> │ PROVIDER                                │
+> │ Microsoft  [ícone]                      │
+> │                                         │
+> │ PASTA                                   │
+> │ Curve Receipts                          │
+> │                                         │
+> │ AUTORIZAÇÃO                             │
+> │ Válida até 12 Julho 2026                │
+> └─────────────────────────────────────────┘
+>
+> **De quanto em quanto tempo verificamos?**
+> [5] minutos
+>
+> [×] Sincronizar automaticamente
+>
+> [  Activar Curve Sync  ]
+
+**Layout do card resumo:**
+
+- Grid 2 colunas (label + value) em `sm:`, stacked em mobile
+- Labels: `text-xs text-sand-400 uppercase tracking-wide`
+- Valores: `text-sm font-medium text-sand-900`
+- Separator entre resumo e inputs: `border-t border-sand-100 my-4`
+- Ícone do provider à esquerda do nome (16px)
+
+**Inputs editáveis:**
+
+- Intervalo sync: number input com steppers, `min=1 max=60`, default 5
+- Toggle "Sincronização automática activa": switch component, default
+  `on` — se `off`, o scheduler não arranca mas a config é guardada na
+  mesma (user pode activar mais tarde em `/curve/config`)
+
+**"Autorização válida até":**
+- Apenas para Microsoft (refresh token tem TTL conhecido: 90 dias
+  desde última utilização)
+- Formato: "Válida até 12 Julho 2026" (Intl.DateTimeFormat `pt-PT`)
+- Para Google: esconder a linha (Google não expõe TTL de refresh token
+  e eles são efectivamente permanentes enquanto o user não revoga)
+- Tooltip (`title`): "Vais receber um aviso antes de expirar para
+  re-autorizares sem perder sincronizações."
+
+**Botão final — estados:**
+
+| Estado | Visual | Texto |
+|--------|--------|-------|
+| Default | `btn-primary w-full py-3 text-base font-semibold` | "Activar Curve Sync" |
+| Loading | mesma classe, com spinner inline, disabled | "A activar…" |
+| Success | border `emerald-400`, fade | "Activado" + checkmark animado |
+| Error | border `red-300` | "Algo correu mal — tentar de novo" |
+
+**Idempotência:**
+- Botão vira `disabled` + "A activar…" no click (protecção anti
+  double-click)
+- Backend `PUT /api/curve/config` é idempotente (re-enviar os mesmos
+  valores não tem efeito adverso)
+
+**Success UX completo:**
+
+1. Click "Activar" → botão vira spinner
+2. Backend retorna OK → card transiciona border para `emerald-200`
+   (duração 300ms)
+3. Checkmark grande aparece centrado com `animate-fade-in-up`
+4. Texto muda para "Curve Sync activo!" em
+   `text-emerald-700 text-xl font-semibold`
+5. Sub-texto: "A primeira sincronização vai correr dentro de 5 minutos.
+   Vais ser redireccionado para o dashboard."
+6. Progress bar subtil de 3s a contar para baixo
+7. Auto-redirect para `/`
+8. Dashboard mostra badge "Sync activo" na sidebar por 10s para
+   continuidade visual
+
+### 5.7 Re-auth flow (entry point especial)
+
+- Trigger: sync falha com `OAuthReAuthRequired` → `last_sync_status=error`
+  com code `AUTH` → banner vermelho no dashboard com link
+- URL: `/curve/setup?reauth=1&email=X` (email vem do CurveConfig)
+- Wizard:
+  - Skip step 0 (sem boas-vindas — user já conhece o processo)
+  - Skip step 1 (email já conhecido, validação implícita)
+  - Começa directamente no step 2 com o provider_hint já resolvido
+  - Após step 2 success, step 3 é fast-path (só confirma ligação, não
+    mostra dropdown — folder já está set)
+  - Step 4 pode ser skipado completamente, ou mostrado read-only
+    com botão "Voltar ao dashboard"
+- CurveLog: log especial `wizard_reauth_completed` para distinguir
+  de setups iniciais
+
+### 5.8 Error recovery matrix
+
+Cada step tem uma tabela de erros esperados → mensagem user-facing →
+acção de recuperação. **Golden rule:** nunca deixar o user num beco sem
+saída; sempre oferecer "Tentar de novo" ou "Voltar".
+
+Exemplos para expandir na implementação:
+
+| Step | Erro | Mensagem | Recuperação |
+|------|------|----------|-------------|
+| 1 | Email em uso por outro user | "Este email já está associado a outra conta" | Cancelar, contactar admin |
+| 2 | DAG expired | "O código expirou" | Tentar de novo (novo flowId) |
+| 2 | Paste-back sem `code=` | "O URL não parece correcto" | Editar textarea |
+| 2 | `access_denied` | "A autorização foi recusada" | Tentar de novo ou cancelar |
+| 3 | `OAuthReAuthRequired` | "A autorização falhou" | Voltar ao step 2 |
+| 3 | Network timeout | "Não conseguimos ligar ao servidor" | Retry |
+| 4 | PUT /config 5xx | "Erro ao guardar a configuração" | Retry |
+
+### 5.9 Layout & information architecture
+
+- **Container do wizard** — `max-w-lg mx-auto` (mais estreito do que as
+  outras páginas do Curve Sync; foco total, sem distracções laterais)
+- **Sem sidebar / sem navegação** — o wizard é um modo à parte. A
+  sidebar normal do Curve Sync é escondida durante `/curve/setup` para
+  reforçar que o user está num fluxo linear
+- **Card único por step** — não full-page, sem header próprio. Tudo
+  vive dentro de um `bg-white rounded-2xl shadow-sm border border-sand-200 p-8`
+  centrado verticalmente
+- **Progress indicator no topo da card** — 5 dots `h-2 w-2 rounded-full`,
+  `sand-300` inactivos, `curve-700` activo, com `transition-colors
+  duration-300`. Não é click-to-navigate — é apenas indicador.
+- **Zona de acção no fundo** — botões stacked verticalmente em mobile,
+  side-by-side em `sm+`. "Voltar" como `btn-secondary` à esquerda,
+  "Continuar" / acção primária como `btn-primary` à direita. Excepção
+  step 0 (só "Começar") e step 4 (só "Activar").
+- **Sem scroll dentro da card** — se o conteúdo não cabe, aumentar a
+  altura da card ou partir o passo. Nunca ter scroll interno num
+  wizard step (quebra o sentido de "uma tarefa, uma vista").
+
+### 5.10 Voice, tone & copy guidelines
+
+**Voice:**
+
+- **Singular, informal** — "tu", "o teu email", "vamos fazer isto".
+  Consistente com o tom de toda a UI do Curve Sync.
+- **Confiante sem ser arrogante** — "o Curve Sync trata do resto" em
+  vez de "é super fácil!". Evitar entusiasmo falso.
+- **Transparente sobre privacidade** — quando relevante, explicar o
+  que é lido e o que não é. Exemplo no step 0: "vamos ler apenas os
+  recibos que o Curve Pay te envia".
+- **Reconhece fricção em vez de a esconder** — passo 3 do external-auth
+  diz "vai mostrar um erro — é normal!" em vez de fingir que não
+  acontece.
+- **Zero emoji** (confirmado no CLAUDE.md do projecto — não adicionar
+  emoji ao UI a menos que explicitamente pedido). Usar SVG icons.
+
+**Banlist de vocabulário** (nunca usar no UI user-facing):
+
+- OAuth, OAuth 2.0, XOAUTH2, SASL, PKCE
+- IMAP, SMTP, POP, TLS, SSL
+- token, access token, refresh token, cache
+- proxy, bridge, config, systemd
+- device code, authorization code, device flow
+- endpoint, callback, API, JSON
+- registration, tenant, client ID, client secret
+
+**Replacelist** (usar em vez disso):
+
+| Em vez de | Dizer |
+|-----------|-------|
+| "configurar OAuth" | "autorizar o acesso" |
+| "obter access token" | "autorizar o email" |
+| "IMAP connection" | "ligação ao email" |
+| "refresh token expirado" | "a autorização expirou" |
+| "token inválido" | "o email rejeitou o acesso" |
+| "proxy" | (não mencionar — é invisível) |
+| "folder" / "mailbox" | "pasta" |
+| "sync" (quando dirigido ao user) | "verificar recibos" ou "sincronizar" |
+
+**Strings-chave do wizard:**
+
 ```
-@outlook.com, @outlook.pt, @hotmail.com, @hotmail.pt,
-@live.com, @live.pt, @msn.com             → Microsoft (DAG)
-@gmail.com, @googlemail.com               → Google (external-auth)
-Outros                                     → Unknown (pedir escolha manual)
+Título wizard      "Configurar acesso ao email"
+Step 0 título      "Vamos ligar o Curve Sync ao teu email"
+Step 1 título      "Qual é o email que recebe os recibos?"
+Step 2 título      "Autoriza o acesso"
+Step 3 título      "A confirmar tudo…"
+Step 4 título      "Tudo pronto!"
+Botão cancelar     "Cancelar"
+Botão voltar       "Voltar"
+Botão continuar    "Continuar"
+Botão activar      "Activar Curve Sync"
+Success toast      "Curve Sync activo!"
+Error genérico     "Algo correu mal — tenta outra vez"
 ```
 
-**Pitfalls:**
-- Emails `@empresa.com` podem ser O365 — o wizard não sabe. Oferecer
-  toggle manual "A minha empresa usa Microsoft 365" → activa DAG.
-- Email typo → o user só descobre no passo 2 quando o login falha.
-  Confirmar email visualmente antes de avançar.
+### 5.11 Transições entre steps
 
-**Design:**
-- Input centrado, `text-lg`, com ícone de envelope à esquerda (input group)
-- Após validação: badge de provider aparece com `animate-fade-in`:
-  - Microsoft: ícone Outlook (ou genérico MS) + "Microsoft" em `text-xs`
-  - Google: ícone Gmail + "Google"
-  - Unknown: ícone `?` + "Provider desconhecido — vamos tentar"
-- Helper text abaixo: "O email da conta que recebe os recibos do Curve Pay.
-  Não é necessariamente a tua conta Embers."
-- Botão: "Continuar" (disabled até email válido + check backend OK)
-- Step indicator: 1/4 activo
+- **Animação padrão de entrada:** `animate-fade-in-up` (opacity
+  0 → 1 + translateY 8px → 0) com `duration-400 ease-out`
+- **Animação de saída:** fade-out rápido (`duration-200`) antes do
+  novo step fazer fade-in — não cross-fade (evita flicker)
+- **Transição avançar vs recuar:**
+  - Avançar: novo step slide-in da direita (subtil, +12px → 0)
+  - Recuar: novo step slide-in da esquerda (−12px → 0)
+  - Simbolicamente alinha com a "direcção" do fluxo
+- **Não mudar de página / rota** — todo o wizard vive em `/curve/setup`;
+  as transições acontecem dentro do mesmo container. Histórico browser
+  tratado via `replaceState` (sem entradas no back button para cada step)
+- **Exceção: success do step 4** — a transição para `/` é uma navegação
+  real, precedida de 3s de celebração no próprio card
+- **Reduzido motion** — respeitar `prefers-reduced-motion` e cair em
+  fades simples sem translate
 
----
+### 5.12 Micro-interactions & feedback
 
-### 5.2 Autorização OAuth
+- **Copy-to-clipboard (step 2 DAG):** botão "Copiar código" → ao
+  click, ícone SVG transiciona para check verde + texto muda para
+  "Copiado!" durante 2s, depois reverte. Haptics no mobile via
+  `navigator.vibrate(10)` quando disponível.
+- **Countdown do step 2:** cor muda conforme aproxima de 0:
+  `sand-600` (>5 min) → `amber-600` (1–5 min) → `red-600` (<1 min).
+  Pulsação subtil (scale 1 ↔ 1.02) no último minuto.
+- **Input validation do step 1:** debounce 500ms antes de chamar
+  backend. Durante a espera: spinner pequeno à direita do input
+  (substitui temporariamente check/cross). Transições entre estados
+  com `transition-colors duration-200`.
+- **Checklist do step 3:** cada item faz "draw-in" do checkmark via
+  `stroke-dasharray` animado (SVG) — sensação de "foi mesmo feito
+  agora". Delay de 200ms entre items para cadência natural.
+- **Botão "Activar" do step 4:** hover com `scale-[1.01]` subtil,
+  active com `scale-[0.99]`. Loading state troca texto + adiciona
+  spinner inline.
+- **Success do step 4:** card faz pulso verde `bg-emerald-50 →
+  bg-white` por 300ms, depois checkmark desenha-se, depois texto de
+  sucesso aparece. Sequência encadeada, não tudo de uma vez.
 
-**Objectivo:** Obter o consent do user junto do provider e capturar os
-tokens OAuth. Este é o passo mais complexo e o que mais beneficia de UX
-cuidado.
+### 5.13 Empty states & edge cases
 
-#### 5.2.A — Variante DAG (Microsoft)
+- **Primeiro visit sem config:** ao aceder `/curve/config` pela
+  primeira vez, redirect automático para `/curve/setup`. Sem página
+  intermédia.
+- **Mid-flow refresh:** state local perdido, user cai no step 0. Uma
+  pequena nota (sand-600, `text-xs`) na primeira card: "Começámos do
+  início — só demora 2 minutos." Sem acusação, sem fricção.
+- **Network offline:** banner persistente no topo da card `bg-red-50
+  text-red-700`: "Sem ligação à internet — religa para continuar".
+  Todos os CTAs ficam `disabled` até `navigator.onLine` voltar.
+- **Provider desconhecido (step 1):** copy neutral — "Vamos tentar o
+  método padrão". Fallback silencioso para external-auth sem explicar
+  porquê (o user não precisa de saber a taxonomia de flows).
+- **Azure AD app não configurada (erro de deployment):** step 2
+  falha com erro genérico + `<details>` técnico. Copy: "Algo não
+  está configurado no lado do Curve Sync. Contacta o administrador."
+  Não culpar o user.
+- **Wizard abandonado a meio (telemetria):** sem garbage collection
+  necessário — `authFlows` tem TTL automático, nada persiste em DB
+  a não ser tokens após step 2 complete (e mesmo esses ficam inócuos
+  sem `oauth_provider` set).
 
-**Sequência no frontend:**
+### 5.14 Accessibility
 
-1. User chega ao passo → frontend faz `POST /api/curve/proxy/auth/start`
-   com `{ email, flow: "device" }`.
+- **Focus management:** auto-focus no primeiro input/botão de cada
+  step. Ao mudar de step, mover focus para o título (h2) com `tabindex=-1`
+  para anunciar em screen readers.
+- **Keyboard shortcuts:**
+  - `Enter` = continuar (quando o form é válido)
+  - `Esc` = cancelar (com confirmação no step 2+ para evitar perda
+    acidental)
+  - `Tab` / `Shift+Tab` navegam entre inputs e botões dentro da card
+- **ARIA:**
+  - `aria-live="polite"` nas mensagens de erro e no texto de status do
+    polling (step 2)
+  - `aria-busy="true"` nos spinners durante operações
+  - `role="progressbar"` + `aria-valuenow` / `aria-valuemax` no
+    countdown do step 2
+  - `aria-describedby` ligando inputs aos helper texts
+- **Contraste:** todos os textos cumprem WCAG AA (4.5:1) — a paleta
+  `sand-*` já está calibrada para isto, mas verificar especificamente
+  os helper texts em `sand-400` / `sand-500`
+- **Screen reader hints:** o código DAG é lido carácter a carácter
+  (`aria-label="código A, 1, B, 2, C, 3, D, 4"`) para facilitar
+  transcrição
 
-2. Backend responde com `{ user_code: "A1B2C3D4", verification_uri: "https://microsoft.com/devicelogin", expires_in: 900 }`.
+### 5.15 Telemetria
 
-3. Frontend mostra:
-   - Código em destaque (fonte mono, `text-3xl font-bold text-curve-700`,
-     `tracking-[0.3em]`, fundo `curve-50 rounded-xl px-6 py-4`)
-   - Botão "Copiar código" (clipboard API) com feedback visual (ícone
-     check durante 2s)
-   - Link/botão "Abrir microsoft.com/devicelogin" (`target="_blank"`)
-   - Instruções numeradas:
-     1. "Clica no botão abaixo para abrir a página da Microsoft"
-     2. "Cola o código quando pedido"
-     3. "Faz login com a tua conta de email"
-     4. "Autoriza o acesso — vai aparecer 'Thunderbird' (ou o nome da app),
-        é normal"
-     5. "Volta a esta página — o Curve Sync detecta automaticamente quando
-        terminas"
+Events mínimos no CurveLog para perceber onde users desistem:
 
-4. Frontend inicia polling: `GET /api/curve/proxy/auth/poll` a cada 5s.
-   - `{ status: "pending" }` → manter spinner
-   - `{ status: "authorized" }` → avançar para passo 3
-   - `{ status: "expired" }` → mostrar "O código expirou. Tentar de novo?"
-   - `{ status: "declined" }` → mostrar "A autorização foi recusada.
-     Tentar de novo?"
+- `wizard_started` — quando o step 0 monta
+- `wizard_step_reached` com `{ step: 0..4 }`
+- `wizard_completed` — submit bem-sucedido do step 4
+- `wizard_abandoned_at` com `{ step, reason }` — detectado via
+  beforeunload ou timeout no lado do cliente. `reason` pode ser
+  `refresh`, `close_tab`, `explicit_cancel`, `navigation_away`.
+- `wizard_reauth_completed` — distinguível de setups iniciais
+- `wizard_reauth_failed` com motivo
 
-5. Countdown timer visual: barra de progresso ou texto "Expira em X:XX"
-   decrementando. Ao expirar sem autorização, oferecer retry.
-
-**Explainer "Thunderbird":** banner `amber-50` discreto:
-> "Na página da Microsoft vai aparecer uma app chamada 'Thunderbird'
-> (ou similar) a pedir permissão para ler o teu email. É esperado —
-> o Curve Sync usa a mesma identificação que clientes de email como o
-> Thunderbird para aceder aos teus recibos. Nenhum email é partilhado
-> com terceiros."
-
-#### 5.2.B — Variante External Auth (Google / outros)
-
-**Sequência no frontend:**
-
-1. User chega ao passo → frontend faz `POST /api/curve/proxy/auth/start`
-   com `{ email, flow: "authorization_code" }`.
-
-2. Backend responde com `{ permission_url: "https://accounts.google.com/o/oauth2/auth?client_id=...&scope=...&redirect_uri=http://localhost&..." }`.
-
-3. Frontend mostra:
-   - Botão "Abrir página de autorização" (link para `permission_url`,
-     `target="_blank"`)
-   - Instruções numeradas com mini-ilustrações (screenshots estilizados):
-     1. "Clica no botão para abrir a página do Google"
-     2. "Faz login e autoriza o acesso"
-     3. "O browser vai mostrar uma página de erro — é normal!"
-     4. "Copia o endereço **completo** da barra do browser"
-     5. "Cola aqui em baixo"
-   - Input `textarea` com placeholder: "Cola aqui o URL da barra de
-     endereço (começa por http://localhost?code=...)"
-   - Botão "Validar" (disabled até input não-vazio)
-
-4. User cola o URL → frontend faz `POST /api/curve/proxy/auth/complete`
-   com `{ email, redirect_url: "..." }`.
-
-5. Backend extrai `code` do URL, faz token exchange, guarda tokens.
-   - Sucesso → `{ status: "authorized" }` → avançar para passo 3
-   - Erro → `{ error: "invalid_code" }` → "O URL não contém um código
-     válido. Confirma que copiaste o endereço completo."
-
-**Pitfalls:**
-- User copia só parte do URL (sem `?code=`) → validação frontend antes
-  de enviar (regex: contém `code=`)
-- User demora > 10 min → código expira → mensagem clara + retry
-- User nega permissão → redirect URL contém `error=access_denied` →
-  mensagem amigável
-- Popup blocker → instruções para permitir popups ou copiar URL manualmente
-
-**Design (ambas variantes):**
-- Card centrado, duas áreas: esquerda = instruções, direita = acção
-  (ou stacked em mobile)
-- Progress states com ícone:
-  - `⏳ A aguardar autorização...` (spinner `curve-300`)
-  - `✓ Autorizado com sucesso!` (`emerald-700`, `animate-fade-in`)
-  - `✗ Expirado / Recusado` (`red-50`, retry button)
-- Transição entre estados: `animate-fade-in`, opacity swap
-- Step indicator: 2/4 activo
-
----
-
-### 5.3 Verificação e Pasta
-
-**Objectivo:** Confirmar que a cadeia inteira funciona (proxy → IMAP →
-servidor) e deixar o user escolher a pasta IMAP.
-
-**Sequência:**
-
-1. Chegada ao passo → backend automaticamente:
-   a. Gera encryption password (random 24 chars, base64url) → guarda no
-      `CurveConfig.imap_password` (encriptado AES-256-GCM)
-   b. Escreve/actualiza secção no `emailproxy.config`
-   c. Restart do proxy (`systemctl restart email-oauth2-proxy`)
-   d. Espera 2s para o proxy arrancar
-   e. Testa ligação IMAP (`POST /api/curve/test-connection` internamente)
-   f. Se OK → lista de pastas
-
-2. Frontend mostra checklist sequencial (cada item aparece após o anterior):
-   ```
-   ⏳ A preparar proxy...        → ✓ Proxy configurado
-   ⏳ A reiniciar serviço...     → ✓ Serviço activo
-   ⏳ A testar ligação IMAP...   → ✓ Ligação OK
-   ⏳ A obter pastas...          → ✓ X pastas encontradas
-   ```
-
-3. Após sucesso → dropdown de pasta IMAP aparece com `animate-fade-in`.
-   - Se "Curve Receipts" existe → pré-seleccionada com destaque
-   - Se não existe → INBOX seleccionada, com hint "Não encontrámos
-     'Curve Receipts'. Confirma que a pasta existe na tua conta de email."
-
-4. Selecção de pasta auto-salva (debounce 300ms, como a config actual).
-
-**Pitfalls:**
-- Proxy não arranca → checar `journalctl` output, mostrar "O serviço de
-  proxy não conseguiu arrancar. Contacta o administrador." com detalhes
-  técnicos colapsáveis.
-- Auth failed → tokens inválidos (password errada ou tokens corrompidos).
-  Oferecer "Voltar ao passo anterior" para re-autorizar.
-- Timeout no restart → retry com backoff (2s, 4s, 8s). Se 3 falhas →
-  mensagem de erro com contexto.
-- Pasta "Curve Receipts" não existe → não bloquear, mas avisar. O user
-  pode querer usar outra pasta ou criar a regra no email primeiro.
-
-**Design:**
-- Checklist vertical com ícones: spinner SVG (`curve-300`) → checkmark
-  SVG (`emerald-600`) → cross SVG (`red-500`)
-- Cada item: `flex items-center gap-3`, texto `text-sm text-sand-700`
-- Spacing entre items: `space-y-3`
-- Dropdown de pasta: aparece só após checklist completa, com
-  `animate-fade-in-up` e border `emerald-200` (sucesso visual)
-- Erro: item falha com `text-red-600`, detalhes em `<details>` colapsável
-  com `text-xs text-sand-500 font-mono`
-- Step indicator: 3/4 activo
-
----
-
-### 5.4 Activar Sincronização
-
-**Objectivo:** Confirmar tudo, configurar schedule, e activar a
-sincronização automática.
-
-**Conteúdo:**
-
-1. **Card resumo** (read-only):
-   | Campo | Valor |
-   |-------|-------|
-   | Email | user@outlook.com |
-   | Provider | Microsoft (ícone) |
-   | Pasta | Curve Receipts |
-   | Proxy | 127.0.0.1:1993 (activo) |
-   | Último teste | há 30 segundos ✓ |
-
-2. **Inputs editáveis:**
-   - Intervalo sync: number input, default 5 min, range 1–60
-   - Toggle: "Sincronização automática activa" (default on)
-
-3. **Botão:** "Activar Curve Sync" (`btn-primary`, full-width, `text-base`)
-
-4. **On submit:**
-   - `PUT /api/curve/config` com todos os campos
-     (imap_server=127.0.0.1, imap_port=1993, imap_tls=false,
-     imap_username=email, imap_folder, sync_enabled, sync_interval_minutes,
-     confirm_folder=true)
-   - Se sync_enabled → scheduler.start()
-   - Redirige para `/` (dashboard) ou mostra inline:
-     "Curve Sync activo! A primeira sincronização vai correr dentro de
-     X minutos." com link para Logs.
-
-**Pós-activação (primeira visita ao dashboard):**
-- Badge na sidebar: "Sync activo" em `emerald-100 text-emerald-700`
-- Se primeira sync já correu: stat card com contagem de despesas importadas
-
-**Design:**
-- Card com border `sand-200`, padding generoso
-- Resumo: grid de 2 colunas, labels `text-xs text-sand-400 uppercase`,
-  valores `text-sm font-medium text-sand-900`
-- Inputs no fundo do card com separator `border-t border-sand-100 pt-4`
-- Botão: full-width, `py-3`, com micro-animação no hover (scale 1.01)
-- Sucesso: background do card transiciona brevemente para `emerald-50`
-  (300ms) antes de redirigir
-- Step indicator: 4/4 activo (cheio)
+Não enviar PII nos eventos — `user_id` basta, o email vive no
+CurveConfig. Agregar no dashboard com queries simples sobre o CurveLog.
 
 ---
 
 ## 6. Backend — Novos Endpoints
 
-### 6.1 Proxy Management
+Listagem concentrada. Só endpoints OAuth + integração com os existentes.
+**Todos os endpoints de proxy management desaparecem** (`/api/curve/proxy/*`
+deixa de existir).
 
-#### `GET /api/curve/proxy/status`
+Todos os endpoints abaixo estão montados em `/api/curve/oauth/*`, exigem
+autenticação (cookie de sessão Embers, como os outros endpoints do Curve
+Sync), e são scoped ao `user_id` da sessão — nunca aceitam `user_id` no
+body/query.
 
-Verifica se o proxy está instalado e a correr. Usado no arranque do wizard
-para mostrar erros antes de o user começar.
+### 6.1 OAuth flow — novos
 
-```
-Response 200:
-{
-  "installed": true,
-  "running": true,
-  "config_path": "/home/pi/email-oauth2-proxy/emailproxy.config",
-  "config_writable": true,
-  "accounts_count": 3
-}
+#### `GET /api/curve/oauth/check-email`
 
-Response 200 (not installed):
-{
-  "installed": false,
-  "running": false,
-  "error": "emailproxy.py not found at /home/pi/email-oauth2-proxy"
-}
-```
-
-Implementação: `fs.existsSync(VENV_PATH)`, `child_process.exec('systemctl is-active email-oauth2-proxy')`, `fs.accessSync(CONFIG_PATH, fs.constants.W_OK)`.
-
-#### `GET /api/curve/proxy/accounts/:email/exists`
-
-Verifica se um email já tem secção no `emailproxy.config`. Usado no
-passo 5.1 para prevenir duplicados.
-
-```
-Response 200:
-{ "exists": true, "has_tokens": true, "owner_user_id": "665a..." }
-
-Response 200:
-{ "exists": false }
-```
-
-Implementação: parse INI, procurar secção `[email]`, verificar se
-`access_token` existe (→ `has_tokens`). Cross-reference com
-`CurveConfig.findOne({ imap_username: email })` para saber o owner.
-
-#### `POST /api/curve/proxy/accounts`
-
-Adiciona uma nova conta ao `emailproxy.config` com template do provider.
+Verifica se um email já está associado a alguma `CurveConfig`. Usado no
+step 1 do wizard para bloquear duplicados e oferecer re-auth inline.
 
 ```
 Request:
-{
-  "email": "user@outlook.com",
-  "provider": "microsoft"
-}
+  GET /api/curve/oauth/check-email?email=user@outlook.com
 
-Response 201:
-{ "message": "Account added", "server_section": "IMAP-1993" }
-
-Response 409:
-{ "error": "Account user@outlook.com already exists in proxy config" }
-```
-
-Implementação: ler config → flock → verificar duplicado → adicionar secção
-server (se necessário) + secção account → escrever atomicamente → unlock.
-
-#### `DELETE /api/curve/proxy/accounts/:email`
-
-Remove conta do `emailproxy.config`. Requer confirmação — apaga tokens.
-
-```
 Response 200:
-{ "message": "Account removed", "proxy_restart_needed": true }
+  {
+    "exists": false,
+    "provider_hint": "microsoft"   // microsoft | google | unknown
+  }
+
+Response 200 (same user, already configured):
+  {
+    "exists": true,
+    "conflict": false,
+    "provider_hint": "microsoft"
+  }
+
+Response 200 (different user owns this email):
+  {
+    "exists": true,
+    "conflict": true,
+    "provider_hint": "microsoft"
+  }
 ```
 
-Implementação: ler config → flock → remover secção → escrever → unlock.
-Não remove secção server (pode ter outras contas). Não faz restart
-automático — deixa para o caller.
+**Implementação:** lookup por `CurveConfig.imap_username`, cross-check
+com `user_id` da sessão, derivar `provider_hint` do sufixo do domínio.
 
-#### `POST /api/curve/proxy/restart`
+---
 
-Reinicia o serviço systemd. Rate-limited: max 1 por minuto global.
+#### `POST /api/curve/oauth/start`
 
-```
-Response 200:
-{ "message": "Proxy restarted", "status": "active" }
-
-Response 429:
-{ "error": "Proxy was restarted recently. Try again in 45 seconds." }
-
-Response 500:
-{ "error": "Proxy failed to start", "journal": "..." }
-```
-
-Implementação: `child_process.exec('sudo systemctl restart email-oauth2-proxy')`.
-Esperar 2s, depois `systemctl is-active` para confirmar. Se falhar, capturar
-últimas 20 linhas de `journalctl -u email-oauth2-proxy --no-pager -n 20`.
-
-**Nota sobre sudo:** o Express corre como user `pi` que precisa de
-sudoers entry para restart do serviço sem password:
-```
-pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart email-oauth2-proxy
-pi ALL=(ALL) NOPASSWD: /usr/bin/systemctl is-active email-oauth2-proxy
-```
-
-### 6.2 OAuth Flow
-
-#### `POST /api/curve/proxy/auth/start`
-
-Inicia o fluxo OAuth para uma conta. Comportamento depende do `flow`.
+Inicia um fluxo OAuth (DAG ou authorization code). O comportamento muda
+conforme `provider` / `flow` — a response é polimórfica.
 
 ```
 Request:
-{
-  "email": "user@outlook.com",
-  "flow": "device"           // ou "authorization_code"
-}
+  {
+    "email": "user@outlook.com",
+    "provider": "microsoft"        // microsoft | google
+  }
 ```
 
-**Para `flow: "device"` (DAG):**
-
-Backend faz POST directamente ao device code endpoint da Microsoft
-(não precisa do proxy para isto — é puro HTTP).
+**Response para Microsoft (DAG):**
 
 ```
 Response 200:
-{
-  "flow": "device",
-  "user_code": "A1B2C3D4",
-  "verification_uri": "https://microsoft.com/devicelogin",
-  "expires_in": 900,
-  "poll_id": "abc123"        // ID interno para o frontend fazer poll
-}
+  {
+    "flow": "device_code",
+    "flowId": "f5a7c2e1-...",
+    "userCode": "A1B2C3D4",
+    "verificationUri": "https://microsoft.com/devicelogin",
+    "expiresIn": 900,
+    "message": "To sign in, use a web browser..."
+  }
 ```
 
-O backend guarda o `device_code` em memória (Map keyed by `poll_id`)
-para polling posterior. TTL = `expires_in` + 30s margin.
-
-**Para `flow: "authorization_code"` (external-auth):**
-
-Backend constrói o permission URL com os params OAuth.
+**Response para Google (external-auth):**
 
 ```
 Response 200:
-{
-  "flow": "authorization_code",
-  "permission_url": "https://accounts.google.com/o/oauth2/auth?...",
-  "expires_in": 600
-}
+  {
+    "flow": "authorization_code",
+    "flowId": "f5a7c2e1-...",
+    "authorizeUrl": "https://accounts.google.com/o/oauth2/auth?...",
+    "expiresIn": 600
+  }
 ```
 
-#### `GET /api/curve/proxy/auth/poll?poll_id=abc123`
-
-Polling para o fluxo DAG. Frontend chama a cada 5 segundos.
+**Response 429 / 400:**
 
 ```
+  { "error": "too_many_active_flows" }     // max 3 flows pendentes por user
+  { "error": "invalid_provider" }
+  { "error": "email_in_use_by_other_user" }
+```
+
+**Implementação:**
+- Instancia `PublicClientApplication` via `buildMsalApp(config)` (ver §3)
+- DAG: chama `acquireTokenByDeviceCode` com `deviceCodeCallback` que
+  resolve um deferred; guarda a promise top-level em `authFlows` para
+  polling posterior (ver §4.1 e o snippet completo de
+  `startDeviceCodeFlow`)
+- External-auth: gera PKCE via `cryptoProvider.generatePkceCodes()`,
+  chama `getAuthCodeUrl`, guarda `verifier` em `authFlows`
+- `flowId = crypto.randomUUID()`, TTL automático via `setTimeout`
+
+---
+
+#### `GET /api/curve/oauth/poll`
+
+Polling para flows DAG. Frontend chama a cada 5 segundos durante o
+step 2. Para external-auth **não é usado** — o sucesso chega via
+`/complete`.
+
+```
+Request:
+  GET /api/curve/oauth/poll?flowId=f5a7c2e1-...
+
 Response 200 (pending):
-{ "status": "pending", "expires_in": 845 }
+  {
+    "status": "pending",
+    "expiresIn": 845
+  }
 
 Response 200 (authorized):
-{
-  "status": "authorized",
-  "email": "user@outlook.com"
-}
+  {
+    "status": "authorized",
+    "accountId": "00000000-0000-0000-0000-000000000000.xxxxxxxx-..."
+  }
 
-Response 200 (expired):
-{ "status": "expired" }
+Response 200 (terminal error):
+  { "status": "expired" }
+  { "status": "declined" }
+  { "status": "error", "error": "AADSTS..." }
 
-Response 200 (declined):
-{ "status": "declined", "error": "The user denied the authorization request" }
+Response 404:
+  { "error": "flow_not_found" }             // flowId TTL'd ou inválido
 ```
 
-Implementação: backend faz POST ao token endpoint com o `device_code`
-armazenado. Se `error: "authorization_pending"` → retorna pending. Se
-tokens recebidos → encripta com PBKDF2/Fernet (replicando o algoritmo
-do proxy) e escreve no `emailproxy.config` → retorna authorized.
+**Side effect ao primeiro `authorized`:** actualiza o `CurveConfig` do
+user com:
+- `oauth_provider`
+- `oauth_account_id`
+- `oauth_client_id`
+- `oauth_tenant_id`
+- `imap_server`, `imap_port`, `imap_tls`, `imap_username`
+  (hardcoded para o provider)
+- `imap_password` set para `null`
 
-**Alternativa mais simples (subprocess):** em vez de replicar a crypto
-do proxy, o backend pode:
-1. Guardar os tokens raw num ficheiro temporário
-2. Spawnar o proxy uma vez para que ele os encripte
-3. Ou aceitar que, no primeiro IMAP LOGIN, o proxy faz o PBKDF2 ele próprio
+Os tokens em si **já foram persistidos** pelo cache plugin durante a
+resolução do `acquireTokenByDeviceCode` — este endpoint só escreve a
+metadata para o `CurveConfig` saber que conta usar no
+`acquireTokenSilent` futuro.
 
-Esta decisão está em aberto (secção 12).
+---
 
-#### `POST /api/curve/proxy/auth/complete`
+#### `POST /api/curve/oauth/complete`
 
-Completa o fluxo external-auth (paste-back do redirect URL).
+Finaliza um fluxo external-auth (Gmail e providers sem DAG). Recebe o
+URL de redirect colado pelo user e executa o token exchange.
 
 ```
 Request:
-{
-  "email": "user@outlook.com",
-  "redirect_url": "http://localhost?code=M.C507_BL2...&state=..."
-}
+  {
+    "flowId": "f5a7c2e1-...",
+    "redirectUrl": "http://localhost?code=4/0AX4X...&state=..."
+  }
 
 Response 200:
-{ "status": "authorized" }
+  {
+    "status": "authorized",
+    "accountId": "103...@gmail.com"
+  }
 
 Response 400:
-{ "error": "No authorization code found in URL" }
+  { "error": "no_code_in_url" }
+  { "error": "access_denied" }
+  { "error": "invalid_grant" }             // código expirado / usado
+  { "error": "flow_expired" }              // passaram > 10 min desde /start
 
-Response 400:
-{ "error": "Authorization was denied: access_denied" }
+Response 404:
+  { "error": "flow_not_found" }
 ```
 
-Implementação: parse URL → extrair `code` → POST ao token endpoint com
-`grant_type=authorization_code` → receber tokens → encriptar → escrever
-no config.
+**Implementação:**
+1. Lookup do `flowId` em `authFlows`
+2. Parse do `redirectUrl` (URL nativo), extrair `code` e `error`
+3. Se `error` → devolver terminal error
+4. Chamar `app.acquireTokenByCode({ code, codeVerifier, redirectUri, scopes })`
+5. Tokens persistem automaticamente via cache plugin
+6. Actualizar `CurveConfig` com a mesma metadata do `/poll` authorized
+7. Remover entry do `authFlows`
 
-### 6.3 Integração com endpoints existentes
+---
 
-Os endpoints actuais mantêm-se inalterados:
+#### `DELETE /api/curve/oauth/abort`
 
-| Endpoint | Usado no wizard | Passo |
-|----------|----------------|-------|
-| `PUT /api/curve/config` | Sim — salva imap_server, port, TLS, folder, schedule | 5.3, 5.4 |
-| `POST /api/curve/test-connection` | Sim — verifica ligação IMAP pós-auth | 5.3 |
-| `GET /api/curve/config` | Sim — detecta se user já tem config (redirect setup vs config) | Router |
-| `POST /api/curve/sync` | Não directamente — mas pode ser trigger pós-wizard para primeira sync | 5.4 (opcional) |
+Cancela um flow em curso (botão "Cancelar" no step 2 do wizard).
+Idempotente — chamar com um `flowId` inexistente não é erro.
 
-O wizard é um **orquestrador** que chama estes endpoints na sequência
-certa — não os substitui.
+```
+Request:
+  DELETE /api/curve/oauth/abort?flowId=f5a7c2e1-...
+
+Response 200:
+  { "cancelled": true }
+```
+
+**Implementação:**
+- DAG: lookup, mutar `request.cancel = true` no request armazenado,
+  depois `authFlows.delete`. MSAL vai detectar a flag no próximo poll
+  interno e rejeitar a promise com `DEVICE_CODE_CANCEL`.
+- External-auth: `authFlows.delete` (nada mais a cancelar —
+  `getAuthCodeUrl` é uma chamada síncrona que já terminou)
+
+---
+
+#### `GET /api/curve/oauth/status`
+
+Estado dos tokens do user actual. Usado pelo dashboard para decidir se
+mostra banner de "Re-autorizar necessário" e pelo wizard para detectar
+se o user já completou o setup.
+
+```
+Request:
+  GET /api/curve/oauth/status
+
+Response 200 (user sem OAuth configurado — usa App Password ou nada):
+  {
+    "configured": false,
+    "provider": null
+  }
+
+Response 200 (OAuth configurado e funcional):
+  {
+    "configured": true,
+    "provider": "microsoft",
+    "email": "user@outlook.com",
+    "tokenState": "valid",                 // valid | refreshed | reauth_required
+    "lastCheckedAt": "2026-04-12T14:32:00Z",
+    "estimatedExpiresAt": "2026-07-11T14:32:00Z"
+  }
+
+Response 200 (token expirado — precisa de re-auth):
+  {
+    "configured": true,
+    "provider": "microsoft",
+    "email": "user@outlook.com",
+    "tokenState": "reauth_required",
+    "lastCheckedAt": "2026-04-12T14:32:00Z",
+    "error": "refresh_token_expired"
+  }
+```
+
+**Implementação:** chama `getOAuthToken(config)` em modo "probe" — se
+devolve token → `valid`; se lança `OAuthReAuthRequired` → `reauth_required`.
+Resultado cacheado por 60s em memória para evitar chamadas a MSAL em
+cada render do dashboard.
+
+---
+
+#### `DELETE /api/curve/oauth`
+
+Desliga OAuth do user: revoga tokens (best-effort, chama o endpoint de
+revocação do provider), limpa o cache, e reseta os campos OAuth do
+`CurveConfig` para null. Usado por um "Desligar conta" explícito nas
+definições.
+
+```
+Request:
+  DELETE /api/curve/oauth
+
+Response 200:
+  { "disconnected": true }
+```
+
+**Implementação:**
+1. Lookup do CurveConfig do user
+2. Best-effort revocation: POST ao `/revoke` do provider com o refresh
+   token (se for Google) ou skip (MS não tem revoke público para
+   public clients)
+3. `CurveConfig.updateOne({ user_id }, { $unset: { oauth_token_cache,
+   oauth_account_id, oauth_client_id, oauth_tenant_id }, $set: {
+   oauth_provider: null, sync_enabled: false } })`
+4. Log no CurveLog (`oauth_disconnected`)
+
+**Nota:** desligar OAuth não apaga expenses nem logs históricos — só
+para a sync e desassocia a conta.
+
+---
+
+### 6.2 Endpoints existentes — integração com o wizard
+
+Estes endpoints já existem e **não mudam**. O wizard apenas os chama
+na sequência certa.
+
+| Endpoint | Step | Uso no wizard |
+|----------|------|---------------|
+| `GET /api/curve/config` | bootstrap | Detectar se user já tem config → decidir rota (`/setup` vs `/config`) |
+| `PUT /api/curve/config` | 5.6 (step 4) | Guardar `imap_folder`, `sync_interval_minutes`, `sync_enabled`, `imap_folder_confirmed_at`. **Não** escreve `oauth_*` fields (esses vêm do `/poll` ou `/complete`) |
+| `POST /api/curve/test-connection` | 5.5 (step 3) | Validar ligação IMAP + listar pastas. **Importante:** internamente passa a usar o branch `accessToken` via `createImapReader(config)` quando `oauth_provider` está set |
+| `POST /api/curve/sync` | — | Não usado directamente pelo wizard. Pode ser chamado pós-step 4 para correr a primeira sync imediatamente em vez de esperar pelo scheduler |
+| `GET /api/curve/logs` | — | Não usado pelo wizard |
+
+**Nota sobre `test-connection`:** é o único endpoint existente que
+precisa de um pequeno refactor — actualmente instancia `ImapReader`
+directamente (síncrono). Passa a chamar `createImapReader(config)`
+(async factory do §3.5) para que o branch OAuth resolva o access
+token antes de abrir a ligação.
+
+### 6.3 Rate limiting
+
+| Endpoint | Limite | Motivo |
+|----------|--------|--------|
+| `POST /oauth/start` | 5 / hora / user | Prevenir enumeration e abuso do Azure AD / Google |
+| `POST /oauth/complete` | 10 / hora / user | Proteger contra paste-back brute force |
+| `GET /oauth/poll` | sem limite | Polling legítimo (5s) |
+| `GET /oauth/check-email` | 30 / hora / user | Prevenir enumeration de emails configurados |
+| `GET /oauth/status` | sem limite (já cacheado) | Dashboard refresh |
+| `DELETE /oauth` | 3 / hora / user | Operação destrutiva |
+| `DELETE /oauth/abort` | sem limite | Cancelamento é user-driven e infrequente |
+
+Implementação: middleware `express-rate-limit` com memory store (Pi é
+single-instance, não precisa de Redis). Chaves compostas por
+`user_id + endpoint`.
+
+### 6.4 Audit trail
+
+Todos os endpoints OAuth registam no `CurveLog`:
+
+| Evento | Endpoint | Campos extra |
+|--------|----------|--------------|
+| `oauth_flow_started` | `/start` | `flowId`, `provider`, `flow_type` |
+| `oauth_flow_completed` | `/poll`, `/complete` | `flowId`, `provider`, `accountId` |
+| `oauth_flow_cancelled` | `/abort` | `flowId` |
+| `oauth_flow_expired` | (TTL cleanup) | `flowId`, `last_status` |
+| `oauth_flow_failed` | `/poll`, `/complete` | `flowId`, `error_code` |
+| `oauth_token_refreshed` | sync background | `provider` |
+| `oauth_reauth_required` | sync background | `provider`, `error_code` |
+| `oauth_disconnected` | `DELETE /oauth` | `provider` |
+
+Nunca logar valores de tokens, code verifiers, ou URLs de redirect
+completas (podem conter `code=`). Logar apenas metadata.
+
+---
 
 ---
 
 ## 7. Pitfalls e Rastreabilidade
 
-### 7.1 Duplicação de contas
+Sub-tópicos a cobrir:
 
-**Cenário:** Mesmo email configurado para dois users do Curve Sync.
-O `emailproxy.config` tem UMA secção por email — não suporta duplicados.
-Se User A e User B ambos usam `joao@outlook.com`, partilham a mesma
-secção de tokens, e uma mudança de password por um invalida os tokens
-do outro.
-
-**Regra:** um email → um user. Enforced em dois pontos:
-- `POST /api/curve/proxy/accounts` rejeita se email existe e pertence
-  a outro `user_id` (cross-ref com `CurveConfig`)
-- Frontend mostra erro claro no passo 5.1
-
-**Edge case — re-setup:** User faz wizard, abandona a meio, tenta de novo.
-O email já existe no config mas sem tokens (ou com tokens parciais).
-→ Upsert: sobrepor a secção existente, não duplicar.
-
-### 7.2 Concorrência no config file
-
-**Cenário:** User A e User B fazem wizard ao mesmo tempo. Ambos lêem o
-config, adicionam a sua secção, e escrevem. O segundo a escrever
-sobrepõe as alterações do primeiro.
-
-**Solução:**
-```javascript
-import { open } from 'node:fs/promises';
-import { flock } from 'fs-ext'; // ou implementação manual com lockfile
-
-async function withConfigLock(fn) {
-  const fd = await open(CONFIG_PATH, 'r+');
-  await flock(fd.fd, 'ex');        // exclusive lock
-  try {
-    return await fn(fd);
-  } finally {
-    await flock(fd.fd, 'un');
-    await fd.close();
-  }
-}
-```
-
-Alternativa mais simples: mutex in-memory (funciona porque o Express é
-single-instance no Pi):
-```javascript
-let configMutex = Promise.resolve();
-function withConfigMutex(fn) {
-  configMutex = configMutex.then(fn, fn);
-  return configMutex;
-}
-```
-
-Preferir `flock` se o proxy também escreve no config concorrentemente
-(o que acontece quando faz token refresh).
-
-### 7.3 Restart do proxy
-
-**Cenário:** restart durante um sync activo de outro user → a ligação
-IMAP activa é cortada → sync falha com connection error.
-
-**Mitigação:**
-- Só reiniciar quando estritamente necessário (nova conta adicionada).
-  O proxy relê o config com `SIGHUP` — testar se `SIGHUP` é suficiente
-  para novas contas (se sim, evitar restart completo).
-- Se restart necessário: verificar `isSyncing()` de todos os users.
-  Se algum sync em curso → esperar até 30s, depois forçar (com log).
-- Scheduler retry: o sync seguinte apanha as mensagens perdidas.
-- Cooldown global: max 1 restart por 60s (HTTP 429 para pedidos dentro
-  do cooldown).
-
-**Nota sobre SIGHUP:** o proxy suporta `kill -HUP <pid>` para reload
-do config sem restart. Investigar se isto é suficiente para activar
-novas contas sem cortar sessões existentes. Se sim, preferir SIGHUP
-a restart. Comando: `sudo kill -HUP $(pgrep -f emailproxy.py)`.
-
-### 7.4 Encryption password
-
-O proxy encripta tokens com Fernet, key derivada via PBKDF2 da password
-que o IMAP client envia no `LOGIN`. Implicações:
-
-- **Password = chave.** Se mudar, os tokens ficam ilegíveis → o proxy
-  rejeita auth → re-consent necessário.
-- **Todos os clients da mesma conta usam a mesma password.** No nosso
-  caso há um só client (Curve Sync), portanto sem conflito.
-- **`delete_account_token_on_password_error = True` (default do proxy):**
-  se o Curve Sync enviar a password errada, o proxy apaga os tokens
-  em vez de simplesmente rejeitar auth. Para ambientes multi-user
-  considerar `False` para prevenir DoS acidental.
-- **Recomendação:** o wizard gera password aleatória (24 chars, base64url),
-  guarda-a no `CurveConfig.imap_password` (encriptada AES-256-GCM at rest),
-  e o user nunca a vê nem digita. Risco de perda zero (vive na DB).
-
-### 7.5 Token lifecycle
-
-| Token | TTL | Refresh | Consequência de expiração |
-|-------|-----|---------|--------------------------|
-| Access | ~1h | Automático pelo proxy (transparente) | Nenhuma visível |
-| Refresh | 90 dias de inactividade (MS) | N/A — é o refresh que gera novos access | Re-consent necessário |
-
-**Detecção de expiração:** o campo `last_activity` no `emailproxy.config`
-tem o timestamp do último uso. Se `now - last_activity > 80 dias` →
-alerta no dashboard: "A autorização do teu email vai expirar em breve.
-Re-autoriza para evitar interrupções." Link directo para re-auth wizard.
-
-**Detecção reactiva:** quando o sync falha com `535 AUTHENTICATIONFAILED`
-+ `last_sync_status = 'error'` + anteriormente funcionava → banner no
-dashboard: "A autorização expirou. Clica aqui para re-autorizar."
-
-### 7.6 Azure AD App Registration
-
-Setup único (feito pelo admin, não pelos users):
-
-1. Ir a [Entra Admin Centre](https://entra.microsoft.com/) → App registrations → New registration
-2. Nome: "Curve Sync" (ou "Thunderbird" para reusar um existente)
-3. Supported account types: **"Accounts in any organizational directory and personal Microsoft accounts"** (tenant `common`)
-4. Redirect URI: **"Mobile and desktop applications"** → `http://localhost`
-5. API permissions → Add:
-   - `IMAP.AccessAsUser.All` (delegated)
-   - `offline_access` (delegated)
-6. Certificates & secrets → New client secret → guardar valor
-7. Copiar `client_id` (Application ID) e `client_secret`
-8. Adicionar ao `.env` do backend:
-   ```
-   AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   AZURE_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
-
-**Para Device Authorization Grant:** na mesma app registration →
-Authentication → Advanced settings → "Allow public client flows" = **Yes**.
-
-**Contas pessoais (outlook.com/hotmail.com):** a Microsoft restringe
-novas app registrations para scopes de email em contas consumer.
-Se bloquear, usar o client_id de uma app open-source conhecida
-(e.g. Thunderbird) ou registar via Microsoft 365 Developer Programme.
-Documentar a limitação claramente no wizard.
-
-### 7.7 Proxy não instalado
-
-O backend verifica no boot e antes de cada operação proxy:
-
-```javascript
-function isProxyInstalled() {
-  return fs.existsSync(path.join(VENV_PATH, 'bin/python3'))
-      && fs.existsSync(path.join(path.dirname(CONFIG_PATH), 'emailproxy.py'));
-}
-```
-
-Se não instalado:
-- Wizard mostra erro amigável: "O serviço de proxy de email não está
-  instalado neste servidor. Contacta o administrador."
-- Detalhes colapsáveis com instruções de instalação (link para
-  docs/EMAIL.md secção "Installing email-oauth2-proxy")
-- **Nunca tentar instalar automaticamente** — security + permissões
-
-### 7.8 Subprocess cleanup
-
-Se usarmos subprocesses para auth (alternativa ao token exchange directo):
-
-- **Timeout:** 600s (alinhado com `AUTHENTICATION_TIMEOUT` do proxy)
-- **Kill on abandon:** se o frontend não fizer poll durante 60s →
-  backend mata o subprocess (TTL no `poll_id`)
-- **PID tracking:** Map in-memory `{ poll_id → { pid, email, started_at } }`
-- **Server restart cleanup:** `process.on('SIGTERM', killAllAuthSubprocesses)`
-- **Max concorrentes:** 3 subprocesses simultâneos (prevenir resource exhaustion)
-
-### 7.9 Contas pessoais vs organizacionais
-
-| Tipo | App registration | DAG | Nota |
-|------|-----------------|-----|------|
-| Organizacional (O365) | Criar própria ou usar existente | ✓ | Funciona sem restrições |
-| Personal (outlook.com) | Restrições para novas apps | ✓ (se app registered) | Pode exigir Developer Programme |
-| Personal (hotmail/live) | Mesmas restrições | ✓ (se app registered) | Domínios legacy, mesma infra |
-| Gmail | Google Cloud app registration | ✗ (external-auth only) | Requer OAuth consent screen, pode exigir billing |
-
-O wizard deve mostrar um aviso contextual se o domínio detectado for
-pessoal e o app registration não estiver configurado para consumer:
-"Se a autorização falhar, pede ao administrador para configurar o
-acesso para contas pessoais."
+- **7.1 Duplicação de contas** — mesmo email autorizado duas vezes gera
+  `homeAccountId` diferente; política de overwrite vs. conflito
+- **7.2 Token lifecycle** — access token 1h, refresh token ~90d de
+  inactividade MS, como detectar e expor ao user
+- **7.3 Azure AD app registration** — redirect URIs permitidos (`http://localhost`),
+  public client flag, scopes delegados, platform "Mobile and desktop"
+- **7.4 Personal vs. organizational accounts** — tenant `common` vs. tenant
+  específico, comportamento quando o tenant admin bloqueou IMAP
+- **7.5 Token cache corruption** — desserialização falha (schema mudou, AES
+  key rodou, bytes corrompidos) → tratar como cache vazio → re-auth graceful
+- **7.6 `acquireTokenSilent` falha** — refresh token expirado → exception
+  `InteractionRequiredAuthError` → sync marca `last_sync_status=error` code
+  `AUTH` → banner com link directo para wizard re-auth
+- **7.7 Clock skew** — Pi com hora errada faz MSAL rejeitar tokens
+  (`nbf`/`exp` fora de janela); checar NTP antes de diagnosticar AUTH
+- **7.8 Rastreabilidade** — correlação entre CurveLog `oauth_flow_*`, Azure
+  sign-in logs e mailbox audit logs quando algo corre mal em produção
 
 ---
 
 ## 8. Segurança
 
-### 8.1 Config file
+Sub-tópicos a cobrir:
 
-- Permissions: `600` (owner read+write only)
-- Nunca expor conteúdo do config ao frontend (tokens encriptados, mas client_secret visível)
-- Backend lê/escreve; frontend só vê status booleanos
-
-### 8.2 Client credentials
-
-- `AZURE_CLIENT_ID` e `AZURE_CLIENT_SECRET` em `.env`, nunca hardcoded
-- Nunca enviados ao frontend
-- Se `encrypt_client_secret_on_first_use = True` no config, proxy encripta na primeira utilização
-
-### 8.3 Audit trail
-
-- Cada operação no config (add/remove account, restart proxy, auth start/complete) → CurveLog com action + user_id + IP
-- Tentativas de auth falhadas logadas com motivo
-
-### 8.4 Rate limiting
-
-- Auth endpoints: max 3 tentativas / 15 min por user
-- Proxy restart: max 1 / min global
-- Account creation: max 5 / hora por user
-
----
-
-## 9. Variáveis de Ambiente (novas)
-
-| Variável | Default | Descrição |
-|----------|---------|-----------|
-| `EMAIL_PROXY_CONFIG_PATH` | `/home/pi/email-oauth2-proxy/emailproxy.config` | Path absoluto do config file |
-| `EMAIL_PROXY_VENV_PATH` | `/home/pi/email-oauth2-proxy/.venv` | Path do venv do proxy (para subprocess) |
-| `EMAIL_PROXY_SERVICE_NAME` | `email-oauth2-proxy` | Nome do systemd unit |
-| `AZURE_CLIENT_ID` | — | Client ID do Azure AD app registration |
-| `AZURE_CLIENT_SECRET` | — | Client secret do Azure AD app registration |
+- **8.1 Encryption at rest** — tokens em `oauth_token_cache` encriptados
+  com AES-256-GCM (reutilizar `server/src/services/crypto.js`); mesma key
+  que já encripta `imap_password` (env `IMAP_ENCRYPTION_KEY`)
+- **8.2 Isolamento por user** — cache plugin é factory, não singleton;
+  `beforeCacheAccess` lê sempre o doc do user do request
+- **8.3 Secrets em env vars** — `AZURE_CLIENT_ID` / `CLIENT_SECRET` /
+  `TENANT_ID` nunca enviados ao frontend; checklist de `.env.example`
+- **8.4 PKCE verifier** — vive só no `authFlows` in-memory, nunca persistido
+  nem enviado ao browser; TTL de 10min
+- **8.5 Audit trail** — todos os eventos OAuth em CurveLog (ver §6.4) com
+  retenção TTL 90d
+- **8.6 Rate limiting** — tabela §6.3 + justificação (anti-abuse do flow
+  start/poll/complete)
+- **8.7 Revogação** — `DELETE /api/curve/oauth` limpa cache local; docs de
+  como o user revoga no lado do provider (account.microsoft.com,
+  myaccount.google.com)
+- **8.8 Threat model (curto)** — que acontece se atacante ganha acesso ao
+  MongoDB? Ao `.env`? À sessão web? Nenhuma destas dá acesso completo
+  sozinha — precisa de duas
 
 ---
 
-## 10. Migração da CurveConfigPage Actual
+## 9. Variáveis de Ambiente
 
-### 10.1 O que mantém
+Sub-tópicos a cobrir:
 
-- `CurveConfig` model (schema inalterado)
-- `PUT /api/curve/config` (schedule, folder, sync toggle)
-- `POST /api/curve/test-connection`
-- Password encryption at rest (AES-256-GCM)
-- Folder confirmation state machine
+- **9.1 Azure AD (Microsoft)** — `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
+  (opcional — só para confidential flows; DAG/PKCE não precisam),
+  `AZURE_TENANT_ID` (default `common`)
+- **9.2 Google OAuth (Gmail)** — `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`;
+  condicional (só se Gmail for suportado na V2 — decisão em §12)
+- **9.3 Encryption** — `IMAP_ENCRYPTION_KEY` (já existe; reutilizado para
+  cache de tokens)
+- **9.4 Removidas vs. V1** — `EMAIL_PROXY_CONFIG_PATH`, `EMAIL_PROXY_VENV_PATH`,
+  `EMAIL_PROXY_SERVICE_NAME` desaparecem
+- **9.5 `.env.example`** — actualizar com as novas vars + comentários
+  explicando quais são mandatory vs. optional
+- **9.6 Validação no boot** — server falha fast se `AZURE_CLIENT_ID` estiver
+  em falta e qualquer user tiver `oauth_provider='microsoft'`
 
-### 10.2 O que muda
+---
 
-- `/curve/config` deixa de ser um formulário monolítico → wizard multi-passo
-- IMAP server/port/TLS são auto-preenchidos pelo wizard (não editáveis manualmente)
-- Password IMAP é gerada pelo wizard (não digitada pelo user)
-- Info banner sobre Caminho A/B desaparece (wizard subsume essa explicação)
+## 10. Migração da Implementação Actual
 
-### 10.3 Routing
+Sub-tópicos a cobrir:
 
-- `/curve/setup` — wizard completo (para users sem config)
-- `/curve/config` — settings simplificados (para users já configurados: pasta, intervalo, toggle)
-- `/curve/config` redirige para `/curve/setup` se user não tem config
+- **10.1 Schema additions** — campos OAuth em `CurveConfig` (todos
+  aditivos/nullable, sem migration destrutiva); ordem dos PRs
+- **10.2 `imapReader.js` refactor** — factory `createImapReader(config)`
+  async; branch `if (config.oauth_provider)` resolve token antes de
+  construir `ImapFlow`; call-sites a actualizar
+- **10.3 Novo serviço `oauthManager.js`** — encapsula MSAL
+  (`buildMsalApp`, `createCachePlugin`, `getOAuthToken`,
+  `OAuthReAuthRequired`)
+- **10.4 Novos endpoints** — route handler `/api/curve/oauth/*` (§6.1)
+  e integração com os existentes (§6.2)
+- **10.5 Frontend** — novo wizard em `/curve/setup`; simplificação de
+  `/curve/config` (retira campos server/port/tls/username/password do
+  path OAuth, mantém-nos para o path App Password legado)
+- **10.6 Dependências npm** — `@azure/msal-node`; remoção futura de
+  qualquer código/docs que invoquem `email-oauth2-proxy`
+- **10.7 Backwards compatibility** — users com `imap_password` continuam
+  a funcionar (Caminho A / App Password); branch OAuth só activa se
+  `oauth_provider != null`
+- **10.8 Roll-out & rollback** — feature-flag `ENABLE_OAUTH_WIZARD`;
+  plano de rollback se algo correr mal em produção (desactivar flag,
+  users OAuth ficam sem sync, users App Password inalterados)
+- **10.9 Deprecation path do V1** — quando remover
+  `docs/email-oauth2-proxy.service`, `EMAIL_AUTH_V1_PROXY.md`, secção
+  Caminho B do `EMAIL.md`
 
 ---
 
 ## 11. Design Tips por Passo
 
-> Referência: paleta Curve (terracotta `curve-700`) + Sand (warm grey),
-> animações `fade-in` / `fade-in-up`, tipografia Inter.
-> Ver `docs/UIX_DESIGN.md` para especificação completa.
+Sub-tópicos a cobrir (complemento prático ao §5):
 
-### Layout geral do wizard
-
-```
-┌──────────────────────────────────────────────────┐
-│  ● ● ● ○    Step indicator (dots)                │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │                                            │  │
-│  │         [Ícone SVG — 48-64px]              │  │
-│  │                                            │  │
-│  │         Título do passo                    │  │
-│  │         text-xl font-semibold              │  │
-│  │                                            │  │
-│  │         Descrição / inputs                 │  │
-│  │         text-sm text-sand-700              │  │
-│  │                                            │  │
-│  │         ┌──────────────────────────────┐   │  │
-│  │         │   Acção principal (botão)    │   │  │
-│  │         └──────────────────────────────┘   │  │
-│  │                                            │  │
-│  │         [Voltar]          [Continuar]       │  │
-│  └────────────────────────────────────────────┘  │
-│                                                  │
-└──────────────────────────────────────────────────┘
-```
-
-- Container: `max-w-lg mx-auto`, sem sidebar (full-focus wizard)
-- Card: `bg-white rounded-2xl shadow-sm border border-sand-200 p-8`
-- Step indicator: dots `h-2 w-2 rounded-full` em `sand-300`, activo
-  em `curve-700`, transição `transition-colors duration-300`
-- Navegação: "Voltar" como `btn-secondary` (esquerda), "Continuar"
-  como `btn-primary` (direita). Passo 0 só tem "Começar". Passo 4
-  só tem "Activar".
-- Transição entre passos: conteúdo faz `animate-fade-in` (0.4s).
-  Direcção da animação pode variar: avançar = slide-left,
-  recuar = slide-right (opcional, subtil).
-
-### Passo 0 — Boas-vindas
-
-- **Ícone:** envelope com escudo ou cadeado — SVG inline, `text-curve-700`
-- **Tom:** tranquilizador, não técnico. Evitar palavras: OAuth, proxy,
-  token, IMAP, config. Usar: "email", "acesso", "autorização", "recibos".
-- **Copy sugerido:**
-  - Título: "Configurar acesso ao email"
-  - Corpo: 3 parágrafos curtos (porquê / o quê / como), ver secção 5.0
-- **Detalhe visual:** ícones pequenos (16px) ao lado de cada parágrafo:
-  🛡️ → segurança, 📧 → email, ⚡ → automático (usar SVG, não emoji)
-- **Animação:** card inteiro `animate-fade-in-up` on mount
-
-### Passo 1 — Email
-
-- **Ícone:** envelope aberto ou `@` estilizado
-- **Input group:** ícone envelope à esquerda do input, `pl-10`
-- **Validação visual:**
-  - Default: border `sand-300`
-  - Focus: ring `curve-500`
-  - Valid: border `emerald-400`, ícone check à direita
-  - Invalid: border `red-400`, mensagem `text-red-600 text-xs`
-  - Checking backend: spinner pequeno à direita (substituí check/cross)
-- **Provider badge:** aparece abaixo do input com `animate-fade-in`:
-  ```
-  ┌─────────────────────────┐
-  │  [MS icon]  Microsoft   │  ← bg-blue-50 text-blue-700 rounded-lg
-  └─────────────────────────┘
-  ```
-  Cores por provider: Microsoft `blue-50/blue-700`, Google `red-50/red-700`,
-  Unknown `sand-100/sand-600`
-- **Nota:** "Este é o email que recebe os recibos do Curve Pay, não a
-  tua conta Embers." em `text-xs text-sand-500` abaixo do input
-
-### Passo 2 — Autorização
-
-O passo com mais complexidade visual. Dois layouts conforme o fluxo:
-
-**DAG (Microsoft):**
-```
-┌────────────────────────────────────────────┐
-│  [Shield icon]                             │
-│  Autorizar acesso ao email                 │
-│                                            │
-│  ┌──────────────────────────────────────┐  │
-│  │         A 1 B 2 C 3 D 4              │  │  ← código em destaque
-│  │         [Copiar código]               │  │
-│  └──────────────────────────────────────┘  │
-│                                            │
-│  1. Clica no botão abaixo                  │
-│  2. Cola o código quando pedido            │
-│  3. Faz login com a tua conta              │
-│  4. Autoriza o acesso                      │
-│  5. Volta aqui — detectamos automaticamente│
-│                                            │
-│  [Abrir microsoft.com/devicelogin] →       │
-│                                            │
-│  ┌──────────────────────────────────────┐  │
-│  │  ⏳ A aguardar autorização... 12:34  │  │  ← polling status
-│  └──────────────────────────────────────┘  │
-│                                            │
-│  ℹ️ Vai aparecer "Thunderbird"...          │  ← explainer colapsável
-└────────────────────────────────────────────┘
-```
-
-- Código: `font-mono text-3xl font-bold text-curve-700 tracking-[0.3em]`
-  em card `bg-curve-50 rounded-xl px-6 py-4 text-center`
-- Copiar: botão `btn-secondary` pequeno abaixo do código. Após copiar:
-  texto muda para "Copiado!" + ícone check durante 2s
-- Lista de passos: `list-decimal`, com ícones numerados `curve-700`
-- Link: `btn-primary` abre em nova tab (`target="_blank"`)
-- Polling status: card `bg-sand-50 rounded-lg px-4 py-3`, spinner
-  animado + countdown. Transiciona para `bg-emerald-50` on success
-- Explainer Thunderbird: `<details>` ou banner `amber-50` colapsável
-  com `cursor-pointer`
-
-**External Auth (Google):**
-```
-┌────────────────────────────────────────────┐
-│  [Key icon]                                │
-│  Autorizar acesso ao email                 │
-│                                            │
-│  1. Clica no botão para abrir o Google     │
-│  2. Faz login e autoriza o acesso          │
-│  3. O browser vai mostrar um erro —        │
-│     É NORMAL!                              │
-│  4. Copia o endereço da barra do browser   │
-│  5. Cola aqui em baixo                     │
-│                                            │
-│  [Abrir página de autorização] →           │
-│                                            │
-│  ┌──────────────────────────────────────┐  │
-│  │  Cola aqui o URL...                  │  │  ← textarea
-│  └──────────────────────────────────────┘  │
-│  [Validar]                                 │
-│                                            │
-│  ⚠️ O passo 3 vai mostrar "localhost      │
-│     refused to connect" — copia o URL      │
-│     ANTES de fechar essa página            │
-└────────────────────────────────────────────┘
-```
-
-- Passo 3 com destaque visual: `font-semibold text-amber-700` no
-  "É NORMAL!" para que o user não entre em pânico
-- Screenshot estilizado (opcional): mock da barra de endereço do browser
-  com highlight na zona do URL
-- Textarea: `font-mono text-xs`, 3 rows, resize-none
-- Aviso: banner `amber-50` com ícone warning
-
-### Passo 3 — Verificação
-
-- **Ícone:** checkmark em escudo ou lista de verificação
-- **Checklist:** items verticais com estado animado:
-  ```
-  ✓ Proxy configurado          ← emerald-600 + animate-fade-in
-  ✓ Serviço reiniciado         ← emerald-600 + animate-fade-in (delay 0.3s)
-  ⏳ A testar ligação IMAP...  ← spinner curve-300 + text-sand-600
-  ○ Pasta IMAP                 ← sand-300 (pending)
-  ```
-  Cada item: `flex items-center gap-3`, ícone `h-5 w-5`, texto `text-sm`
-- Spinners: SVG inline animado com `animate-spin`, cor `curve-300`
-- Checkmarks: SVG com `stroke-dasharray` animation (draw-in effect)
-- Erro: item falha → ícone `✗` em `red-500`, texto muda para mensagem
-  de erro, link "Ver detalhes" abre `<details>` com output técnico
-  em `font-mono text-xs text-sand-500 bg-sand-50 rounded p-3`
-- Dropdown pasta: aparece com `animate-fade-in-up` após checklist
-  completa. Pre-select "Curve Receipts" se disponível, com hint
-  verde: "Pasta recomendada detectada"
-
-### Passo 4 — Activar
-
-- **Ícone:** rocket ou play button
-- **Card resumo:** grid 2 colunas:
-  ```
-  Email        user@outlook.com
-  Provider     Microsoft ✓
-  Pasta        Curve Receipts
-  Proxy        127.0.0.1:1993 activo
-  ```
-  Labels: `text-xs text-sand-400 uppercase tracking-wide`
-  Valores: `text-sm font-medium text-sand-900`
-- **Separator:** `border-t border-sand-100 my-4`
-- **Inputs:** intervalo (number, min 1, max 60, default 5) + toggle sync
-  auto (switch component ou checkbox estilizado)
-- **Botão final:** `btn-primary w-full py-3 text-base font-semibold`,
-  texto "Activar Curve Sync"
-- **Loading:** botão muda para "A activar..." com spinner inline
-- **Sucesso:** card faz transição de border para `emerald-200`,
-  ícone checkmark grande aparece centrado com `animate-fade-in-up`,
-  texto "Curve Sync activo!" em `text-emerald-700 text-lg font-semibold`,
-  auto-redirect para dashboard após 3 segundos (com progress bar subtil)
+- **11.1 Paleta e tokens** — curve/sand do Tailwind config, semantic
+  colours emerald/amber/red, quando cada uma entra
+- **11.2 Animações** — fade-in por step, crossfade entre variantes
+  DAG/external-auth, skeleton loading para poll
+- **11.3 Passo 0 — Boas-vindas** — hero copy, ilustração minimal, CTA
+  primário vs. link secundário "já usei antes"
+- **11.4 Passo 1 — Email** — validação live, hint de provider detectado,
+  fallback para conta corporativa
+- **11.5 Passo 2 — Autorização (DAG)** — code box grande, countdown, botão
+  "Abrir Microsoft" com copy-to-clipboard fallback
+- **11.6 Passo 2 — Autorização (external-auth)** — link único, textarea
+  paste-back, validação do URL
+- **11.7 Passo 3 — Verificação** — checklist animada; remove items de
+  proxy do V1 (`✓ Proxy configurado`, `✓ Serviço reiniciado`); fica
+  `⏳ A testar ligação IMAP...` → `✓ X pastas encontradas`
+- **11.8 Passo 4 — Activar sync** — resumo com `Autorização válida até
+  YYYY-MM-DD` (substitui `Proxy 127.0.0.1:1993 activo` do V1); toggle
+  sync + CTA final
+- **11.9 Re-auth banner** — estado visual no dashboard quando
+  `OAuthReAuthRequired` dispara; um clique para wizard
+- **11.10 Responsive & mobile** — wizard funciona em mobile (paste-back
+  especialmente)
 
 ---
 
 ## 12. Decisões em Aberto
 
-- [ ] DAG vs external-auth: confirmar que o app registration suporta device flow para contas pessoais
-- [ ] Encryption password: auto-gerar sempre, ou dar opção ao user?
-- [ ] Gmail: validar se é possível registar app com IMAP scope sem Google Cloud billing
-- [ ] Proxy restart strategy: restart imediato vs graceful drain
-- [ ] Wizard re-entry: se user já tem config, pode re-fazer wizard? Reset tokens?
+Sub-tópicos a decidir antes de merge:
+
+- [ ] **12.1 MSAL cache strategy** — `PublicClientApplication` por user
+  (on-demand) vs. singleton multi-account por `homeAccountId`
+- [ ] **12.2 Scopes Microsoft** — confirmar que
+  `https://outlook.office.com/IMAP.AccessAsUser.All` + `offline_access`
+  chega em conta pessoal vs. tenant
+- [ ] **12.3 Suporte Gmail na V2** — in-scope ou deferir? Google Cloud
+  billing, OAuth consent screen review, DAG não suportado →
+  external-auth obrigatório
+- [ ] **12.4 Re-auth UX** — banner passivo vs. redirect automático para
+  wizard quando `OAuthReAuthRequired` dispara
+- [ ] **12.5 AES key rotation** — plano para rodar `IMAP_ENCRYPTION_KEY`
+  sem perder token caches (re-encrypt on first access pós-rotação?)
+- [ ] **12.6 Feature flag** — `ENABLE_OAUTH_WIZARD` como gate ou
+  soft-launch? (relacionado com 10.8)
+- [ ] **12.7 Testes** — estratégia para testar MSAL sem bater no Azure
+  real (mock do `PublicClientApplication`? test tenant?)
+- [ ] **12.8 Monitorização** — métricas úteis pós-launch
+  (taxa de re-auth, AUTH errors/day, flow completion rate por provider)
+
+---
+
+## Apêndice A — Implementação legacy (V1, proxy-based)
+
+A versão anterior deste documento descrevia o Caminho B do Curve Sync:
+`email-oauth2-proxy` (Python) a correr como systemd unit, `emailproxy.config`
+INI com tokens Fernet, e o backend Node a escrever directamente no ficheiro.
+
+Esse documento está preservado em
+**[`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md)** para:
+
+- Referência histórica das decisões tomadas
+- Debug de instalações existentes (o ficheiro
+  `docs/email-oauth2-proxy.service` ainda vive no repo e continua a ser o
+  path de instalação suportado até a migração V2 estar completa)
+- Comparação das trade-offs entre as duas abordagens
+
+A secção correspondente em `docs/EMAIL.md` ("Installing email-oauth2-proxy
+on the Raspberry Pi — Caminho B") continua válida para instalações V1.
