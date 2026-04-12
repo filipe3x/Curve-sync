@@ -168,8 +168,34 @@ router.post('/sync', async (req, res) => {
       return res.status(409).json({ error: err.message });
     }
     if (err instanceof ImapError) {
+      // Flip last_sync_status='error' for ALL ImapError paths so the
+      // dashboard re-auth banner gate sees the breakage even when the
+      // failure happened BEFORE the orchestrator started — for example
+      // `createImapReader` → `getOAuthToken` → `OAuthReAuthRequired`
+      // in the OAuth branch, which aborts the sync before `syncEmails`
+      // gets a chance to run its own `finally` stats update. Without
+      // this, `last_sync_status` stays frozen on the previous "ok" and
+      // the banner never lights up until a full sync actually starts.
+      // Failure to write this is non-fatal — swallow and proceed.
+      try {
+        await CurveConfig.updateOne(
+          { user_id: req.userId },
+          { $set: { last_sync_status: 'error', last_sync_at: new Date() } },
+        );
+      } catch (e) {
+        console.warn(`curve/sync: could not flip last_sync_status: ${e.message}`);
+      }
+      // AUTH deliberately maps to 502 (Bad Gateway), NOT 401. A 401 on
+      // a `/api/curve/*` response is indistinguishable from a session
+      // expiry for the frontend's `api.request()` wrapper, which would
+      // then dispatch `auth:logout` and boot the user to the login
+      // page. That is wrong: the user's session is fine — it's the
+      // upstream IMAP/Azure auth that failed. 502 cleanly separates
+      // "your cookie is bad" (401) from "our upstream dep is unhappy"
+      // (502) and lets the dashboard render the re-auth banner
+      // instead. See docs/EMAIL_AUTH_MVP.md §8 items 4-5.
       const status =
-        { CONFIG: 400, AUTH: 401, CONNECT: 503, FOLDER: 404 }[err.code] ?? 500;
+        { CONFIG: 400, AUTH: 502, CONNECT: 503, FOLDER: 404 }[err.code] ?? 500;
       return res.status(status).json({ error: err.message, code: err.code });
     }
     return res.status(500).json({ error: err.message });
@@ -213,8 +239,13 @@ router.post('/test-connection', async (req, res) => {
     });
   } catch (err) {
     if (err instanceof ImapError) {
+      // AUTH → 502 (Bad Gateway), NOT 401 — see the same mapping on
+      // POST /sync above for the rationale. A 401 here would cause
+      // the frontend's api wrapper to treat the test-connection click
+      // as a session expiry and redirect to /login, which is exactly
+      // the pre-fix bug reported against /curve/config.
       const status =
-        { CONFIG: 400, AUTH: 401, CONNECT: 503, FOLDER: 404 }[err.code] ?? 500;
+        { CONFIG: 400, AUTH: 502, CONNECT: 503, FOLDER: 404 }[err.code] ?? 500;
       return res.status(status).json({ error: err.message, code: err.code });
     }
     res.status(500).json({ error: err.message });
