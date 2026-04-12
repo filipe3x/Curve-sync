@@ -19,6 +19,12 @@ const curveLogSchema = new mongoose.Schema(
     action: { type: String, enum: [
       'login', 'login_failed', 'logout', 'session_expired',
       'config_updated', 'sync_manual', 'password_changed',
+      // OAuth wizard (V2, see docs/EMAIL_AUTH_MVP.md):
+      //   oauth_start     — user kicked off the Device Authorization Grant
+      //   oauth_completed — DAG finished, refresh token now in cache
+      //   oauth_cancelled — user aborted the DAG before completion
+      //   oauth_failed    — DAG returned an error (denied, timed out, ...)
+      'oauth_start', 'oauth_completed', 'oauth_cancelled', 'oauth_failed',
     ]},
     ip: String,
   },

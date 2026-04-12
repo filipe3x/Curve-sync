@@ -19,8 +19,14 @@ import {
 } from '../services/scheduler.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { audit, clientIp } from '../services/audit.js';
+import oauthRouter from './curveOAuth.js';
 
 const router = Router();
+
+// OAuth wizard routes (V2). Mounted as a sub-router so everything
+// inherits the `authenticate` middleware applied to /api/curve in
+// index.js. See server/src/routes/curveOAuth.js for the endpoint list.
+router.use('/oauth', oauthRouter);
 
 /**
  * Return a plain-object copy of a CurveConfig with imap_password
