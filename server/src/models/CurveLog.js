@@ -19,6 +19,21 @@ const curveLogSchema = new mongoose.Schema(
     action: { type: String, enum: [
       'login', 'login_failed', 'logout', 'session_expired',
       'config_updated', 'sync_manual', 'password_changed',
+      // OAuth wizard (V2, see docs/EMAIL_AUTH_MVP.md):
+      //   oauth_start            — user kicked off the Device Authorization Grant
+      //   oauth_completed        — DAG finished, refresh token now in cache
+      //   oauth_cancelled        — user aborted the DAG before completion
+      //   oauth_failed           — DAG returned an error (denied, timed out, ...)
+      //   oauth_token_refreshed  — MSAL silently refreshed an expired access
+      //                            token during a regular sync run. Signals
+      //                            that the refresh-token path is alive and
+      //                            is the main acceptance criterion for
+      //                            §8 item "sync >1h dispara refresh".
+      //   first_sync_completed   — first sync after wizard completion
+      //                            ingested at least one expense. Marks the
+      //                            end-to-end happy path for new users.
+      'oauth_start', 'oauth_completed', 'oauth_cancelled', 'oauth_failed',
+      'oauth_token_refreshed', 'first_sync_completed',
     ]},
     ip: String,
   },

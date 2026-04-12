@@ -6,11 +6,13 @@
 > necessidade de acesso ao terminal.
 >
 > **V2 vs V1:** a implementação original (Caminho B com `email-oauth2-proxy`
-> Python + ficheiro INI + systemd) está preservada em
-> [`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md) para referência
-> histórica. Este documento descreve a arquitectura alvo: `imapflow` fala
-> XOAUTH2 directamente contra `outlook.office365.com:993`, e `@azure/msal-node`
-> gere o lifecycle de tokens com cache persistido em MongoDB.
+> Python + ficheiro INI + systemd) foi completamente removida no sprint
+> pós-PR 7 — a documentação dedicada (`EMAIL_AUTH_V1_PROXY.md` e
+> `email-oauth2-proxy.service`) foi apagada, e o que resta neste documento
+> sobre V1 é puro contexto histórico inline. Este documento descreve a
+> arquitectura alvo: `imapflow` fala XOAUTH2 directamente contra
+> `outlook.office365.com:993`, e `@azure/msal-node` gere o lifecycle de
+> tokens com cache persistido em MongoDB.
 
 ---
 
@@ -88,7 +90,8 @@ Curve Sync ──plain LOGIN──▶ 127.0.0.1:1993 ──XOAUTH2──▶ outl
 - Tokens vivem no ficheiro INI (`emailproxy.config`)
 - `imap_password` do CurveConfig é na verdade a key de decriptação dos tokens
 - Restart do systemd necessário para aplicar mudanças de config
-- Documentação preservada em `EMAIL_AUTH_V1_PROXY.md`
+- Documentação dedicada (`EMAIL_AUTH_V1_PROXY.md` + systemd unit)
+  foi apagada no sprint pós-PR 7 — V2 é a única implementação suportada
 
 ### 2.2 Topologia alvo (V2, direct XOAUTH2)
 
@@ -915,6 +918,153 @@ Topic outline. Expandir na fase de implementação com copy final, design
 específico, e handlers por caso de erro. A parte visual/design per-step
 vive na §11 (Design Tips por Passo), esta secção é sobre estrutura,
 state machine e comportamento.
+
+### 5.0 Direcção UX — MVP (first-time-setup premium)
+
+> **Estado actual (PR 6)**: esqueleto funcional navegável em
+> `/curve/setup`. O `HeroScreen` é a referência polida; os restantes
+> passos (1–5) são estritamente funcionais. O punch list detalhado
+> para o polish pass vive em `docs/WIZARD_POLISH_BACKLOG.md`.
+
+Referência mental: **o onboarding de um iPhone ou Android novo** —
+generoso em espaço branco, uma única acção por ecrã, cópia acolhedora
+sem ser infantil, transições que respiram. Para um user que provavelmente
+só vai passar por isto uma vez na vida, cada segundo deste fluxo tem
+de valer a pena. O setup tem de ficar na memória como "premium", não
+"formulário corporativo".
+
+#### 5.0.1 Princípios-guia
+
+- **Monocromático com acento único** — palete `sand` (neutros) +
+  `curve` (acento red-brown) já no Tailwind. Zero cores novas.
+- **Um ecrã, uma tarefa, uma acção primária** — nada de formulários
+  multi-campo no mesmo passo.
+- **Respiração visual** — `max-w-lg` ou `max-w-xl`, cartão centrado
+  verticalmente no viewport, sidebar escondida durante o wizard.
+- **Movimento intencional, nunca decorativo** — cada animação marca
+  transição de estado ou chama atenção para o próximo passo.
+- **Copy humana em português informal (tu)** — respeitar a banlist da §5.10.
+- **Acessível por defeito** — keyboard nav, focus states, contraste
+  AA, reduced-motion honrado.
+
+#### 5.0.2 Hero / logótipo escrito à mão
+
+- **"Curve Sync" em manuscrito** (fonte Google `Caveat`), peso médio.
+- **Setas de sync integradas na própria escrita:**
+  - Seta a nascer do traço inicial do `C` de *Curve*
+  - Seta a nascer do traço final do `c` de *Sync*
+  - As duas curvam-se uma para a cauda da outra e fecham em **forma
+    de infinito ∞** por baixo do logótipo
+- **Reveal animado** — o próprio logótipo "escreve-se" sozinho via
+  `motion.path` + `pathLength` (SVG path stroke animation). Duração
+  ~1.6 s, `easeInOut`, corre uma única vez por sessão.
+- **Reutilizável** — o mesmo SVG serve de favicon, loading screen,
+  header minimal. O wizard é a única superfície onde é "desenhado
+  ao vivo"; restantes apps mostram-no estático.
+
+#### 5.0.3 Bibliotecas React recomendadas
+
+Adições mínimas ao stack actual (Vite + React 18 + Tailwind + React
+Router 6). Justificação em bundle weight + aderência ao princípio da
+leveza.
+
+| Lib | Porquê | Peso aproximado |
+|-----|--------|----------------|
+| **`motion`** (motion.dev, ex-Framer Motion) | Transições entre steps, `motion.path` pathLength para o hero, spring physics nos botões, `AnimatePresence` para enter/exit. É a base que o user pediu para o polish. | ~18-30 KB gzip (tree-shakeable, importar só `motion` + `AnimatePresence`) |
+| **`lucide-react`** | Ícones monocromáticos de traço (`Mail`, `Shield`, `RefreshCw`, `Check`, `ArrowRight`, `Copy`). Tree-shakeable por ícone. | ~1-2 KB por ícone importado |
+| **`qrcode.react`** | QR code para o `verificationUri` do DAG — o user autoriza no telemóvel sem ter de digitar nada. | ~3 KB gzip |
+| **Google Fonts `Caveat`** | Fonte manuscrita do logótipo. Carregada via `<link rel="preload">` com `font-display: swap`. | ~15 KB WOFF2 (subset latin) |
+
+Deliberadamente **fora** do stack:
+- UI kits (shadcn, MUI, Chakra) — já temos Tailwind + componentes
+  próprios em `components/common`
+- State libs (Zustand, Jotai) — `useState` + `useReducer` chega para
+  5 ecrãs
+- Form libs (react-hook-form, formik) — um campo por ecrã, controlado
+- Icon packs pesados (react-icons) — `lucide-react` cobre tudo
+- Libs de confetti / SFX — não é a vibe
+
+#### 5.0.4 Fundações de movimento
+
+- **Componente `<Screen>`** que envolve cada passo com
+  `<motion.div>` + `initial={{opacity:0, y:8}}` + `animate` + `exit`,
+  dentro de um `<AnimatePresence mode="wait">` no container do wizard.
+- **Transições sempre com direcção** — avançar: slide + fade para a
+  esquerda; recuar: slide + fade para a direita. O cérebro do user
+  memoriza a direcção e deixa de ter de pensar onde está no fluxo.
+- **Springs em tudo o que é interactivo** — `type: 'spring', stiffness: 260, damping: 24`. Press states com `whileTap={{scale:0.97}}`.
+- **Heart-beat discreto no card de código** — `animate={{scale:[1,1.01,1]}}` + `repeat: Infinity` enquanto polling, pára ao resolve.
+- **`prefers-reduced-motion`** respeitado via hook `useReducedMotion()`
+  do `motion` — todas as animações caem para fade simples.
+
+#### 5.0.5 Estratégia de ecrã (tópicos por passo)
+
+**Ecrã 0 — Hero / boas-vindas**
+- Logótipo "Curve Sync" manuscrito a desenhar-se
+- Tagline curta (1 linha)
+- Sub-copy de confiança (2 linhas, "2 minutos", "nada partilhado")
+- Um botão `Começar`
+- Sem header, sem sidebar, sem progress dots
+
+**Ecrã 1 — Email**
+- Copy: "Qual é o email onde chegam os recibos Curve?"
+- Input grande, único, autofocus, arredondado
+- Validação ao vivo (formato + detecção Microsoft)
+- Badge suave a surgir abaixo do input quando o domínio é Microsoft:
+  "Conta Microsoft — podemos autorizar diretamente"
+- Fallback inline quando não-Microsoft: "Vamos usar o modo App Password"
+- Um botão `Continuar`; link secundário "Cancelar"
+
+**Ecrã 2 — Convite à autorização (trust screen)**
+- Título curto: "Vamos ligar com segurança"
+- Três bullets com ícones lucide:
+  - `Shield` "A tua password nunca passa por aqui"
+  - `Mail` "Só lemos emails que parecem recibos Curve"
+  - `RefreshCw` "Podes desligar quando quiseres"
+- Um botão `Autorizar na Microsoft`; voltar discreto
+
+**Ecrã 3 — Device code**
+- Card central com:
+  - Código grande em `font-mono` espaçado, com `Copy` button
+  - URL curta + QR code lado-a-lado ("ou abre no telemóvel")
+  - Spinner subtil + texto "À espera da tua autorização…"
+  - Countdown discreto `M:SS` em `text-sand-500`
+- Banner de erro como slide-in no topo se o poll falhar
+- Botão secundário `Cancelar`
+
+**Ecrã 4 — Sucesso**
+- Ícone check grande com spring + path draw (motion)
+- "Ligado como `email@dominio`"
+- Mini-status: "A verificar acesso à caixa…" → "Encontrámos *X* recibos recentes"
+- Um botão `Continuar`
+
+**Ecrã 5 — Ritmo da sincronização**
+- "A que ritmo queres que o Curve Sync verifique a caixa?"
+- Três opções grandes em cartões clicáveis: `5 min` / `15 min` / `1 h`
+- Toggle: "Sincronizar agora quando terminar"
+- Um botão `Terminar`
+
+**Saída — redirect ao dashboard com toast "Curve Sync activo"**
+
+#### 5.0.6 Entry points & routing
+
+- `/curve/setup` — wizard completo
+- `/curve/setup?reauth=1` — salta Ecrã 0 + 1, entra directo no Ecrã 2
+- `/curve/config` — settings simplificados; redirige para `/curve/setup`
+  se `GET /api/curve/oauth/status` devolver `connected:false`
+- Sidebar do shell escondida dentro de `/curve/setup/*`
+
+#### 5.0.7 Fora de âmbito do MVP (guardar para o polish)
+
+- Confetti / celebração exagerada no sucesso
+- Sound design
+- Parallax / blobs animados em background
+- Modo escuro (o site todo ainda não suporta)
+- Tour guiado pós-setup ("onde encontras isto, onde desligas aquilo")
+- QR code dinâmico com branding (stick com o plain do `qrcode.react`)
+- Skeletons animados durante polling (basta um spinner honesto)
+
+---
 
 ### 5.1 Estrutura geral
 
@@ -1990,9 +2140,12 @@ Sub-tópicos a cobrir:
 - **10.8 Roll-out & rollback** — feature-flag `ENABLE_OAUTH_WIZARD`;
   plano de rollback se algo correr mal em produção (desactivar flag,
   users OAuth ficam sem sync, users App Password inalterados)
-- **10.9 Deprecation path do V1** — quando remover
-  `docs/email-oauth2-proxy.service`, `EMAIL_AUTH_V1_PROXY.md`, secção
-  Caminho B do `EMAIL.md`
+- **10.9 Deprecation path do V1** — parcialmente concluído: no sprint
+  pós-PR 7 foram apagados `docs/EMAIL_AUTH_V1_PROXY.md` e
+  `docs/email-oauth2-proxy.service`, e `CurveConfigPage.jsx` foi
+  reescrito para remover qualquer vestígio do proxy. Resta limpar a
+  secção Caminho B do `EMAIL.md` e quaisquer referências residuais em
+  `imapReader.js`
 
 ---
 
@@ -2053,17 +2206,16 @@ Sub-tópicos a decidir antes de merge:
 ## Apêndice A — Implementação legacy (V1, proxy-based)
 
 A versão anterior deste documento descrevia o Caminho B do Curve Sync:
-`email-oauth2-proxy` (Python) a correr como systemd unit, `emailproxy.config`
-INI com tokens Fernet, e o backend Node a escrever directamente no ficheiro.
+`email-oauth2-proxy` (Python) a correr como systemd unit,
+`emailproxy.config` INI com tokens Fernet, e o backend Node a escrever
+directamente no ficheiro.
 
-Esse documento está preservado em
-**[`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md)** para:
+No sprint pós-PR 7 essa documentação foi eliminada do repositório:
+`EMAIL_AUTH_V1_PROXY.md` e `docs/email-oauth2-proxy.service` já não
+existem, e o `CurveConfigPage.jsx` foi reescrito para remover qualquer
+vestígio do proxy. O V2 (direct XOAUTH2 + MSAL) é a única implementação
+suportada.
 
-- Referência histórica das decisões tomadas
-- Debug de instalações existentes (o ficheiro
-  `docs/email-oauth2-proxy.service` ainda vive no repo e continua a ser o
-  path de instalação suportado até a migração V2 estar completa)
-- Comparação das trade-offs entre as duas abordagens
-
-A secção correspondente em `docs/EMAIL.md` ("Installing email-oauth2-proxy
-on the Raspberry Pi — Caminho B") continua válida para instalações V1.
+As referências restantes a Caminho B dentro de `docs/EMAIL.md` e do
+código (`server/src/services/imapReader.js`) são contexto histórico
+inline que será limpo numa próxima passagem.

@@ -55,6 +55,60 @@ const curveConfigSchema = new mongoose.Schema(
     // last_sync_status, because last_sync_status describes the outcome
     // of the *last completed* sync, not the current one.
     is_syncing: { type: Boolean, default: false },
+
+    // --- OAuth (V2, direct XOAUTH2 — see docs/EMAIL_AUTH.md §3.3) -----
+    //
+    // All five fields are nullable by default: users still on the App
+    // Password branch (V1 / Gmail legacy) keep these as `null` and
+    // `imapReader.js` takes the plain auth path. The OAuth branch
+    // activates only when `oauth_provider` is set.
+
+    // OAuth provider name. `null` = App Password (legacy). When set,
+    // imapReader.js uses getOAuthToken() instead of imap_password.
+    // MVP only supports 'microsoft' — 'google' is reserved for fase 2.
+    oauth_provider: {
+      type: String,
+      enum: ['microsoft', 'google', null],
+      default: null,
+    },
+
+    // Serialized MSAL token cache, encrypted with AES-256-GCM via
+    // server/src/services/crypto.js (same IMAP_ENCRYPTION_KEY that
+    // protects imap_password). MSAL emits a ~2-4 KB JSON blob with
+    // accessTokens, refreshTokens, idTokens and account records. The
+    // cache plugin (oauthCachePlugin.js) encrypts before write and
+    // decrypts on read. Never exposed to the frontend.
+    oauth_token_cache: {
+      type: String,
+      default: null,
+    },
+
+    // MSAL `homeAccountId` of the authorized account within the cache.
+    // MSAL supports multiple accounts per cache — we only ever have
+    // one per CurveConfig, but still need to remember which homeAccountId
+    // so acquireTokenSilent can look it up. Format: `<uid>.<utid>`.
+    oauth_account_id: {
+      type: String,
+      default: null,
+    },
+
+    // Azure AD client ID used for THIS specific config. Normally
+    // matches process.env.AZURE_CLIENT_ID, but stored per-config so
+    // that a future key rotation doesn't invalidate existing caches —
+    // old configs keep running on the old client_id until re-auth.
+    oauth_client_id: {
+      type: String,
+      default: null,
+    },
+
+    // Azure AD tenant (`common`, `consumers`, `organizations`, or a
+    // GUID). Defaults to `common` for multi-tenant + personal accounts.
+    // Stored per-config because a single Curve Sync instance may serve
+    // users from different tenants.
+    oauth_tenant_id: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },

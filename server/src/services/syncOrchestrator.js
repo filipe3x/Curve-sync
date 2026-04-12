@@ -36,6 +36,7 @@ import Category from '../models/Category.js';
 import { parseEmail, ParseError } from './emailParser.js';
 import { assignCategoryFromList } from './expense.js';
 import { ImapReader } from './imapReader.js';
+import { audit } from './audit.js';
 
 // ---------- Tunables ----------
 
@@ -201,6 +202,13 @@ export async function syncEmails({ config, reader, dryRun = false }) {
   const configKey = String(config._id);
   if (running.has(configKey)) throw new SyncConflictError();
   running.add(configKey);
+
+  // Snapshot the "never synced anything" state BEFORE the run starts,
+  // so we can detect the first-successful-sync transition in `finally`
+  // and emit a `first_sync_completed` audit entry. Reading it later
+  // (after CurveConfig.updateOne) would already show the post-increment
+  // value and hide the transition.
+  const wasFirstSync = Number(config.emails_processed_total || 0) === 0;
 
   const startedAt = Date.now();
   const summary = {
@@ -521,6 +529,26 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         await CurveConfig.updateOne({ _id: config._id }, update);
       } catch (e) {
         console.warn(`syncEmails: could not update config stats: ${e.message}`);
+      }
+
+      // First-sync-completed audit: fires exactly once per config, the
+      // first time a real (non-dry) sync inserts at least one expense.
+      // The new-user happy-path end-to-end check (§8 item 2 of
+      // EMAIL_AUTH_MVP) is "wizard completes → first sync inserts
+      // expenses"; this log is the machine-readable signal that the
+      // entire pipeline worked on day 1. Duplicates and errors don't
+      // count — it must be a genuine `summary.ok > 0`.
+      if (wasFirstSync && summary.ok > 0) {
+        audit({
+          action: 'first_sync_completed',
+          userId: config.user_id,
+          detail:
+            `provider=${config.oauth_provider || 'app_password'} ` +
+            `inserted=${summary.ok} ` +
+            `duplicates=${summary.duplicates} ` +
+            `folder=${config.imap_folder || 'INBOX'} ` +
+            `duration_ms=${summary.durationMs}`,
+        });
       }
     }
 

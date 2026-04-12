@@ -1,10 +1,10 @@
 /**
- * IMAP reader for Curve receipt emails (Phase 2).
+ * IMAP reader for Curve receipt emails (Phase 2, OAuth-aware in V2).
  *
  * Wraps `imapflow` with a small stateful class that the sync orchestrator
  * (Phase 3) can drive:
  *
- *     const reader = new ImapReader(config);
+ *     const reader = await createImapReader(config);
  *     await reader.connect();
  *     try {
  *       for await (const { uid, source } of reader.fetchUnseen()) {
@@ -30,14 +30,32 @@
  * `POST /api/curve/test-connection` route — opens, lists folders,
  * disconnects. Used by the "Testar ligação" button.
  *
- * Authentication: basic auth only (App Password / plain). Outlook365 and
- * Gmail both disabled real-password IMAP, so the user is expected to
- * paste an App Password into `CurveConfig.imap_password`. See the
- * "Outlook365 / Microsoft 365 Authentication" section of docs/EMAIL.md
- * for context. OAuth2 / XOAUTH2 is deferred to Phase 7+.
+ * Authentication has two branches:
+ *
+ *   1. **Legacy (App Password).** `config.oauth_provider` is null and
+ *      `config.imap_password` holds the plaintext App Password. Used by
+ *      Gmail (App Passwords still work) and any already-configured V1
+ *      users still on the password branch. imapflow sends LOGIN/PLAIN.
+ *
+ *   2. **OAuth (XOAUTH2).** `config.oauth_provider === 'microsoft'` and
+ *      the MSAL token cache in `config.oauth_token_cache` is populated.
+ *      `createImapReader` resolves a fresh access token via
+ *      `oauthManager.getOAuthToken` and hands it to imapflow which
+ *      speaks XOAUTH2 SASL. This is the V2 path for Outlook/Microsoft
+ *      accounts — see docs/EMAIL_AUTH_MVP.md for the full flow.
+ *
+ * The `ImapReader` constructor is still synchronous and accepts a
+ * prebuilt `auth` object as its second argument. The async factory
+ * `createImapReader(config)` is the production entry point — it knows
+ * how to build the auth object for either branch and must be used by
+ * all call sites (routes, scheduler, tests). Calling
+ * `new ImapReader(config)` without a prebuilt auth still works for
+ * legacy App Password configs, but it cannot be used for OAuth configs
+ * because token acquisition is inherently async.
  */
 
 import { ImapFlow } from 'imapflow';
+import { getOAuthToken, OAuthReAuthRequired } from './oauthManager.js';
 
 /**
  * Structured IMAP error. `code` is one of:
@@ -60,18 +78,43 @@ export class ImapError extends Error {
   }
 }
 
-const REQUIRED_FIELDS = ['imap_server', 'imap_username', 'imap_password'];
+// Fields that must be present regardless of the auth branch. The
+// password vs oauth fields are checked separately below because they
+// are mutually exclusive — requiring both would reject every valid
+// config in exactly one of the two worlds.
+const BASE_REQUIRED_FIELDS = ['imap_server', 'imap_username'];
 
 function assertConfig(config) {
   if (!config) {
     throw new ImapError('no config provided', { code: 'CONFIG' });
   }
-  for (const key of REQUIRED_FIELDS) {
+  for (const key of BASE_REQUIRED_FIELDS) {
     if (!config[key] || String(config[key]).trim() === '') {
       throw new ImapError(`missing required config field: ${key}`, {
         code: 'CONFIG',
       });
     }
+  }
+  // OAuth branch: oauth_provider decides which auth material we need.
+  // A config that sets oauth_provider but forgot oauth_account_id is
+  // half-baked — the wizard never completed. Surface as CONFIG so the
+  // route layer returns 400, not AUTH (which would imply the token
+  // cache is dead and trigger the re-auth banner unnecessarily).
+  if (config.oauth_provider) {
+    if (!config.oauth_account_id) {
+      throw new ImapError(
+        'missing required config field: oauth_account_id ' +
+          '(oauth_provider is set but the wizard never completed)',
+        { code: 'CONFIG' },
+      );
+    }
+    return;
+  }
+  // Legacy branch: App Password must be present and non-empty.
+  if (!config.imap_password || String(config.imap_password).trim() === '') {
+    throw new ImapError('missing required config field: imap_password', {
+      code: 'CONFIG',
+    });
   }
 }
 
@@ -169,7 +212,18 @@ function classifyError(e) {
 }
 
 export class ImapReader {
-  constructor(config) {
+  /**
+   * @param {object} config CurveConfig doc (or plain object)
+   * @param {object} [prebuiltAuth] Optional prebuilt auth object passed
+   *   through to imapflow verbatim. Used by `createImapReader` to
+   *   inject an OAuth XOAUTH2 auth (`{ user, accessToken }`) so token
+   *   acquisition can stay async while this constructor stays sync.
+   *   If omitted, falls back to `{ user, pass }` from the config —
+   *   the legacy App Password path. OAuth configs without prebuiltAuth
+   *   are rejected because `assertConfig` requires imap_password on
+   *   the legacy branch.
+   */
+  constructor(config, prebuiltAuth = null) {
     assertConfig(config);
 
     // TLS default: on unless explicitly disabled. Plain IMAP is only
@@ -183,15 +237,21 @@ export class ImapReader {
       );
     }
 
+    // If the caller passed a prebuilt auth (OAuth branch) use it;
+    // otherwise we're on the legacy App Password branch and we build
+    // one from the config's imap_password. assertConfig has already
+    // guaranteed imap_password is present in that case.
+    const auth = prebuiltAuth || {
+      user: config.imap_username,
+      pass: config.imap_password,
+    };
+
     this.config = config;
     this.client = new ImapFlow({
       host: config.imap_server,
       port: config.imap_port ?? (useTls ? 993 : 1993),
       secure: useTls,
-      auth: {
-        user: config.imap_username,
-        pass: config.imap_password,
-      },
+      auth,
       // Silence imapflow's default bunyan logger — it's noisy and the
       // orchestrator will log anything interesting itself.
       logger: false,
@@ -400,6 +460,66 @@ export class ImapReader {
 }
 
 /**
+ * Async factory that builds an `ImapReader` for either auth branch.
+ *
+ * This is the production entry point that all non-test call sites must
+ * use (routes, scheduler, testConnection). It hides the OAuth token
+ * acquisition behind a single `await` so callers don't have to care
+ * whether the config is OAuth or legacy — the branching is localized
+ * here.
+ *
+ * Legacy configs (oauth_provider === null) go straight to
+ * `new ImapReader(config)`, which uses config.imap_password.
+ *
+ * OAuth configs call `getOAuthToken(config)` to obtain a fresh access
+ * token (cache hit or silent refresh), then pass it to imapflow via
+ * the XOAUTH2 auth shape. `OAuthReAuthRequired` is translated here to
+ * an `ImapError` with `code='AUTH'` so the route layer's existing
+ * `{ AUTH: 401 }` mapping lights up the re-auth banner without needing
+ * to teach every caller about MSAL errors.
+ *
+ * @param {object} config - CurveConfig document / plain object
+ * @param {object} [overrides] Test-only. `{ getOAuthToken }` lets a
+ *   smoke test inject a stub without reaching Azure AD.
+ * @returns {Promise<ImapReader>} a connected-ready ImapReader instance
+ * @throws {ImapError} with code CONFIG, AUTH, CONNECT, FOLDER, or UNKNOWN
+ */
+export async function createImapReader(config, overrides = {}) {
+  assertConfig(config);
+
+  if (!config.oauth_provider) {
+    // Legacy App Password branch — plain constructor path.
+    return new ImapReader(config);
+  }
+
+  // OAuth branch. Acquire a fresh access token before handing off to
+  // imapflow. Any InteractionRequiredAuthError / expired refresh token
+  // surfaces here as OAuthReAuthRequired — translate it to AUTH so
+  // the existing error code → HTTP status mapping still works.
+  const getToken = overrides.getOAuthToken || getOAuthToken;
+  let accessToken;
+  try {
+    accessToken = await getToken(config);
+  } catch (e) {
+    if (e instanceof OAuthReAuthRequired) {
+      throw new ImapError(e.message, { code: 'AUTH', cause: e });
+    }
+    // Network / transient MSAL error (5xx from token endpoint, etc.).
+    // Classify as CONNECT so callers retry later instead of marking
+    // the token as dead.
+    throw new ImapError(`OAuth token acquisition failed: ${e.message}`, {
+      code: 'CONNECT',
+      cause: e,
+    });
+  }
+
+  return new ImapReader(config, {
+    user: config.imap_username,
+    accessToken,
+  });
+}
+
+/**
  * One-shot connection test for the "Testar ligação" button:
  * connect → list folders → disconnect. Proves the credentials work AND
  * tells the user what folder paths are available (useful for finding
@@ -410,7 +530,7 @@ export class ImapReader {
  * @throws {ImapError} on any failure (caller maps `code` to HTTP status)
  */
 export async function testConnection(config, { timeoutMs = 10_000 } = {}) {
-  const reader = new ImapReader(config);
+  const reader = await createImapReader(config);
   const timer = new Promise((_, reject) =>
     setTimeout(() => reject(new ImapError(
       `connection test timed out after ${timeoutMs / 1000}s`,

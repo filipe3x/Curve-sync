@@ -2,7 +2,11 @@ import { Router } from 'express';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import User from '../models/User.js';
-import { testConnection, ImapError, ImapReader } from '../services/imapReader.js';
+import {
+  testConnection,
+  ImapError,
+  createImapReader,
+} from '../services/imapReader.js';
 import {
   syncEmails,
   isSyncing,
@@ -15,12 +19,30 @@ import {
 } from '../services/scheduler.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { audit, clientIp } from '../services/audit.js';
+import oauthRouter from './curveOAuth.js';
 
 const router = Router();
 
-/** Decrypt the IMAP password in a config object for use by ImapReader. */
-function withDecryptedPassword(configObj) {
-  return { ...configObj, imap_password: decrypt(configObj.imap_password) };
+// OAuth wizard routes (V2). Mounted as a sub-router so everything
+// inherits the `authenticate` middleware applied to /api/curve in
+// index.js. See server/src/routes/curveOAuth.js for the endpoint list.
+router.use('/oauth', oauthRouter);
+
+/**
+ * Return a plain-object copy of a CurveConfig with imap_password
+ * decrypted (legacy branch) or left null (OAuth branch).
+ *
+ * OAuth configs never have an imap_password in the first place —
+ * decrypting `null` would throw. Guarding here lets the rest of the
+ * pipeline treat the two branches uniformly via `createImapReader`.
+ */
+function toPlainConfig(configObj) {
+  return {
+    ...configObj,
+    imap_password: configObj.imap_password
+      ? decrypt(configObj.imap_password)
+      : null,
+  };
 }
 
 // GET /api/curve/config
@@ -107,8 +129,8 @@ router.post('/sync', async (req, res) => {
         error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
       });
     }
-    const plainConfig = withDecryptedPassword(config.toObject());
-    const reader = new ImapReader(plainConfig);
+    const plainConfig = toPlainConfig(config.toObject());
+    const reader = await createImapReader(plainConfig);
 
     audit({
       action: 'sync_manual',
@@ -184,7 +206,7 @@ router.post('/test-connection', async (req, res) => {
         error: 'Nenhuma configuração guardada. Preenche e carrega em "Guardar" primeiro.',
       });
     }
-    const { folders } = await testConnection(withDecryptedPassword(config));
+    const { folders } = await testConnection(toPlainConfig(config));
     res.json({
       message: `Ligação OK. ${folders.length} pastas disponíveis no servidor.`,
       folders,

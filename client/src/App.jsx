@@ -6,6 +6,7 @@ import DashboardPage from './pages/DashboardPage';
 import ExpensesPage from './pages/ExpensesPage';
 import CurveConfigPage from './pages/CurveConfigPage';
 import CurveLogsPage from './pages/CurveLogsPage';
+import CurveSetupPage from './pages/CurveSetupPage';
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated } = useAuth();
@@ -20,6 +21,19 @@ export default function App() {
       <Route
         path="/login"
         element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />}
+      />
+      {/*
+        The OAuth setup wizard lives OUTSIDE the Shell layout — no
+        sidebar, no header, full-bleed canvas. It's still auth-gated
+        so we can pin the state machine to req.userId.
+      */}
+      <Route
+        path="/curve/setup/*"
+        element={
+          <ProtectedRoute>
+            <CurveSetupPage />
+          </ProtectedRoute>
+        }
       />
       <Route
         path="*"

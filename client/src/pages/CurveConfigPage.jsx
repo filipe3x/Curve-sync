@@ -1,71 +1,80 @@
+/**
+ * Curve Sync configuration page — post-wizard settings view.
+ *
+ * Pre-wizard this file used to be a full-blown IMAP credentials form
+ * with App Password fields, proxy hints and a password toggle. Now
+ * that /curve/setup is the canonical onboarding path, this page is
+ * a dashboard-style editor for the three things that remain
+ * user-tunable after the DAG runs:
+ *
+ *   1. Connection — read-only status of the bound OAuth account with
+ *      a "Reautorizar" link back into the wizard.
+ *   2. Folder     — pick / confirm the IMAP folder that holds the
+ *      Curve receipts (same state machine as the wizard's step 5).
+ *   3. Schedule   — enable/disable auto-sync + choose the interval.
+ *
+ * The page also surfaces the last-sync stats as read-only
+ * informational cards. There is intentionally no "delete config"
+ * button — a destructive action belongs behind an explicit flow in
+ * a future iteration.
+ *
+ * Migrating away from the legacy manual form means users still on
+ * App Password cannot edit their credentials here. That is the
+ * designed trade-off: the wizard is the single entry point, and
+ * App-Password holdouts either keep running untouched or move to
+ * OAuth via the wizard. See docs/EMAIL_AUTH_MVP.md §7.1.
+ */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 
-// Text fields only. `imap_folder` is rendered separately as a state-aware
-// <select> so the user can't typo a folder path into existence — see
-// docs/EMAIL.md → Config UX for the full rationale.
-const FIELDS = [
-  {
-    key: 'imap_server',
-    label: 'Servidor IMAP',
-    placeholder: 'outlook.office365.com  ou  127.0.0.1',
-  },
-  {
-    key: 'imap_port',
-    label: 'Porta',
-    placeholder: '993 (direto) / 1993 (proxy)',
-    type: 'number',
-  },
-  {
-    key: 'imap_username',
-    label: 'Email Curve Pay',
-    placeholder: 'email@example.com',
-    help:
-      'O email da conta que recebe os recibos do Curve Pay (Curve Receipts). ' +
-      'É este email que o IMAP vai consultar para importar despesas.',
-  },
-  {
-    key: 'imap_password',
-    label: 'Password IMAP',
-    placeholder: '••••••••',
-    type: 'password',
-    help:
-      'NÃO é a password normal da conta. Caminho A (direto): cola a App ' +
-      'Password de 16 chars gerada em account.microsoft.com → Security → ' +
-      'Advanced security options → App passwords (requer MFA). Caminho B ' +
-      '(proxy localhost): cola a encryption password do emailproxy.config ' +
-      'do email-oauth2-proxy.',
-  },
-  { key: 'sync_interval_minutes', label: 'Intervalo (min)', placeholder: '5', type: 'number',
-    help: 'De quantos em quantos minutos o sync automático verifica emails novos no servidor IMAP. Default: 5 minutos.',
-  },
+// Debounce window for the folder dropdown auto-save. Short enough to
+// feel instantaneous, long enough to coalesce rapid keyboard navigation
+// through the list into one PUT.
+const FOLDER_AUTOSAVE_MS = 300;
+
+const SYNC_INTERVAL_OPTIONS = [
+  { value: 5, label: '5 minutos' },
+  { value: 15, label: '15 minutos' },
+  { value: 30, label: '30 minutos' },
+  { value: 60, label: '1 hora' },
 ];
 
-// Debounce window for the folder dropdown auto-save. Short enough to feel
-// instantaneous, long enough to coalesce multiple rapid selections (e.g.
-// keyboard arrow navigation through the list) into one PUT.
-const FOLDER_AUTOSAVE_MS = 300;
+function formatDateTime(value) {
+  if (!value) return '—';
+  try {
+    return new Date(value).toLocaleString('pt-PT', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } catch {
+    return String(value);
+  }
+}
 
 export default function CurveConfigPage() {
   const { user } = useAuth();
-  const [form, setForm] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
-  const [message, setMessage] = useState(null);
-  // Folders loaded from POST /test-connection. Empty until the user
-  // clicks "Testar ligação" — no auto-fetch on mount (see docs/EMAIL.md
-  // → Anti-patterns rejected → "Auto-fetch on page mount").
+  const [config, setConfig] = useState({});
+  const [oauthStatus, setOauthStatus] = useState(null);
   const [folderOptions, setFolderOptions] = useState([]);
-  // Dedicated busy flag for folder auto-save so the button states stay
-  // independent of the main Guardar flow.
+  const [testing, setTesting] = useState(false);
   const [folderSaving, setFolderSaving] = useState(false);
+  const [schedSaving, setSchedSaving] = useState(false);
+  const [message, setMessage] = useState(null);
   const folderSaveTimer = useRef(null);
 
+  // ----- Initial load ------------------------------------------------
   useEffect(() => {
-    api.getCurveConfig().then((res) => setForm(res.data ?? {})).catch(() => {});
+    api
+      .getCurveConfig()
+      .then((res) => setConfig(res.data ?? {}))
+      .catch(() => {});
+    api
+      .getOAuthStatus()
+      .then(setOauthStatus)
+      .catch(() => setOauthStatus({ connected: false }));
   }, []);
 
   // Clean up any pending debounce timer on unmount to avoid a late
@@ -76,23 +85,7 @@ export default function CurveConfigPage() {
     };
   }, []);
 
-  const handleChange = (key, value) =>
-    setForm((prev) => ({ ...prev, [key]: value }));
-
-  const handleSave = async (e) => {
-    e.preventDefault();
-    setMessage(null);
-    setSaving(true);
-    try {
-      await api.updateCurveConfig(form);
-      setMessage({ type: 'ok', text: 'Configuração guardada.' });
-    } catch (err) {
-      setMessage({ type: 'error', text: err.message });
-    } finally {
-      setSaving(false);
-    }
-  };
-
+  // ----- Folder: fetch list via /test-connection --------------------
   const handleTest = async () => {
     setTesting(true);
     setMessage(null);
@@ -107,49 +100,45 @@ export default function CurveConfigPage() {
     }
   };
 
-  // Persist the folder pick as a side effect of the dropdown change —
-  // debounced so rapid reselections coalesce into one PUT. Always sends
-  // confirm_folder: true so the backend stamps imap_folder_confirmed_at.
-  const autoSaveFolder = useCallback(
-    (nextFolder) => {
-      if (folderSaveTimer.current) clearTimeout(folderSaveTimer.current);
-      folderSaveTimer.current = setTimeout(async () => {
-        setFolderSaving(true);
-        try {
-          await api.updateCurveConfig({
-            ...form,
-            imap_folder: nextFolder,
-            confirm_folder: true,
-          });
-          // Reflect the confirmation locally so the banner disappears
-          // without waiting for a full refetch.
-          setForm((prev) => ({
-            ...prev,
-            imap_folder: nextFolder,
-            imap_folder_confirmed_at: new Date().toISOString(),
-          }));
-          setMessage({ type: 'ok', text: `Pasta "${nextFolder}" confirmada.` });
-        } catch (err) {
-          setMessage({ type: 'error', text: err.message });
-        } finally {
-          setFolderSaving(false);
-        }
-      }, FOLDER_AUTOSAVE_MS);
-    },
-    [form],
-  );
+  // ----- Folder: persist pick (debounced, always confirms) -----------
+  const autoSaveFolder = useCallback((nextFolder) => {
+    if (folderSaveTimer.current) clearTimeout(folderSaveTimer.current);
+    folderSaveTimer.current = setTimeout(async () => {
+      setFolderSaving(true);
+      setMessage(null);
+      try {
+        await api.updateCurveConfig({
+          imap_folder: nextFolder,
+          confirm_folder: true,
+        });
+        setConfig((prev) => ({
+          ...prev,
+          imap_folder: nextFolder,
+          imap_folder_confirmed_at: new Date().toISOString(),
+        }));
+        setMessage({
+          type: 'ok',
+          text: `Pasta "${nextFolder}" confirmada.`,
+        });
+      } catch (err) {
+        setMessage({ type: 'error', text: err.message });
+      } finally {
+        setFolderSaving(false);
+      }
+    }, FOLDER_AUTOSAVE_MS);
+  }, []);
 
-  // "Manter INBOX" dismiss: confirm the current value (typically INBOX)
-  // without opening the dropdown or requiring a folder list fetch.
+  // "Manter pasta actual" dismiss — confirms the current value without
+  // reopening the dropdown / fetching the folder list.
   const handleDismissBanner = async () => {
     setFolderSaving(true);
+    setMessage(null);
     try {
       await api.updateCurveConfig({
-        ...form,
-        imap_folder: form.imap_folder || 'INBOX',
+        imap_folder: config.imap_folder || 'INBOX',
         confirm_folder: true,
       });
-      setForm((prev) => ({
+      setConfig((prev) => ({
         ...prev,
         imap_folder: prev.imap_folder || 'INBOX',
         imap_folder_confirmed_at: new Date().toISOString(),
@@ -162,258 +151,282 @@ export default function CurveConfigPage() {
     }
   };
 
-  // Derived state for the folder picker. The staleness check is computed
-  // on every render from form + folderOptions — no extra state needed.
-  const currentFolder = form.imap_folder || 'INBOX';
-  const folderIsConfirmed = Boolean(form.imap_folder_confirmed_at);
+  // ----- Schedule: immediate save on toggle / select change ---------
+  const saveSchedule = async (patch) => {
+    setSchedSaving(true);
+    setMessage(null);
+    try {
+      await api.updateCurveConfig(patch);
+      setConfig((prev) => ({ ...prev, ...patch }));
+      setMessage({ type: 'ok', text: 'Agenda actualizada.' });
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setSchedSaving(false);
+    }
+  };
+
+  // ----- Derived state ----------------------------------------------
+  const currentFolder = config.imap_folder || 'INBOX';
+  const folderIsConfirmed = Boolean(config.imap_folder_confirmed_at);
   const folderListLoaded = folderOptions.length > 0;
-  const folderIsStale = folderListLoaded && !folderOptions.includes(currentFolder);
-  const showBanner = !folderIsConfirmed || folderIsStale;
+  const folderIsStale =
+    folderListLoaded && !folderOptions.includes(currentFolder);
+  const showFolderBanner = !folderIsConfirmed || folderIsStale;
+  const connected = Boolean(oauthStatus?.connected);
+  const providerLabel =
+    oauthStatus?.provider === 'microsoft' ? 'Microsoft' : oauthStatus?.provider;
 
   return (
     <>
       <PageHeader
         title="Configuração"
-        description="Credenciais IMAP e parâmetros de sincronização"
+        description="Ligação, pasta e agenda de sincronização"
       />
 
-      <form onSubmit={handleSave} className="card max-w-xl animate-fade-in-up">
-        <div className="mb-5 rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800">
-          <strong className="font-semibold">Microsoft 365 e Gmail já não aceitam a
-          password normal da conta para IMAP.</strong> Há dois caminhos suportados:
-          <ul className="mt-2 ml-4 list-disc space-y-1">
-            <li>
-              <strong>Caminho A (direto):</strong> servidor{' '}
-              <code>outlook.office365.com</code>, porta <code>993</code>, TLS{' '}
-              <strong>activo</strong>, password = App Password de 16 chars
-              (requer MFA activada na conta).
-            </li>
-            <li>
-              <strong>Caminho B (proxy localhost):</strong> servidor{' '}
-              <code>127.0.0.1</code>, porta <code>1993</code>, TLS{' '}
-              <strong>desligado</strong>, password = encryption password do{' '}
-              <code>emailproxy.config</code> (requer <code>email-oauth2-proxy</code>{' '}
-              a correr). Ver <code>docs/EMAIL.md</code>.
-            </li>
-          </ul>
-        </div>
+      {/* ----- Connection status card ----- */}
+      <section className="card max-w-xl mb-5 animate-fade-in-up">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-sand-500">
+          Ligação
+        </h2>
 
-        <div className="grid gap-5">
-          {/* Read-only: authenticated user's Embers account */}
-          <label className="block">
-            <span className="mb-1.5 block text-xs font-medium text-sand-500">
-              Conta Embers
-            </span>
-            <input
-              type="email"
-              value={user?.email ?? ''}
-              disabled
-              className="input bg-sand-50 text-sand-500"
-            />
-            <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
-              Conta com que fizeste login. As despesas importadas
-              ficam associadas a este utilizador. Não é necessariamente
-              o email que recebe os recibos do Curve Pay.
-            </span>
-          </label>
-          {FIELDS.map(({ key, label, placeholder, type, help }) => (
-            <label key={key} className="block">
-              <span className="mb-1.5 block text-xs font-medium text-sand-500">
-                {label}
-              </span>
-              {key === 'imap_password' ? (
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={form[key] ?? ''}
-                    onChange={(e) => handleChange(key, e.target.value)}
-                    placeholder={
-                      form.has_imap_password && !form.imap_password
-                        ? 'password guardada — deixa vazio para manter'
-                        : placeholder
-                    }
-                    className="input pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((v) => !v)}
-                    className="absolute inset-y-0 right-0 flex items-center pr-3 text-sand-400 hover:text-curve-600 transition-colors"
-                    tabIndex={-1}
-                  >
-                    {showPassword ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12c1.292 4.338 5.31 7.5 10.066 7.5.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
-                      </svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                      </svg>
-                    )}
-                  </button>
-                </div>
-              ) : (
-                <input
-                  type={type ?? 'text'}
-                  value={form[key] ?? ''}
-                  onChange={(e) => handleChange(key, e.target.value)}
-                  placeholder={placeholder}
-                  className="input"
-                />
-              )}
-              {help && (
-                <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
-                  {help}
-                </span>
-              )}
-            </label>
-          ))}
-
-          {/* Folder picker — <select> if we have a loaded folder list,
-              otherwise a read-only display with a hint to click "Testar
-              ligação" first. Never a free-text input. */}
-          <div className="block">
-            <span className="mb-1.5 block text-xs font-medium text-sand-500">
-              Pasta IMAP
-            </span>
-            {folderListLoaded ? (
-              <select
-                value={currentFolder}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  handleChange('imap_folder', next);
-                  autoSaveFolder(next);
-                }}
-                disabled={folderSaving}
-                className="input"
-              >
-                {folderIsStale && (
-                  <option value={currentFolder} disabled className="text-red-600">
-                    {currentFolder} (não existe — escolha outra)
-                  </option>
-                )}
-                {folderOptions.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="input flex items-center justify-between bg-sand-50 text-sand-500">
-                <span>{currentFolder}</span>
-                <span className="text-xs">clica em «Testar ligação» para escolher</span>
-              </div>
-            )}
-            <span className="mt-1.5 block text-xs leading-relaxed text-sand-500">
-              A lista de pastas é obtida do servidor IMAP no momento do teste
-              de ligação — nunca é hardcoded. A escolha é guardada
-              automaticamente e pode ser alterada a qualquer momento.
-            </span>
-          </div>
-
-          {/* Confirmation banner — fires when the folder hasn't been
-              confirmed yet, or when the stored value no longer exists on
-              the server. Colour shifts from amber (unconfirmed) to red
-              (stale). Dismissable via "Manter INBOX" unless stale. */}
-          {showBanner && (
-            <div
-              className={`rounded-xl px-4 py-3 text-xs leading-relaxed ${
-                folderIsStale
-                  ? 'bg-red-50 text-red-700'
-                  : 'bg-amber-50 text-amber-800'
-              }`}
-            >
-              {folderIsStale ? (
-                <p>
-                  A pasta actualmente configurada (
-                  <code className="font-mono">{currentFolder}</code>) não existe no
-                  servidor IMAP. Escolhe uma das pastas disponíveis acima — a
-                  sincronização fica bloqueada até ser confirmada.
-                </p>
-              ) : (
-                <p>
-                  A pasta <code className="font-mono">{currentFolder}</code> ainda não
-                  foi confirmada. Clica em <strong>Testar ligação</strong> para veres
-                  as pastas disponíveis e escolher uma, ou mantém{' '}
-                  <code className="font-mono">INBOX</code> como default.
-                </p>
-              )}
-              {!folderIsStale && (
-                <button
-                  type="button"
-                  onClick={handleDismissBanner}
-                  disabled={folderSaving}
-                  className="mt-2 rounded-lg bg-amber-200/60 px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-50"
-                >
-                  {folderSaving ? 'A guardar…' : `Manter ${currentFolder}`}
-                </button>
-              )}
+        {oauthStatus === null ? (
+          <p className="mt-3 text-sm text-sand-400">A verificar…</p>
+        ) : connected ? (
+          <div className="mt-3 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-lg font-semibold text-sand-900">
+                {oauthStatus.email}
+              </p>
+              <p className="mt-1 text-xs text-sand-500">
+                Ligada via <strong>{providerLabel}</strong> — token gerido
+                pelo servidor, sem App Passwords.
+              </p>
             </div>
-          )}
-
-          {/* TLS toggle — turn off only for loopback proxy (Caminho B) */}
-          <label className="flex items-start gap-3">
-            <input
-              type="checkbox"
-              checked={form.imap_tls ?? true}
-              onChange={(e) => handleChange('imap_tls', e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
-            />
-            <span className="text-sm text-sand-700">
-              Usar TLS
-              <span className="mt-0.5 block text-xs text-sand-500">
-                Liga sempre excepto para o proxy localhost (Caminho B).
-                Desligar contra um host não-loopback é recusado pelo servidor.
-              </span>
-            </span>
-          </label>
-
-          {/* Sync enabled toggle */}
-          <label className="flex items-start gap-3">
-            <input
-              type="checkbox"
-              checked={form.sync_enabled ?? false}
-              onChange={(e) => handleChange('sync_enabled', e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
-            />
-            <span className="text-sm text-sand-700">
-              Sincronização automática activa
-              <span className="mt-0.5 block text-xs text-sand-500">
-                Se activa, o servidor verifica automaticamente emails novos no intervalo definido acima.
-                Se desligada, a importação só corre quando clicares em «Sincronizar» manualmente.
-              </span>
-            </span>
-          </label>
-        </div>
-
-        {/* Messages */}
-        {message && (
-          <div
-            className={`mt-5 rounded-xl px-4 py-3 text-sm transition-opacity duration-300 ${
-              message.type === 'ok'
-                ? 'bg-emerald-50 text-emerald-700'
-                : 'bg-red-50 text-curve-700'
-            }`}
-          >
-            {message.text}
+            <Link
+              to="/curve/setup"
+              className="shrink-0 text-sm font-medium text-curve-700 underline underline-offset-4 hover:text-curve-900"
+            >
+              Reautorizar →
+            </Link>
+          </div>
+        ) : (
+          <div className="mt-3">
+            <p className="text-sm text-sand-700">
+              Nenhuma conta Microsoft ligada. Corre o assistente para
+              autorizar a leitura dos recibos do Curve Pay.
+            </p>
+            <Link
+              to="/curve/setup"
+              className="mt-3 inline-block rounded-xl bg-curve-700 px-4 py-2 text-sm font-medium text-white hover:bg-curve-800"
+            >
+              Abrir assistente
+            </Link>
           </div>
         )}
 
-        {/* Actions */}
-        <div className="mt-6 flex gap-3">
-          <button type="submit" disabled={saving} className="btn-primary">
-            {saving ? 'A guardar…' : 'Guardar'}
-          </button>
+        <p className="mt-4 text-xs text-sand-400">
+          Autenticado como <code className="font-mono">{user?.email ?? '—'}</code>.
+          As despesas importadas ficam associadas a este utilizador.
+        </p>
+      </section>
+
+      {/* ----- Folder card ----- */}
+      <section className="card max-w-xl mb-5 animate-fade-in-up">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-sand-500">
+              Pasta IMAP
+            </h2>
+            <p className="mt-1 text-xs text-sand-500">
+              Onde o servidor procura os recibos. Só mexe aqui se mudares
+              regras no teu cliente de email.
+            </p>
+          </div>
           <button
             type="button"
             onClick={handleTest}
             disabled={testing}
-            className="btn-secondary"
+            className="btn-secondary shrink-0"
           >
             {testing ? 'A testar…' : 'Testar ligação'}
           </button>
         </div>
-      </form>
+
+        <div className="mt-4">
+          {folderListLoaded ? (
+            <select
+              value={currentFolder}
+              onChange={(e) => {
+                const next = e.target.value;
+                setConfig((prev) => ({ ...prev, imap_folder: next }));
+                autoSaveFolder(next);
+              }}
+              disabled={folderSaving}
+              className="input"
+            >
+              {folderIsStale && (
+                <option value={currentFolder} disabled className="text-red-600">
+                  {currentFolder} (não existe — escolha outra)
+                </option>
+              )}
+              {folderOptions.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="input flex items-center justify-between bg-sand-50 text-sand-500">
+              <span className="truncate">{currentFolder}</span>
+              <span className="ml-2 shrink-0 text-xs">
+                clica em «Testar ligação» para escolher
+              </span>
+            </div>
+          )}
+        </div>
+
+        {showFolderBanner && (
+          <div
+            className={`mt-4 rounded-xl px-4 py-3 text-xs leading-relaxed ${
+              folderIsStale
+                ? 'bg-red-50 text-red-700'
+                : 'bg-amber-50 text-amber-800'
+            }`}
+          >
+            {folderIsStale ? (
+              <p>
+                A pasta actualmente configurada (
+                <code className="font-mono">{currentFolder}</code>) não
+                existe no servidor IMAP. Escolhe uma das pastas disponíveis
+                acima — a sincronização fica bloqueada até ser confirmada.
+              </p>
+            ) : (
+              <p>
+                A pasta <code className="font-mono">{currentFolder}</code>{' '}
+                ainda não foi confirmada. Clica em{' '}
+                <strong>Testar ligação</strong> para veres as pastas
+                disponíveis, ou mantém a escolha actual.
+              </p>
+            )}
+            {!folderIsStale && (
+              <button
+                type="button"
+                onClick={handleDismissBanner}
+                disabled={folderSaving}
+                className="mt-2 rounded-lg bg-amber-200/60 px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-50"
+              >
+                {folderSaving ? 'A guardar…' : `Manter ${currentFolder}`}
+              </button>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ----- Schedule card ----- */}
+      <section className="card max-w-xl mb-5 animate-fade-in-up">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-sand-500">
+          Agenda de sincronização
+        </h2>
+
+        <label className="mt-4 flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={config.sync_enabled ?? false}
+            onChange={(e) =>
+              saveSchedule({ sync_enabled: e.target.checked })
+            }
+            disabled={schedSaving}
+            className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
+          />
+          <span className="text-sm text-sand-700">
+            Sincronização automática activa
+            <span className="mt-0.5 block text-xs text-sand-500">
+              Quando activa, o servidor verifica recibos novos no intervalo
+              escolhido abaixo. Quando desligada, só corre ao clicar em
+              «Sincronizar agora» no dashboard.
+            </span>
+          </span>
+        </label>
+
+        <label className="mt-5 block">
+          <span className="mb-1.5 block text-xs font-medium text-sand-500">
+            Intervalo
+          </span>
+          <select
+            value={config.sync_interval_minutes ?? 5}
+            onChange={(e) =>
+              saveSchedule({ sync_interval_minutes: Number(e.target.value) })
+            }
+            disabled={schedSaving || !(config.sync_enabled ?? false)}
+            className="input"
+          >
+            {SYNC_INTERVAL_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      {/* ----- Stats card ----- */}
+      <section className="card max-w-xl mb-5 animate-fade-in-up">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-sand-500">
+          Estado
+        </h2>
+
+        <dl className="mt-4 grid grid-cols-2 gap-4 text-sm">
+          <div>
+            <dt className="text-xs text-sand-400">Último sync</dt>
+            <dd className="mt-1 font-medium text-sand-900">
+              {formatDateTime(config.last_sync_at)}
+            </dd>
+            {config.last_sync_status && (
+              <dd
+                className={`mt-0.5 text-xs ${
+                  config.last_sync_status === 'error'
+                    ? 'text-red-600'
+                    : 'text-emerald-700'
+                }`}
+              >
+                {config.last_sync_status === 'error' ? 'erro' : 'ok'}
+              </dd>
+            )}
+          </div>
+          <div>
+            <dt className="text-xs text-sand-400">Último recibo</dt>
+            <dd className="mt-1 font-medium text-sand-900">
+              {formatDateTime(config.last_email_at)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-sand-400">Emails processados</dt>
+            <dd className="mt-1 font-medium text-sand-900">
+              {config.emails_processed_total ?? 0}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-sand-400">Pasta</dt>
+            <dd className="mt-1 font-medium text-sand-900 truncate">
+              {currentFolder}
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      {/* ----- Inline status message ----- */}
+      {message && (
+        <div
+          className={`max-w-xl rounded-xl px-4 py-3 text-sm transition-opacity duration-300 ${
+            message.type === 'ok'
+              ? 'bg-emerald-50 text-emerald-700'
+              : 'bg-red-50 text-curve-700'
+          }`}
+        >
+          {message.text}
+        </div>
+      )}
     </>
   );
 }

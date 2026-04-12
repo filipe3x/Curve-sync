@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import CurveConfig from '../models/CurveConfig.js';
 import { syncEmails, isSyncing, SyncConflictError } from './syncOrchestrator.js';
-import { ImapReader } from './imapReader.js';
+import { createImapReader } from './imapReader.js';
 import { decrypt } from './crypto.js';
 
 // ---------- State ----------
@@ -59,8 +59,15 @@ async function runAll() {
     if (isSyncing(config._id)) continue;
 
     try {
-      const plainConfig = { ...config, imap_password: decrypt(config.imap_password) };
-      const reader = new ImapReader(plainConfig);
+      // OAuth configs have imap_password=null; decrypting null would
+      // throw. Guard so both branches flow through the same code path.
+      const plainConfig = {
+        ...config,
+        imap_password: config.imap_password
+          ? decrypt(config.imap_password)
+          : null,
+      };
+      const reader = await createImapReader(plainConfig);
       await syncEmails({ config: plainConfig, reader });
     } catch (err) {
       if (err instanceof SyncConflictError) continue;
