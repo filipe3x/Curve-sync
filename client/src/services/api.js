@@ -68,6 +68,11 @@ export const triggerSync = (params) =>
     timeoutMs: 120_000,
   });
 
+// Lightweight poll for the dashboard: returns running/last_sync_at/
+// last_sync_status/last_email_at so the UI can drive the re-auth
+// banner + "a sincronizar agora" badge without pulling the full config.
+export const getSyncStatus = () => request('/curve/sync/status');
+
 // Curve OAuth wizard
 export const checkOAuthEmail = (email) =>
   request('/curve/oauth/check-email', {

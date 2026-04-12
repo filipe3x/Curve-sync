@@ -347,8 +347,10 @@ estável.
 
 - [`EMAIL_AUTH.md`](./EMAIL_AUTH.md) — **fonte de verdade arquitectural**;
   este MVP é um subset de âmbito, não uma alternativa
-- [`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md) — V1 legacy,
-  preservada para debug de instalações existentes
+- V1 legacy (`email-oauth2-proxy`) — a documentação dedicada
+  (`EMAIL_AUTH_V1_PROXY.md` + `email-oauth2-proxy.service`) foi
+  apagada no sprint pós-PR 7, uma vez que o V2 é a única implementação
+  suportada. Referências históricas vivem inline em `EMAIL_AUTH.md`
 - [`EMAIL.md`](./EMAIL.md) — pipeline geral de ingestão de emails;
   inalterado pelo MVP (o único ponto de contacto é o `imapReader.js`
   refactor do PR 4)

@@ -47,6 +47,7 @@ import {
 } from '@azure/msal-node';
 
 import { createCachePlugin } from './oauthCachePlugin.js';
+import { audit } from './audit.js';
 
 const SCOPES_BY_PROVIDER = {
   microsoft: [
@@ -179,6 +180,23 @@ export async function getOAuthToken(config, overrides = {}) {
 
   try {
     const result = await app.acquireTokenSilent({ account, scopes });
+    // MSAL signals `fromCache=false` whenever it actually went to the
+    // network, which for acquireTokenSilent means the cached access
+    // token was expired and a refresh-token exchange happened. That's
+    // exactly the event §8 item 3 of EMAIL_AUTH_MVP requires us to log
+    // — it's the proof-of-life for the refresh-token path. Dropping
+    // this audit write would leave us unable to tell a "cache still
+    // warm" sync from a "refresh worked after 1h" sync.
+    if (result && result.fromCache === false) {
+      audit({
+        action: 'oauth_token_refreshed',
+        userId: config.user_id,
+        detail:
+          `provider=${config.oauth_provider} ` +
+          `accountId=${config.oauth_account_id} ` +
+          `email=${account.username}`,
+      });
+    }
     return result.accessToken;
   } catch (err) {
     if (err instanceof InteractionRequiredAuthError) {

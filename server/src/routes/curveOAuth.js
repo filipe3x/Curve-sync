@@ -75,7 +75,10 @@ router.post('/start', async (req, res) => {
       action: 'oauth_start',
       userId: req.userId,
       ip: clientIp(req),
-      detail: `microsoft ${email}`,
+      detail:
+        `provider=${result.provider} ` +
+        `email=${email} ` +
+        `verificationUri=${result.verificationUri}`,
     });
     res.json(result);
   } catch (err) {
@@ -113,14 +116,21 @@ router.post('/poll', async (req, res) => {
         action: 'oauth_completed',
         userId: req.userId,
         ip: clientIp(req),
-        detail: `microsoft ${result.email}`,
+        // `accountId` is the MSAL homeAccountId — the primary key inside
+        // the encrypted token cache. Writing it here lets ops correlate
+        // a wizard run with the exact cache record, which matters for
+        // second-user / multi-account debugging (§8 item 7).
+        detail:
+          `provider=microsoft ` +
+          `email=${result.email} ` +
+          `accountId=${result.homeAccountId}`,
       });
     } else if (result.status === 'error') {
       audit({
         action: 'oauth_failed',
         userId: req.userId,
         ip: clientIp(req),
-        detail: result.error,
+        detail: `code=${result.errorCode || 'unknown'} ${result.error}`,
       });
     }
     res.json(result);

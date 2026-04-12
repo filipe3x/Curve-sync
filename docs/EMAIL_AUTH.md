@@ -6,11 +6,13 @@
 > necessidade de acesso ao terminal.
 >
 > **V2 vs V1:** a implementação original (Caminho B com `email-oauth2-proxy`
-> Python + ficheiro INI + systemd) está preservada em
-> [`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md) para referência
-> histórica. Este documento descreve a arquitectura alvo: `imapflow` fala
-> XOAUTH2 directamente contra `outlook.office365.com:993`, e `@azure/msal-node`
-> gere o lifecycle de tokens com cache persistido em MongoDB.
+> Python + ficheiro INI + systemd) foi completamente removida no sprint
+> pós-PR 7 — a documentação dedicada (`EMAIL_AUTH_V1_PROXY.md` e
+> `email-oauth2-proxy.service`) foi apagada, e o que resta neste documento
+> sobre V1 é puro contexto histórico inline. Este documento descreve a
+> arquitectura alvo: `imapflow` fala XOAUTH2 directamente contra
+> `outlook.office365.com:993`, e `@azure/msal-node` gere o lifecycle de
+> tokens com cache persistido em MongoDB.
 
 ---
 
@@ -88,7 +90,8 @@ Curve Sync ──plain LOGIN──▶ 127.0.0.1:1993 ──XOAUTH2──▶ outl
 - Tokens vivem no ficheiro INI (`emailproxy.config`)
 - `imap_password` do CurveConfig é na verdade a key de decriptação dos tokens
 - Restart do systemd necessário para aplicar mudanças de config
-- Documentação preservada em `EMAIL_AUTH_V1_PROXY.md`
+- Documentação dedicada (`EMAIL_AUTH_V1_PROXY.md` + systemd unit)
+  foi apagada no sprint pós-PR 7 — V2 é a única implementação suportada
 
 ### 2.2 Topologia alvo (V2, direct XOAUTH2)
 
@@ -2137,9 +2140,12 @@ Sub-tópicos a cobrir:
 - **10.8 Roll-out & rollback** — feature-flag `ENABLE_OAUTH_WIZARD`;
   plano de rollback se algo correr mal em produção (desactivar flag,
   users OAuth ficam sem sync, users App Password inalterados)
-- **10.9 Deprecation path do V1** — quando remover
-  `docs/email-oauth2-proxy.service`, `EMAIL_AUTH_V1_PROXY.md`, secção
-  Caminho B do `EMAIL.md`
+- **10.9 Deprecation path do V1** — parcialmente concluído: no sprint
+  pós-PR 7 foram apagados `docs/EMAIL_AUTH_V1_PROXY.md` e
+  `docs/email-oauth2-proxy.service`, e `CurveConfigPage.jsx` foi
+  reescrito para remover qualquer vestígio do proxy. Resta limpar a
+  secção Caminho B do `EMAIL.md` e quaisquer referências residuais em
+  `imapReader.js`
 
 ---
 
@@ -2200,17 +2206,16 @@ Sub-tópicos a decidir antes de merge:
 ## Apêndice A — Implementação legacy (V1, proxy-based)
 
 A versão anterior deste documento descrevia o Caminho B do Curve Sync:
-`email-oauth2-proxy` (Python) a correr como systemd unit, `emailproxy.config`
-INI com tokens Fernet, e o backend Node a escrever directamente no ficheiro.
+`email-oauth2-proxy` (Python) a correr como systemd unit,
+`emailproxy.config` INI com tokens Fernet, e o backend Node a escrever
+directamente no ficheiro.
 
-Esse documento está preservado em
-**[`EMAIL_AUTH_V1_PROXY.md`](./EMAIL_AUTH_V1_PROXY.md)** para:
+No sprint pós-PR 7 essa documentação foi eliminada do repositório:
+`EMAIL_AUTH_V1_PROXY.md` e `docs/email-oauth2-proxy.service` já não
+existem, e o `CurveConfigPage.jsx` foi reescrito para remover qualquer
+vestígio do proxy. O V2 (direct XOAUTH2 + MSAL) é a única implementação
+suportada.
 
-- Referência histórica das decisões tomadas
-- Debug de instalações existentes (o ficheiro
-  `docs/email-oauth2-proxy.service` ainda vive no repo e continua a ser o
-  path de instalação suportado até a migração V2 estar completa)
-- Comparação das trade-offs entre as duas abordagens
-
-A secção correspondente em `docs/EMAIL.md` ("Installing email-oauth2-proxy
-on the Raspberry Pi — Caminho B") continua válida para instalações V1.
+As referências restantes a Caminho B dentro de `docs/EMAIL.md` e do
+código (`server/src/services/imapReader.js`) são contexto histórico
+inline que será limpo numa próxima passagem.
