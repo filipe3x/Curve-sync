@@ -35,7 +35,7 @@ export default function TrustScreen({
   return (
     <WizardLayout
       id="trust"
-      eyebrow="Passo 2 de 5"
+      eyebrow="Passo 2 de 6"
       title="Vamos pedir autorização à Microsoft"
       subtitle={`Para ligar ${email || 'a tua conta'}, precisamos que abras a página da Microsoft e aproves um código curto. Não saímos deste assistente.`}
       error={error}

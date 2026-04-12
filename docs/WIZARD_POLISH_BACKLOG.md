@@ -129,7 +129,54 @@ resembles an infinity ribbon. Replace with a hand-tuned version:
       `/oauth/preview` or reads `last_email_at` if available)
 - [ ] Haptic-style vibration on mobile (navigator.vibrate(30))
 
-## 8. ScheduleScreen — step 5 polish
+## 8. PickFolderScreen — step 5 polish
+
+**File**: `client/src/components/setup/steps/PickFolderScreen.jsx`
+
+Added in PR 7 (functional + premium-quiet skeleton). Polish backlog:
+
+- [ ] **Per-folder preview count** — needs a new backend route
+      `POST /curve/oauth/preview-folder { folder }` that opens the
+      mailbox and runs `SEARCH FROM curve` (or `FROM "curve.app"` etc.)
+      and returns `{ count, latestDate }`. Render as
+      *"Nesta pasta encontrámos **47 emails** do Curve — o mais recente
+      **ontem às 14:23**."* under each selectable row (lazy: only the
+      currently-selected folder). Transforms the step from validation
+      into proof of life.
+- [ ] **Selection animation** — smooth scale/highlight on the radio
+      item when clicked (currently just a colour swap)
+- [ ] **Scroll fade edges** — top/bottom CSS mask on the scrollable
+      list when >6 folders so it's clearly scrollable
+- [ ] **Recommended badge** — currently a plain pill; consider a
+      tiny "✨" burst animation when the recommendation locks in
+      (runs once, ~400 ms, on first render)
+- [ ] **Sub-folder indentation** — parse `/` separators and indent
+      `INBOX/Curve` visually so the tree is legible
+- [ ] **Recency hint** — if a folder was modified in the last 7 days,
+      show a muted "activa" dot — another signal the user can use
+      alongside the name match
+
+## 8b. PickFolderScreen — "Não vejo a minha pasta" escape hatch
+
+Currently rendered as a disabled link (`title="Em breve"`). The future
+behaviour is a modal / inline panel with a mini folder explorer:
+
+- [ ] Mini tree view of the mailbox with expand/collapse on parent
+      folders (lucide `ChevronRight` for collapsed, `ChevronDown`
+      for expanded) — helps users who have nested structures the
+      flat list doesn't display well
+- [ ] Free-text fallback — a plain input where the user can type a
+      folder path (e.g. `INBOX.Curve.Receipts` on certain IMAP
+      providers). Validates by calling `testConnection` a second
+      time with the typed folder as a hint.
+- [ ] Search box at the top of the tree — `filter` over the same
+      folder list, useful for mailboxes with 50+ labels (Gmail users)
+- [ ] Link to docs explaining how to create a rule / filter in
+      outlook.com, gmail, etc., that moves Curve receipts into a
+      dedicated folder — the long-term right answer for messy
+      mailboxes.
+
+## 8c. ScheduleScreen — step 6 polish
 
 **File**: `client/src/components/setup/steps/ScheduleScreen.jsx`
 
@@ -165,6 +212,10 @@ Add them to `EMAIL_AUTH_MVP.md` backlog if adopted.
 
 - [ ] `GET /curve/oauth/preview` — returns `{ last_email_at, count_last_30d }`
       for the success screen's "Último recibo detectado" line
+- [ ] `POST /curve/oauth/preview-folder { folder }` — opens the given
+      folder and runs `SEARCH FROM curve` (or similar), returns
+      `{ count, latestDate }`. Powers the "47 recibos encontrados"
+      line on PickFolderScreen (§8 polish).
 - [ ] `POST /curve/oauth/start` should return the MSAL `expiresOn`
       timestamp so the countdown ring on step 3 can be exact instead of
       relying on `expiresIn` + client clock drift
@@ -184,9 +235,21 @@ Before shipping the polished wizard:
 - [ ] User enters wrong code in Microsoft UI → step 3 surfaces the error
 - [ ] Network failure mid-poll → error banner + "Tentar de novo" button
 - [ ] `prefers-reduced-motion` — no animation, static layouts look OK
-- [ ] Mobile viewport (375×667) — all 6 screens render within the fold
+- [ ] Mobile viewport (375×667) — all 7 screens render within the fold
 - [ ] Keyboard-only nav — can complete the wizard without touching the
       mouse
+- [ ] Pick-folder: prefetch lands before the user clicks "Continuar"
+      on the success screen (the common case) — PickFolderScreen
+      renders with the list already in state, no skeleton
+- [ ] Pick-folder: prefetch is still in flight when the user lands —
+      skeleton renders, then folds are revealed with the stagger
+- [ ] Pick-folder: prefetch fails — error + retry button work
+- [ ] Pick-folder: mailbox with a `Curve` / `Finanças/Curve` folder
+      gets pre-selected with the "Sugerida" badge
+- [ ] Pick-folder: mailbox without any curve/receipt match falls back
+      to INBOX pre-selected
+- [ ] Pick-folder: user picks a different folder, continues, and the
+      PUT /curve/config fires with `confirm_folder: true`
 
 ## 12. Open questions for the design session
 

@@ -13,7 +13,7 @@ export default function SuccessScreen({ email, onContinue }) {
   return (
     <WizardLayout
       id="success"
-      eyebrow="Passo 4 de 5"
+      eyebrow="Passo 4 de 6"
       title="Conta ligada"
       subtitle="A Microsoft confirmou o acesso. A partir de agora, conseguimos ler os recibos do Curve Card na tua caixa de entrada."
       actions={

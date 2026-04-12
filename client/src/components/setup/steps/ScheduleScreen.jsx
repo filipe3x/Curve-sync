@@ -26,7 +26,7 @@ export default function ScheduleScreen({ loading, error, onFinish, onSkip }) {
   return (
     <WizardLayout
       id="schedule"
-      eyebrow="Passo 5 de 5"
+      eyebrow="Passo 6 de 6"
       title="Sincronização automática?"
       subtitle="Podemos ir buscar novos recibos em segundo plano. Podes mudar isto depois na página de configuração."
       error={error}

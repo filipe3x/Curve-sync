@@ -24,7 +24,7 @@ export default function DeviceCodeScreen({
   return (
     <WizardLayout
       id="code"
-      eyebrow="Passo 3 de 5"
+      eyebrow="Passo 3 de 6"
       title="Abre a Microsoft e introduz este código"
       subtitle="Podes abrir a página no teu telemóvel (scan do QR) ou num novo separador. Voltamos automaticamente quando concluíres."
       error={error}

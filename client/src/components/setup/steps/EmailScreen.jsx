@@ -29,7 +29,7 @@ export default function EmailScreen({
   return (
     <WizardLayout
       id="email"
-      eyebrow="Passo 1 de 5"
+      eyebrow="Passo 1 de 6"
       title="Qual é o teu email?"
       subtitle="Vamos ver se a tua conta suporta autorização direta (Microsoft pessoal) ou se precisas do formulário manual."
       error={error}
