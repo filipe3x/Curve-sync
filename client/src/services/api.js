@@ -68,6 +68,31 @@ export const triggerSync = (params) =>
     timeoutMs: 120_000,
   });
 
+// Curve OAuth wizard
+export const checkOAuthEmail = (email) =>
+  request('/curve/oauth/check-email', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+
+// startOAuth blocks on the server until MSAL's deviceCodeCallback fires
+// (<1 s usually, capped at 10 s by the server). Give it enough slack for
+// cold-start + network + Azure latency before the frontend gives up.
+export const startOAuth = (email) =>
+  request('/curve/oauth/start', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+    timeoutMs: 20_000,
+  });
+
+export const pollOAuth = () =>
+  request('/curve/oauth/poll', { method: 'POST' });
+
+export const cancelOAuth = () =>
+  request('/curve/oauth/cancel', { method: 'POST' });
+
+export const getOAuthStatus = () => request('/curve/oauth/status');
+
 // Curve Logs
 export const getCurveLogs = (params) =>
   request(`/curve/logs?${new URLSearchParams(params)}`);

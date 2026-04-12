@@ -918,6 +918,11 @@ state machine e comportamento.
 
 ### 5.0 Direcção UX — MVP (first-time-setup premium)
 
+> **Estado actual (PR 6)**: esqueleto funcional navegável em
+> `/curve/setup`. O `HeroScreen` é a referência polida; os restantes
+> passos (1–5) são estritamente funcionais. O punch list detalhado
+> para o polish pass vive em `docs/WIZARD_POLISH_BACKLOG.md`.
+
 Referência mental: **o onboarding de um iPhone ou Android novo** —
 generoso em espaço branco, uma única acção por ecrã, cópia acolhedora
 sem ser infantil, transições que respiram. Para um user que provavelmente

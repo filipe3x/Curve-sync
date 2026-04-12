@@ -40,6 +40,12 @@ export default {
           'Roboto',
           'sans-serif',
         ],
+        handwritten: [
+          'Caveat',
+          'Segoe Script',
+          'Comic Sans MS',
+          'cursive',
+        ],
       },
       borderRadius: {
         '2xl': '1rem',

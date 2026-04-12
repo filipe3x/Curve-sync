@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
@@ -176,6 +177,31 @@ export default function CurveConfigPage() {
         title="Configuração"
         description="Credenciais IMAP e parâmetros de sincronização"
       />
+
+      {/*
+        Entry point for the new OAuth wizard (/curve/setup). Kept
+        as a thin banner so the existing form below remains the
+        canonical editor for advanced / manual tweaks.
+      */}
+      <Link
+        to="/curve/setup"
+        className="block max-w-xl mb-5 rounded-2xl border border-curve-200 bg-curve-50 px-5 py-4 hover:bg-curve-100 transition-colors"
+      >
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-curve-900">
+              Primeira vez por aqui?
+            </p>
+            <p className="text-sm text-curve-800/80">
+              Abre o assistente — ligamos a tua conta Microsoft em três
+              passos sem precisares de App Passwords.
+            </p>
+          </div>
+          <span className="shrink-0 text-sm font-medium text-curve-900 underline underline-offset-4">
+            Abrir assistente →
+          </span>
+        </div>
+      </Link>
 
       <form onSubmit={handleSave} className="card max-w-xl animate-fade-in-up">
         <div className="mb-5 rounded-xl bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800">
