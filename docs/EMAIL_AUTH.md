@@ -681,16 +681,231 @@ botão "Re-autorizar" que manda o user directo para o passo 2 do wizard
 
 ## 4. Fluxos OAuth Suportados
 
-> _[Placeholder]_ Mantém a estrutura do V1 (DAG + external-auth + matriz
-> "quando usar qual"), mas actualizado para MSAL:
->
-> - DAG: `app.acquireTokenByDeviceCode({ deviceCodeCallback, scopes })` em
->   vez de POST manual ao endpoint `/devicecode`
-> - External auth: `app.getAuthCodeUrl({ scopes, redirectUri })` +
->   `app.acquireTokenByCode({ code, redirectUri })`
-> - Tokens persistidos automaticamente no MongoDB via cache plugin (não há
->   escrita manual em `emailproxy.config`)
-> - `poll_id` deixa de ser necessário — o DAG é promise-based em MSAL
+Dois fluxos, lado a lado — DAG para Microsoft, external-auth (authorization
+code + PKCE + loopback) para Gmail e fallback universal. O diagrama abaixo
+mostra quem fala com quem em cada um, onde entra o MSAL, e onde os tokens
+aterram.
+
+```
+╔══════════════════════════════════════════════════════════════════════════╗
+║  FLUXO A — DEVICE AUTHORIZATION GRANT (DAG)    — Microsoft primário     ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Frontend            Backend Express         @azure/msal-node      Microsoft
+  (wizard)            /api/curve/oauth/*      (in-process)          login.*
+     │                       │                      │                   │
+     │  POST /start          │                      │                   │
+     │  {email}              │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │                       │ app.acquireToken     │                   │
+     │                       │   ByDeviceCode({     │                   │
+     │                       │     deviceCode       │                   │
+     │                       │     Callback, ... }) │                   │
+     │                       ├─────────────────────▶│                   │
+     │                       │                      │  POST /devicecode │
+     │                       │                      ├──────────────────▶│
+     │                       │                      │   {userCode,      │
+     │                       │                      │    deviceCode,    │
+     │                       │                      │    verifUri, ...} │
+     │                       │                      │◀──────────────────┤
+     │                       │  deviceCodeCallback  │                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │  (MSAL começa poll   │                   │
+     │                       │   interno cada 5s)   │                   │
+     │  {flowId, userCode,   │                      │                   │
+     │   verificationUri,    │                      │                   │
+     │   expiresIn}          │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  ┌─────────────────────────────────────────────────────────────┐ │
+     │  │ Wizard mostra userCode em destaque + link verificationUri   │ │
+     │  │                                                             │ │
+     │  │ User (noutro dispositivo ou mesma máquina):                 │ │
+     │  │   1. abre microsoft.com/devicelogin                         │ │
+     │  │   2. insere userCode                                        │ │
+     │  │   3. faz login                                              │ │
+     │  │   4. consente                                               │ │
+     │  └─────────────────────────────────────────────────────────────┘ │
+     │                       │                      │                   │
+     │  GET /poll?flowId=X   │                      │  poll /token      │
+     │  (cada 5s)            │                      ├──────────────────▶│
+     ├──────────────────────▶│                      │ authorization_    │
+     │  {pending, ...}       │                      │   pending         │
+     │◀──────────────────────┤                      │◀──────────────────┤
+     │                       │                      │                   │
+     │                       │                      │  (user consentiu) │
+     │                       │                      ├──────────────────▶│
+     │                       │                      │ {access_token,    │
+     │                       │                      │  refresh_token,   │
+     │                       │                      │  account, ...}    │
+     │                       │                      │◀──────────────────┤
+     │                       │                      │                   │
+     │                       │ ┌── afterCacheAccess ──▶┐                │
+     │                       │ │  encrypt + updateOne  │─▶ MongoDB       │
+     │                       │ │  curve_configs        │   oauth_token_  │
+     │                       │ └───────────────────────┘    cache        │
+     │                       │                      │                   │
+     │                       │  AuthResult          │                   │
+     │                       │  {account:           │                   │
+     │                       │    homeAccountId}    │                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │ authFlows.set(flowId,│                   │
+     │                       │   status=authorized) │                   │
+     │  GET /poll?flowId=X   │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │  {authorized,         │                      │                   │
+     │   accountId}          │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  avança para passo 3  │                      │                   │
+
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  FLUXO B — AUTHORIZATION CODE + PKCE + LOOPBACK   — Gmail / fallback    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Frontend            Backend Express         @azure/msal-node      Provider
+  (wizard)            /api/curve/oauth/*      (in-process)          (Google/MS)
+     │                       │                      │                   │
+     │  POST /start          │                      │                   │
+     │  {email}              │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │                       │ cryptoProvider       │                   │
+     │                       │  .generatePkceCodes()│                   │
+     │                       ├─────────────────────▶│                   │
+     │                       │ {verifier, challenge}│                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │                      │                   │
+     │                       │ app.getAuthCodeUrl({ │                   │
+     │                       │   scopes,            │                   │
+     │                       │   redirectUri:       │                   │
+     │                       │     'http://localhost│                   │
+     │                       │   codeChallenge,     │                   │
+     │                       │   codeChallengeMethod│                   │
+     │                       │     = 'S256',        │                   │
+     │                       │   loginHint: email })│                   │
+     │                       ├─────────────────────▶│                   │
+     │                       │ authorizeUrl         │                   │
+     │                       │◀─────────────────────┤                   │
+     │                       │                      │                   │
+     │                       │ authFlows.set(flowId,│                   │
+     │                       │   {verifier,         │                   │
+     │                       │    status=pending,   │                   │
+     │                       │    expiresAt})       │                   │
+     │  {flowId,             │                      │                   │
+     │   authorizeUrl}       │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  ┌─────────────────────────────────────────────────────────────┐ │
+     │  │ Wizard abre authorizeUrl em nova tab.                       │ │
+     │  │                                                             │ │
+     │  │ Browser do user:                                            │ │
+     │  │   1. login no provider                                      │ │
+     │  │   2. consent screen                                         │ │
+     │  │   3. provider redirect →                                    │ │
+     │  │      http://localhost?code=XYZ&state=...                    │ │
+     │  │   4. browser: "localhost refused to connect" (normal)       │ │
+     │  │   5. user copia URL da address bar                          │ │
+     │  │   6. cola no textarea do wizard                             │ │
+     │  └─────────────────────────────────────────────────────────────┘ │
+     │                       │                      │                   │
+     │  POST /complete       │                      │                   │
+     │  {flowId,             │                      │                   │
+     │   redirectUrl}        │                      │                   │
+     ├──────────────────────▶│                      │                   │
+     │                       │ extract `code` do URL│                   │
+     │                       │ lookup authFlows →   │                   │
+     │                       │   verifier           │                   │
+     │                       │                      │                   │
+     │                       │ app.acquireTokenBy   │                   │
+     │                       │   Code({             │                   │
+     │                       │     code,            │                   │
+     │                       │     codeVerifier,    │                   │
+     │                       │     redirectUri,     │                   │
+     │                       │     scopes })        │                   │
+     │                       ├─────────────────────▶│  POST /token      │
+     │                       │                      ├──────────────────▶│
+     │                       │                      │ {access_token,    │
+     │                       │                      │  refresh_token,   │
+     │                       │                      │  account, ...}    │
+     │                       │                      │◀──────────────────┤
+     │                       │                      │                   │
+     │                       │ ┌── afterCacheAccess ──▶┐                │
+     │                       │ │  encrypt + updateOne  │─▶ MongoDB       │
+     │                       │ │  curve_configs        │   oauth_token_  │
+     │                       │ └───────────────────────┘    cache        │
+     │                       │                      │                   │
+     │                       │  AuthResult          │                   │
+     │                       │◀─────────────────────┤                   │
+     │  {authorized,         │                      │                   │
+     │   accountId}          │                      │                   │
+     │◀──────────────────────┤                      │                   │
+     │                       │                      │                   │
+     │  avança para passo 3  │                      │                   │
+```
+
+**Pontos-chave do diagrama:**
+
+1. **MSAL é in-process** — nunca sai do Node, não há comunicação HTTP
+   entre o backend Express e o MSAL. As chamadas `app.acquireToken*` são
+   imports directos.
+
+2. **Tokens aterram em MongoDB automaticamente** — via
+   `afterCacheAccess` do cache plugin (§3.4), dentro da mesma chamada
+   `acquireTokenByDeviceCode` / `acquireTokenByCode`. O route handler
+   não precisa de escrever os tokens manualmente.
+
+3. **DAG: bridge callback → HTTP polling** — MSAL resolve uma única
+   promise quando o user consente. Para devolver o `userCode` ao
+   frontend imediatamente, o backend usa um deferred: espera pelo
+   `deviceCodeCallback` (poucos ms), guarda a promise em `authFlows`
+   para poll posterior, e devolve 202 com o `userCode`.
+
+4. **External-auth: PKCE manual, verifier em memória** —
+   `generatePkceCodes()` é async e **não é feito automaticamente** pelo
+   `getAuthCodeUrl`. O verifier fica no `authFlows` (Map in-memory)
+   entre `/start` e `/complete` — não pode ir para MongoDB
+   (desnecessário) nem ser enviado ao frontend (quebra PKCE).
+
+5. **Loopback redirect** — `http://localhost` é aceite por Azure AD e
+   Google para "Desktop app" clients (RFC 8252). O browser tenta
+   redirigir mas não há nada a escutar — é esperado, e o user copia o
+   URL manualmente.
+
+6. **`request.cancel = true`** — para abortar um DAG em curso (ex.: user
+   cancela o wizard), basta mutar a flag no mesmo objecto request que
+   passámos ao `acquireTokenByDeviceCode`. MSAL verifica entre polls.
+
+**Estado in-memory (`authFlows`):**
+
+| Campo | DAG | External-auth |
+|-------|-----|---------------|
+| `status` | pending / authorized / expired / declined / error | pending / authorized / expired / error |
+| `userId` | ✓ | ✓ |
+| `expiresAt` | ✓ (expires_in do MS) | ✓ (10 min) |
+| `request` (mutable) | ✓ (para `cancel = true`) | — |
+| `verifier` | — | ✓ (secret PKCE) |
+| `accountId` | após resolve | após resolve |
+
+TTL automático via `setTimeout`; não persiste entre restarts do server
+(restart durante flow pending → user vê `flow_not_found` no poll, wizard
+oferece retry).
+
+**Detalhe da API (verificado contra o source do `@azure/msal-node`):**
+
+- `DeviceCodeRequest.deviceCodeCallback` recebe `DeviceCodeResponse`
+  com `userCode`, `deviceCode`, `verificationUri`, `expiresIn`,
+  `interval`, `message`. É síncrono do ponto de vista do MSAL.
+- `DeviceCodeRequest.cancel` é um **boolean mutável** no próprio objecto
+  request, não um token de cancelamento. Além disso há `timeout`
+  (segundos) para hard ceiling.
+- `CryptoProvider.generatePkceCodes()` é **async** — precisa de
+  `await`. PKCE **não** é automático no manual auth-code flow (é no
+  `acquireTokenInteractive`, que é outro método).
+- `TokenCacheContext` expõe `cacheHasChanged` (getter) e `hasChanged`
+  (property directa) — ambos funcionam, §3.4 usa `cacheHasChanged`
+  por consistência.
 
 ---
 
