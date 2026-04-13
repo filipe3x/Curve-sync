@@ -29,6 +29,27 @@ const loginLimiter = rateLimit({
   message: { error: 'Demasiadas tentativas de login. Tenta novamente em 15 minutos.' },
 });
 
+// Registration is rarer than login (a brand-new user only goes through
+// /register once) and is a tempting target for scripted account-spam
+// or credential-stuffing reconnaissance against the email-collision
+// branch. 5/hour per IP matches the OAuth start limiter's tight half:
+// generous enough for a household onboarding a couple of accounts in
+// parallel, tight enough that mass registration is uninteresting. The
+// limiter runs BEFORE the route handler so a 429 short-circuits the
+// User.create + Session.create writes cleanly. There is no per-user
+// half of a hybrid scheme here — by definition there is no req.userId
+// at registration time, so the IP layer is the only knob available.
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,                    // 5 registrations per hour per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error:
+      'Demasiadas tentativas de registo. Tenta novamente daqui a uma hora.',
+  },
+});
+
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 100,            // 100 requests per minute
@@ -93,6 +114,7 @@ const oauthStartLimiter = rateLimit({
 // own 5/h bucket and the 100/min bucket, and whichever fires first
 // wins — which is what we want.
 app.use('/api/auth/login', loginLimiter);
+app.use('/api/auth/register', registerLimiter);
 app.use('/api/curve/oauth/start', oauthStartLimiter);
 app.use('/api/curve/sync', syncLimiter);
 app.use('/api', apiLimiter);

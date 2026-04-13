@@ -18,6 +18,16 @@ const curveLogSchema = new mongoose.Schema(
     // a security/admin event rather than a sync result.
     action: { type: String, enum: [
       'login', 'login_failed', 'logout', 'session_expired',
+      // Self-service registration on /api/auth/register (MU follow-up).
+      // `register`        — new user row inserted in the shared `users`
+      //                     collection (Embers-compatible) and a
+      //                     session was opened immediately (auto-login).
+      // `register_failed` — registration was rejected. Today this only
+      //                     fires on the email-already-taken collision
+      //                     branch; the `userId` field carries the id
+      //                     of the existing row, the `error_detail`
+      //                     carries `email_taken=<lowercased email>`.
+      'register', 'register_failed',
       'config_updated', 'sync_manual', 'password_changed',
       // OAuth wizard (V2, see docs/EMAIL_AUTH_MVP.md):
       //   oauth_start            — user kicked off the Device Authorization Grant

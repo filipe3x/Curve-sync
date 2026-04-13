@@ -1,22 +1,50 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { login as apiLogin } from '../services/api';
+import { register as apiRegister } from '../services/api';
 
-export default function LoginPage() {
+const MIN_PASSWORD_LENGTH = 8;
+
+export default function RegisterPage() {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirmation, setPasswordConfirmation] = useState('');
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
+
+    // Client-side guards mirror the server validators in
+    // server/src/routes/auth.js. The server is the source of truth —
+    // these only exist so the user gets immediate feedback without a
+    // round-trip.
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setError(`A password tem de ter pelo menos ${MIN_PASSWORD_LENGTH} caracteres.`);
+      return;
+    }
+    if (password !== passwordConfirmation) {
+      setError('A confirmação da password não coincide.');
+      return;
+    }
+
     setLoading(true);
     try {
-      const { token, user } = await apiLogin({ email, password });
+      const { token, user } = await apiRegister({
+        email,
+        password,
+        password_confirmation: passwordConfirmation,
+      });
+      // Auto-login: server already opened a session and returned the
+      // token. AuthContext.login() pins it to localStorage and the
+      // protected-route gate flips on the next render.
       login(token, user);
+      // New users land on the OAuth wizard — the next thing they need
+      // is an inbox to read receipts from.
+      navigate('/curve/setup', { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -37,7 +65,7 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="card">
           <h2 className="mb-6 text-center text-lg font-semibold text-sand-900">
-            Iniciar sessão
+            Criar conta
           </h2>
 
           {error && (
@@ -59,7 +87,7 @@ export default function LoginPage() {
             />
           </label>
 
-          <label className="mb-6 block">
+          <label className="mb-4 block">
             <span className="mb-1 block text-sm font-medium text-sand-700">Password</span>
             <input
               type="password"
@@ -67,18 +95,37 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              autoComplete="current-password"
+              minLength={MIN_PASSWORD_LENGTH}
+              autoComplete="new-password"
+            />
+            <span className="mt-1 block text-xs text-sand-500">
+              Mínimo {MIN_PASSWORD_LENGTH} caracteres.
+            </span>
+          </label>
+
+          <label className="mb-6 block">
+            <span className="mb-1 block text-sm font-medium text-sand-700">
+              Confirmar password
+            </span>
+            <input
+              type="password"
+              className="input"
+              value={passwordConfirmation}
+              onChange={(e) => setPasswordConfirmation(e.target.value)}
+              required
+              minLength={MIN_PASSWORD_LENGTH}
+              autoComplete="new-password"
             />
           </label>
 
           <button type="submit" className="btn-primary w-full" disabled={loading}>
-            {loading ? 'A entrar...' : 'Entrar'}
+            {loading ? 'A criar conta...' : 'Criar conta'}
           </button>
 
           <p className="mt-4 text-center text-xs text-sand-500">
-            Não tens conta?{' '}
-            <Link to="/register" className="text-curve-700 hover:underline">
-              Registar
+            Já tens conta?{' '}
+            <Link to="/login" className="text-curve-700 hover:underline">
+              Iniciar sessão
             </Link>
           </p>
         </form>
