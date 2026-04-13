@@ -42,7 +42,7 @@ Server env: copy `server/.env.example` to `server/.env` and set `MONGODB_URI`.
 
 ### MongoDB Collection Access Rules
 
-- **`users`** — Full CRUD (shared with Embers — Curve Sync drives its own registration / profile flows). Writes MUST stay schema-compatible with Embers' `User` model: `email` lowercased + format `/.*@.*\..*/`, `salt` = `SHA256("${ISO_timestamp}--${password}")`, `encrypted_password` = `SHA256("${password}--${salt}")`, `role` ∈ `{'user', 'admin'}` (default `'user'`). New records created by Curve Sync are valid Embers users — they can log into the Embers app unchanged. See `docs/embers-reference/models/user.rb` for the canonical schema and `server/src/services/auth.js` for the hash helpers.
+- **`users`** — READ + INSERT + UPDATE (never DELETE — Embers owns the destroy path, including the "last admin" guard). Curve Sync drives its own registration and profile flows; writes MUST stay schema-compatible with Embers' `User` model: `email` lowercased + format `/.*@.*\..*/`, `salt` = `SHA256("${ISO_timestamp}--${password}")`, `encrypted_password` = `SHA256("${password}--${salt}")`, `role` ∈ `{'user', 'admin'}` defaulting to `'user'` for new rows (admin assignment stays exclusive to Embers — never downgrade an existing admin via UPDATE). New records created by Curve Sync are valid Embers users — they can log into the Embers app unchanged. See `docs/embers-reference/models/user.rb` for the canonical schema and `server/src/services/auth.js` for the hash helpers.
 - **`categories`** — READ-ONLY (owned by Embers)
 - **`expenses`** — READ + INSERT only (never UPDATE/DELETE existing records)
 - **`curve_configs`** — Full CRUD (owned by this service, per-user IMAP settings)
