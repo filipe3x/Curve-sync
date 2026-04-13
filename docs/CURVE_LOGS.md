@@ -171,80 +171,109 @@ the wizard, but the schema allows it) sees rows from all of them.
 
 ## 6. Frontend rendering rules
 
-The current `client/src/pages/CurveLogsPage.jsx` renders a single
-table with five columns: `Data | Estado | Entidade | Montante | Digest`.
-This works for §3 sync rows but produces the empty rows the user is
-seeing for §4 audit rows, where `entity`/`amount`/`digest` are always
-null.
+`/curve/logs` uses a **per-row-shape** renderer split between two
+files:
 
-### 6.1 Required fix
+- `client/src/pages/curveLogsUtils.js` — pure helpers
+  (`describeLog`, `groupSyncBatches`). No React, no I/O, safe to unit
+  test in isolation.
+- `client/src/pages/CurveLogsPage.jsx` — table, tabs, pagination,
+  batch expand/collapse.
 
-Replace the rigid five-column table with a **per-row-shape**
-renderer. Pseudo-code:
+### 6.1 `describeLog(log)` → `{ type, title }`
 
-```jsx
-function renderRow(log) {
-  const message = canonicalMessage(log);   // see §3 + §4 tables
-  const date    = new Date(log.created_at).toLocaleString('pt-PT');
+Pure mapping from `(action, status, dry_run, entity, error_detail)`
+to:
 
-  if (log.action) {
-    // Audit row — show the action label + canonical message
-    return <AuditRow date={date} action={log.action} status={log.status}
-                     message={message} ip={log.ip} detail={log.error_detail} />;
-  }
-  // Sync row — show entity/amount/digest as today, but always with
-  // canonicalMessage as the leading description so empty-body rows
-  // (parse_error, circuit breaker, sync aborted) still convey what
-  // happened.
-  return <SyncRow date={date} status={log.status} message={message}
-                  entity={log.entity} amount={log.amount}
-                  digest={log.digest} dryRun={log.dry_run}
-                  detail={log.error_detail} />;
-}
+- **`type`** — one of `"despesa" | "sistema" | "auth"`, drives the
+  badge colour in the "Tipo" column.
+- **`title`** — the canonical user-facing string from the §3/§4
+  "Canonical message" columns (already localised to pt-PT).
+
+Type classification:
+
+- `action == null && entity` → `despesa` (sync row with parsed body)
+- `action == null && !entity` → `sistema` (sync row without body —
+  parse_error, circuit breaker, sync aborted)
+- `action ∈ {login, login_failed, logout, session_expired, password_changed}` → `auth`
+- `action ∈ {oauth_*, config_updated, sync_manual, first_sync_completed}` → `sistema`
+
+Adding a new branch in §3 or §4 means adding a `case` here, nothing
+else.
+
+### 6.2 `groupSyncBatches(logs)` — expense clustering
+
+The orchestrator processes a backlog of receipts in one pass, so N
+`despesa` rows land within milliseconds of each other. Rendering
+them individually creates a wall of near-duplicate rows that drowns
+the §4 audit events the user actually cares about.
+
+`groupSyncBatches` walks the newest-first log stream and collapses
+**adjacent** expense rows (action == null && entity != null) whose
+`created_at` is within 5 s of the cluster anchor into a single
+batch entry:
+
+```
+[{ kind: 'single', log }, { kind: 'batch', logs, summary, key }, …]
 ```
 
-`canonicalMessage(log)` is a pure mapping from `(status, action, dry_run, error_detail)`
-to the strings in the §3/§4 "Canonical message" columns. Keep it in
-`client/src/pages/curveLogsMessage.js` so it's testable in isolation.
+Adjacency in the sorted stream is the cheap proxy for "same
+orchestrator pass" — a 4 s gap between two unrelated rows on
+different days can't land next to each other because the sort is
+strictly monotone.
 
-### 6.2 Suggested visual
+The batch `summary` is `{ ok, duplicates, errors, totalAmount, count }`
+and is rendered collapsed as `"N despesas processadas · X importadas
+· Y duplicadas · €total"`. Clicking the row toggles local
+`useState(false)` to reveal one compact sub-row per underlying log
+with entity/amount/digest + `error_detail` when present.
+
+### 6.3 Visual
 
 ```
 ┌──────────────┬──────────┬─────────────────────────────────────────┐
 │ Data         │ Tipo     │ Detalhe                                 │
 ├──────────────┼──────────┼─────────────────────────────────────────┤
-│ 13/04, 09:57 │ Sistema  │ Sincronização manual iniciada · 192.0.2.1 │
-│ 13/04, 09:57 │ Auth     │ Token Microsoft renovado automaticamente │
-│ 13/04, 09:56 │ Despesa  │ FNAC · €23.40 · ok · digest abc123…     │
-│ 13/04, 09:56 │ Despesa  │ Email não reconhecido: missing entity    │
-│ 13/04, 09:55 │ Auth     │ Início de autorização Microsoft · 192.0.2.1 │
+│ 13/04, 09:57 │ Sistema  │ Sincronização manual iniciada           │
+│ 13/04, 09:56 │ Despesa  │ ▸ 5 despesas processadas                │
+│              │          │   4 importadas · 1 duplicada · €124.50  │
+│ 13/04, 09:55 │ Auth     │ Início de autorização Microsoft         │
 └──────────────┴──────────┴─────────────────────────────────────────┘
 ```
 
-Three visible columns (`Data`, `Tipo`, `Detalhe`), with type derived
-from `action != null`:
+Three visible columns. The "Estado" column from the old layout is
+gone — status lives inside the title (e.g. "Já existia (duplicado)")
+for single rows and inside the summary line for batches. Sub-rows
+inside an expanded batch use a tiny coloured dot (emerald / amber /
+curve) instead of a repeated badge to keep the nested level quiet.
 
-- `action == null && entity` → `"Despesa"` (sync row with parsed body)
-- `action == null && !entity` → `"Sistema"` (sync row without body —
-  parse_error, circuit breaker, sync aborted)
-- `action ∈ {login, login_failed, logout, session_expired, password_changed}` → `"Auth"`
-- `action ∈ {oauth_*, config_updated, sync_manual, first_sync_completed}` → `"Sistema"`
+### 6.4 Filter tabs
 
-### 6.3 Filter UI
+Three tabs at the top of the page: `Tudo · Sincronizações · Auditoria`,
+mapped to the existing `?type=` query on `GET /api/curve/logs`:
 
-The `?type=` query parameter already exists server-side but the page
-doesn't expose it. Add three tabs at the top: `Tudo · Sincronizações · Auditoria`,
-mapped to `?type=` omitted, `sync`, `audit`. This lets a user who
-just wants to see "did my emails get imported" filter out the noise
-of session_expired / oauth_token_refreshed rows.
+| Tab            | `?type=` sent | Shows |
+|---|---|---|
+| Tudo           | (omitted)     | Everything mixed |
+| Sincronizações | `sync`        | §3 only |
+| Auditoria      | `audit`       | §4 only |
 
-### 6.4 Error detail expansion
+Switching tabs resets `page` to 1. This lets a user who just wants
+to see "did my emails get imported" filter out the noise of
+`session_expired` / `oauth_token_refreshed` rows.
 
-For any row with `error_detail`, render a collapsed sub-row (or a
-hover tooltip) with the raw detail in monospace. The current page
-already does this for `error`/`parse_error` sync rows
-(`CurveLogsPage.jsx:108`); extend it to also fire when the row is an
-audit event with non-null `error_detail` (e.g. an `oauth_failed`).
+### 6.5 Error detail
+
+For single rows, `error_detail` is already folded into the `title`
+when `describeLog` returns something like `"Falhou ao guardar:
+<error_detail>"`. The renderer only prints it as a separate line
+when the title didn't already include it (keeps the table from
+double-printing the same string).
+
+Inside an expanded batch sub-row, `error_detail` is printed on its
+own line in `text-curve-700` monospace under the entity/amount so
+the failure stands out without needing the old full-width sub-row
+that the V1 table used.
 
 ## 7. Retention
 
@@ -261,9 +290,10 @@ support partial TTL indexes by document shape.
 
 ## 8. Testing
 
-There is currently no fixture-driven test for canonical message
-mapping. The orchestrator-level coverage in
+There is currently no fixture-driven test for `describeLog` or
+`groupSyncBatches`. The orchestrator-level coverage in
 `server/scripts/test-sync-orchestrator.js` exercises every status
 branch in §3 but only asserts on counters, not on the rendered text.
-Adding a `client/src/pages/curveLogsMessage.test.js` once the message
-function lands is the cheap follow-up.
+A `client/src/pages/curveLogsUtils.test.js` covering (a) every
+`describeLog` case from §3/§4 and (b) the adjacency + 5 s window in
+`groupSyncBatches` is the cheap follow-up.
