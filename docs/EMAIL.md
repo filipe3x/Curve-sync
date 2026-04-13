@@ -564,55 +564,70 @@ The route serializes this verbatim. The dashboard renders a
 per-category breakdown; if `halted === true`, it switches to a warning
 style and links to the latest CurveLog entries for triage.
 
-#### Implementation checklist
+#### Implementation checklist (historical punch list — all shipped)
 
 Schema groundwork first (small, safe diffs):
 
-- [ ] Add `last_email_at: Date` and `is_syncing: Boolean` to
+- [x] Add `last_email_at: Date` and `is_syncing: Boolean` to
       `CurveConfig.js`
-- [ ] Add `dry_run: Boolean` to `CurveLog.js`
-- [ ] Convert `imapReader.fetchUnseen()` to an `async *` generator
-- [ ] Add 5-second timeout to `imapReader.close()`
-- [ ] Extract `assignCategoryFromList(entity, categories)` in
+- [x] Add `dry_run: Boolean` to `CurveLog.js`
+- [x] Convert `imapReader.fetchUnseen()` to an `async *` generator
+- [x] Add 5-second timeout to `imapReader.close()`
+- [x] Extract `assignCategoryFromList(entity, categories)` in
       `services/expense.js` alongside the existing `assignCategory`
 
 Then the orchestrator module itself:
 
-- [ ] Create `server/src/services/syncOrchestrator.js`
-- [ ] Define and document the `EmailReader` contract
-- [ ] Implement `FixtureReader` for dev / tests
-- [ ] Implement `syncEmails({ config, reader, dryRun })`
-- [ ] Per-email pipeline with duplicate 11000 + `keyPattern.digest`
+- [x] Create `server/src/services/syncOrchestrator.js`
+- [x] Define and document the `EmailReader` contract
+- [x] Implement `FixtureReader` for dev / tests
+- [x] Implement `syncEmails({ config, reader, dryRun })`
+- [x] Per-email pipeline with duplicate 11000 + `keyPattern.digest`
       check
-- [ ] Circuit breaker (≥10 consecutive parse_errors with 0 ok)
-- [ ] In-memory sync lock + exported `isSyncing()`
-- [ ] Category cache loaded once per run
-- [ ] `error_detail` truncation helper
-- [ ] Per-email `parseEmail` timeout wrapper
-- [ ] Canary update (`last_email_at`) only when reader is `ImapReader`
+- [x] Circuit breaker (≥10 consecutive parse_errors with 0 ok)
+- [x] In-memory sync lock + exported `isSyncing()`
+- [x] Category cache loaded once per run
+- [x] `error_detail` truncation helper
+- [x] Per-email `parseEmail` timeout wrapper
+- [x] Canary update (`last_email_at`) only when reader is `ImapReader`
 
 And the glue (overlaps with Phase 4):
 
-- [ ] Wire `POST /api/curve/sync` to the orchestrator, handling
+- [x] Wire `POST /api/curve/sync` to the orchestrator, handling
       `SyncConflictError` → 409
-- [ ] Dev test: run `syncEmails()` with `FixtureReader` against a
+- [x] Dev test: run `syncEmails()` with `FixtureReader` against a
       clean Mongo, then again, and assert the second run is all
       `duplicates`
 
 ### Phase 4 — Wire Up Routes — DONE
 
-- [ ] Implement `POST /api/curve/sync` — calls orchestrator, returns summary
-- [ ] Implement `POST /api/curve/test-connection` — IMAP connect + list folders + disconnect
-- [ ] Add proper error responses (401 for auth fail, 503 for connection issues)
+`POST /api/curve/sync` (manual trigger, with `?dry_run=1`) and
+`POST /api/curve/test-connection` (IMAP smoke test + folder list) live
+in `server/src/routes/curve.js` and map `ImapError.code` → HTTP status
+via `{ CONFIG: 400, AUTH: 502, CONNECT: 503, FOLDER: 404 }[err.code]`.
+The `AUTH → 502` mapping is deliberate: a 401 on `/api/curve/*` would
+collide with the frontend `api.request()` wrapper's session-expiry
+dispatch and bounce the user to `/login`, which is the wrong UX when
+the upstream IMAP/Azure auth is what actually failed. See the comment
+block at `server/src/routes/curve.js:215-223` for the full rationale.
 
 ### Phase 5 — Scheduler (`scheduler.js`) — DONE
 
-- [ ] Create `server/src/services/scheduler.js`
-- [ ] Use `node-cron` to run sync at interval from `CurveConfig.sync_interval_minutes`
-- [ ] Add concurrency lock (prevent overlapping executions)
-- [ ] Initialize scheduler on server startup
-- [ ] Re-schedule when config is updated via API
-- [ ] Log scheduler start/stop/error events
+`server/src/services/scheduler.js` runs on `node-cron` with a single
+global interval (`startScheduler(intervalMinutes = 5)`). On each tick
+it loads `CurveConfig.find({ sync_enabled: true })` fresh, skips any
+config whose sync is already in flight (`isSyncing(config._id)` —
+in-memory lock from the orchestrator), decrypts the `imap_password`
+if present, builds a reader via `createImapReader()`, and calls
+`syncEmails()` sequentially for each remaining config. It auto-starts
+on boot from `index.js` when any config has `sync_enabled: true`.
+Re-reading the config set every tick means `sync_enabled` toggles
+made via `PUT /api/curve/config` take effect without a restart. Note:
+`sync_interval_minutes` on individual configs is not currently honoured
+by the scheduler — every enabled config runs at the same cadence. The
+scheduler's own lifecycle events (`started`, `stopped`, per-config
+failures) go to `stdout` / `stderr`; per-sync `ok` / `error` rows in
+`/curve/logs` come from `syncEmails()` inside the orchestrator.
 
 ### Phase 6 — Environment & Security — DONE
 
