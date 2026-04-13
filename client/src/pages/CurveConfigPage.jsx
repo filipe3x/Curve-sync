@@ -177,12 +177,63 @@ export default function CurveConfigPage() {
   const providerLabel =
     oauthStatus?.provider === 'microsoft' ? 'Microsoft' : oauthStatus?.provider;
 
+  // Three-state auth classification:
+  //   - fresh:        user never connected (no oauth_provider, no legacy pw)
+  //   - broken:       oauth_provider set but `connected=false` — the cache
+  //                   was wiped, tokens expired, consent revoked, etc.
+  //                   This is the "re-auth" state and is the only one that
+  //                   should gate inputs off + light up the warning banner.
+  //   - ok:           fully connected, either OAuth (connected=true) or
+  //                   App Password (no oauth_provider but imap_password set)
+  //
+  // We distinguish broken vs fresh because a fresh user also sees
+  // `connected=false`, but disabling the toggles on them is pointless
+  // noise — they just need to run the wizard. Broken users by contrast
+  // need the inputs off AND a prominent recovery CTA.
+  const authBroken = Boolean(oauthStatus?.provider) && !connected;
+  const authFresh =
+    oauthStatus !== null && !oauthStatus?.provider && !config.has_imap_password;
+
   return (
     <>
       <PageHeader
         title="Configuração"
         description="Ligação, pasta e agenda de sincronização"
       />
+
+      {/*
+        Broken-auth banner — shown ONLY when the user was previously
+        connected via OAuth and the server says `connected=false` now
+        (cache wiped, tokens expired, consent revoked). Fresh users
+        never see this because they land on the "Ligação" card below
+        which already has a clear "Abrir assistente" CTA. This is the
+        high-level warning the re-auth test path was missing.
+      */}
+      {authBroken && (
+        <Link
+          to="/curve/setup"
+          className="mb-5 block max-w-xl rounded-2xl border border-red-200 bg-red-50 px-5 py-4 hover:bg-red-100 transition-colors animate-fade-in-up"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-red-900">
+                Ligação à conta Microsoft partida
+              </p>
+              <p className="mt-1 text-sm text-red-800/90">
+                O token de acesso para{' '}
+                <code className="font-mono text-red-900">
+                  {oauthStatus?.email || 'a tua conta'}
+                </code>{' '}
+                já não é válido. A sincronização está suspensa até
+                reautorizares.
+              </p>
+            </div>
+            <span className="shrink-0 text-sm font-medium text-red-900 underline underline-offset-4">
+              Reautorizar →
+            </span>
+          </div>
+        </Link>
+      )}
 
       {/* ----- Connection status card ----- */}
       <section className="card max-w-xl mb-5 animate-fade-in-up">
@@ -209,6 +260,20 @@ export default function CurveConfigPage() {
             >
               Reautorizar →
             </Link>
+          </div>
+        ) : authBroken ? (
+          // Was connected, broken now. Keep the email visible so the
+          // user sees which account needs re-authorizing — the top
+          // banner already carries the red CTA so we don't repeat it.
+          <div className="mt-3">
+            <p className="text-lg font-semibold text-sand-900">
+              {oauthStatus.email}
+            </p>
+            <p className="mt-1 text-xs text-red-700">
+              Ligada via <strong>{providerLabel}</strong>, mas o token expirou
+              ou foi revogado. Reautoriza no banner acima para retomar a
+              sincronização.
+            </p>
           </div>
         ) : (
           <div className="mt-3">
@@ -239,15 +304,23 @@ export default function CurveConfigPage() {
               Pasta IMAP
             </h2>
             <p className="mt-1 text-xs text-sand-500">
-              Onde o servidor procura os recibos. Só mexe aqui se mudares
-              regras no teu cliente de email.
+              {authBroken || authFresh
+                ? 'A escolha da pasta fica disponível depois de autorizares a conta.'
+                : 'Onde o servidor procura os recibos. Só mexe aqui se mudares regras no teu cliente de email.'}
             </p>
           </div>
           <button
             type="button"
             onClick={handleTest}
-            disabled={testing}
-            className="btn-secondary shrink-0"
+            disabled={testing || authBroken || authFresh}
+            title={
+              authBroken
+                ? 'Reautoriza a conta Microsoft antes de testar a ligação'
+                : authFresh
+                ? 'Liga uma conta antes de testar a ligação'
+                : undefined
+            }
+            className="btn-secondary shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {testing ? 'A testar…' : 'Testar ligação'}
           </button>
@@ -329,6 +402,14 @@ export default function CurveConfigPage() {
           Agenda de sincronização
         </h2>
 
+        {(authBroken || authFresh) && (
+          <p className="mt-3 rounded-lg bg-sand-50 px-3 py-2 text-xs text-sand-600">
+            A agenda automática está suspensa porque não há uma ligação
+            válida ao servidor de email. Reautoriza a conta para voltar
+            a activar.
+          </p>
+        )}
+
         <label className="mt-4 flex items-start gap-3">
           <input
             type="checkbox"
@@ -336,10 +417,14 @@ export default function CurveConfigPage() {
             onChange={(e) =>
               saveSchedule({ sync_enabled: e.target.checked })
             }
-            disabled={schedSaving}
-            className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500"
+            disabled={schedSaving || authBroken || authFresh}
+            className="mt-0.5 h-4 w-4 rounded border-sand-300 text-curve-700 focus:ring-curve-500 disabled:cursor-not-allowed disabled:opacity-50"
           />
-          <span className="text-sm text-sand-700">
+          <span
+            className={`text-sm ${
+              authBroken || authFresh ? 'text-sand-400' : 'text-sand-700'
+            }`}
+          >
             Sincronização automática activa
             <span className="mt-0.5 block text-xs text-sand-500">
               Quando activa, o servidor verifica recibos novos no intervalo
@@ -358,8 +443,13 @@ export default function CurveConfigPage() {
             onChange={(e) =>
               saveSchedule({ sync_interval_minutes: Number(e.target.value) })
             }
-            disabled={schedSaving || !(config.sync_enabled ?? false)}
-            className="input"
+            disabled={
+              schedSaving ||
+              !(config.sync_enabled ?? false) ||
+              authBroken ||
+              authFresh
+            }
+            className="input disabled:cursor-not-allowed disabled:opacity-50"
           >
             {SYNC_INTERVAL_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -382,16 +472,33 @@ export default function CurveConfigPage() {
             <dd className="mt-1 font-medium text-sand-900">
               {formatDateTime(config.last_sync_at)}
             </dd>
-            {config.last_sync_status && (
-              <dd
-                className={`mt-0.5 text-xs ${
-                  config.last_sync_status === 'error'
-                    ? 'text-red-600'
-                    : 'text-emerald-700'
-                }`}
-              >
-                {config.last_sync_status === 'error' ? 'erro' : 'ok'}
+            {/*
+              Status sub-label: the `config.last_sync_status` field is
+              historically authoritative (it's what the orchestrator
+              wrote after the last run), but it does NOT know about the
+              *current* live state of the OAuth cache. When the cache
+              gets wiped mid-cycle the last stored status may still say
+              'ok' from the previous run, which is misleading. Override
+              the label with "ligação partida" whenever the live auth
+              status contradicts the stored sync status, so the card
+              matches the reality shown by the banner above.
+            */}
+            {authBroken ? (
+              <dd className="mt-0.5 text-xs text-red-600">
+                ligação partida
               </dd>
+            ) : (
+              config.last_sync_status && (
+                <dd
+                  className={`mt-0.5 text-xs ${
+                    config.last_sync_status === 'error'
+                      ? 'text-red-600'
+                      : 'text-emerald-700'
+                  }`}
+                >
+                  {config.last_sync_status === 'error' ? 'erro' : 'ok'}
+                </dd>
+              )
             )}
           </div>
           <div>

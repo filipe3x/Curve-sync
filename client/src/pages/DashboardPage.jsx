@@ -8,17 +8,34 @@ import * as api from '../services/api';
 
 /**
  * Re-auth banner visibility rule (see docs/EMAIL_AUTH_MVP.md §8 items
- * 4 and 5): we show it when the last sync ended in `error` AND the
- * user is on the OAuth branch. App Password failures surface on the
- * config page, not here, because the fix requires typing a new
- * password — the dashboard CTA doesn't help. OAuth failures instead
- * map cleanly to "run the wizard again", which is what this banner
- * links to.
+ * 4 and 5). The banner fires when the user is on the OAuth branch AND
+ * at least one of:
+ *
+ *   A) The OAuth cache is currently broken — `oauthStatus.provider` is
+ *      set but `connected` is false. Happens when the cache was wiped
+ *      (smoke test, manual DB edit, revoked consent, ~90 days of
+ *      inactivity). This is the *before a sync runs* signal.
+ *
+ *   B) The last sync ended in `error`. Covers the *after a sync runs*
+ *      signal — including cases where the cache was still readable at
+ *      load time but the refresh token exchange failed at sync time.
+ *
+ * App Password failures deliberately do NOT trigger this banner: the
+ * fix requires typing a new password, so the dashboard CTA (which
+ * sends the user to /curve/setup) doesn't help. Those users land on
+ * the config page instead.
+ *
+ * Pre-fix the gate ANDed both conditions (requiring `connected === true`
+ * AND `last_sync_status === 'error'`), which was exactly inverted — the
+ * banner fired only in the contradictory state of "connection is fine
+ * but sync errored anyway". The --break smoke path was invisible as a
+ * result.
  */
 function needsReauth({ syncStatus, oauthStatus }) {
-  if (!syncStatus || !oauthStatus) return false;
-  if (syncStatus.last_sync_status !== 'error') return false;
-  return Boolean(oauthStatus.connected && oauthStatus.provider);
+  if (!oauthStatus?.provider) return false;
+  if (oauthStatus.connected === false) return true;
+  if (syncStatus?.last_sync_status === 'error') return true;
+  return false;
 }
 
 export default function DashboardPage() {
@@ -28,6 +45,23 @@ export default function DashboardPage() {
   const [error, setError] = useState(null);
   const [syncStatus, setSyncStatus] = useState(null);
   const [oauthStatus, setOauthStatus] = useState(null);
+  // Short-lived inline message for the sync button — success summary
+  // or non-banner error. The re-auth banner handles OAuth breakage;
+  // this covers everything else (parse errors, IMAP folder gone, etc.)
+  // and also confirms a successful recovery sync with a green ack.
+  const [syncMessage, setSyncMessage] = useState(null);
+
+  // Parallel reload helper — used on mount AND after every sync
+  // attempt (success or failure). Keeping both statuses fresh is what
+  // lets the re-auth banner appear/disappear without a page reload.
+  const refreshStatuses = async () => {
+    const [syncRes, oauthRes] = await Promise.allSettled([
+      api.getSyncStatus(),
+      api.getOAuthStatus(),
+    ]);
+    if (syncRes.status === 'fulfilled') setSyncStatus(syncRes.value);
+    if (oauthRes.status === 'fulfilled') setOauthStatus(oauthRes.value);
+  };
 
   useEffect(() => {
     api
@@ -41,29 +75,56 @@ export default function DashboardPage() {
     // Fire both auth + sync status in parallel. Failures are
     // swallowed — the banner just stays hidden. The dashboard must
     // not become a hostage to /oauth/status being unreachable.
-    Promise.allSettled([api.getSyncStatus(), api.getOAuthStatus()]).then(
-      ([syncRes, oauthRes]) => {
-        if (syncRes.status === 'fulfilled') setSyncStatus(syncRes.value);
-        if (oauthRes.status === 'fulfilled') setOauthStatus(oauthRes.value);
-      },
-    );
+    refreshStatuses();
   }, []);
 
   const handleSync = async () => {
     setSyncing(true);
+    setSyncMessage(null);
+    let success = false;
     try {
-      await api.triggerSync();
-      // Refresh the status after the sync so the banner disappears
-      // immediately on recovery without requiring a full page reload.
-      try {
-        setSyncStatus(await api.getSyncStatus());
-      } catch {
-        /* banner stays on stale state — acceptable */
-      }
-    } catch {
-      /* toast later */
+      const res = await api.triggerSync();
+      success = true;
+      // Server returns `{ message, summary }` — mirror the string the
+      // config page shows so the user gets the same feedback regardless
+      // of where the sync was triggered from.
+      setSyncMessage({
+        type: 'ok',
+        text: res?.message ?? 'Sincronização concluída.',
+      });
+    } catch (err) {
+      // Non-banner errors (circuit breaker, folder missing, etc.)
+      // still need an inline message so the user knows something
+      // happened. OAuth-reauth errors also land here — the error
+      // message is redundant with the banner but harmless, and it's
+      // better than a silent click.
+      setSyncMessage({
+        type: 'error',
+        text: err?.message ?? 'Sincronização falhou.',
+      });
     } finally {
       setSyncing(false);
+      // Refresh both statuses whatever the outcome:
+      //   - On success: may have recovered from an earlier error, so
+      //     the banner should disappear → we need fresh sync status.
+      //     oauthStatus may also have changed if the user re-ran the
+      //     wizard in another tab between mounts, so refresh that too.
+      //   - On failure: the server flipped `last_sync_status='error'`
+      //     and/or the OAuth cache is now known-broken, so refreshing
+      //     both is what makes the banner light up in-place without
+      //     requiring the user to reload the dashboard.
+      try {
+        await refreshStatuses();
+      } catch {
+        /* best-effort — the banner will catch up on next mount */
+      }
+      // Keep the message visible but slightly longer on success so
+      // the user can read it. Error messages stay until the next
+      // click because dismissing them silently would just recreate
+      // the "no feedback" bug we're fixing.
+      if (success) {
+        setTimeout(() => setSyncMessage(null), 6000);
+      }
     }
   };
 
@@ -114,6 +175,27 @@ export default function DashboardPage() {
             </span>
           </div>
         </Link>
+      )}
+
+      {/*
+        Inline sync message — success summary or non-banner error.
+        Rendered above the stat cards so it's the first thing the user
+        sees after clicking "Sincronizar agora". OAuth-reauth errors
+        still render here AND trigger the banner above; the redundancy
+        is intentional (the banner explains what to do, the message
+        explains what happened).
+      */}
+      {syncMessage && (
+        <div
+          className={`mb-5 rounded-2xl px-5 py-3 text-sm ${
+            syncMessage.type === 'ok'
+              ? 'bg-emerald-50 text-emerald-800'
+              : 'bg-red-50 text-red-800'
+          }`}
+          role={syncMessage.type === 'error' ? 'alert' : 'status'}
+        >
+          {syncMessage.text}
+        </div>
       )}
 
       {/* Stat cards */}

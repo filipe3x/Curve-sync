@@ -153,6 +153,7 @@ Key documentation:
 - `docs/WIZARD_POLISH_BACKLOG.md` — Deferred UX polish items for `CurveSetupPage` (animations, copy, edge-case screens). Only deferred niceties, not blockers.
 - `docs/EMAIL.md` — **Email pipeline implementation guide**: current state, TODOs, dev strategy, reference selectors, architecture diagram
 - `docs/MONGODB_SCHEMA.md` — Complete schema with Mongoose equivalents, relationships, indexes, and consistency rules
+- `docs/CURVE_LOGS.md` — **CurveLog audit & sync trail** (canonical): every write site, the dual sync-vs-audit shape, the canonical user-facing message for each row type, and the `/curve/logs` rendering rules. Read this before touching `audit()`, the orchestrator's `writeLog()`, or the `CurveLogsPage` table layout.
 - `docs/expense-tracking.md` — Full system documentation including savings score, monthly cycle logic, TODOs, and proposed standalone architecture
 - `docs/CRON.md` — Scheduler design (node-cron, per-user intervals)
 - `docs/AUTH.md` — Session-cookie login flow compatible with Embers' Devise+Mongoid users

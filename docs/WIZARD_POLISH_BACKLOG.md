@@ -251,6 +251,35 @@ Before shipping the polished wizard:
 - [ ] Pick-folder: user picks a different folder, continues, and the
       PUT /curve/config fires with `confirm_folder: true`
 
+## 11b. Re-auth path with multiple `curve_configs`
+
+The re-auth prefill added in `feat(wizard): prefill email/folder/schedule
+on re-auth` (commit a0688d7) calls `getCurveConfig()`, which returns a
+**single** config — the schema (`server/src/models/CurveConfig.js`)
+allows N configs per user but the wizard and the config page both
+assume one. As long as that assumption holds, prefill is unambiguous.
+
+When fase 2 ships and a user can have more than one mailbox bound (the
+canonical example: outlook.com personal + gmail.com work), the wizard
+needs to know **which** config the re-auth flow is targeting:
+
+- [ ] The Dashboard re-auth banner needs to carry a `config_id` (or
+      `email`) into the wizard route, e.g. `/curve/setup?reauth=…`
+- [ ] `CurveSetupPage` prefill must read that param and load the
+      matching config instead of "the first one"
+- [ ] The OAuth `pollDag → saveAccount` write site
+      (`server/src/services/oauthWizard.js`) must update the targeted
+      config, not "the user's only config"
+- [ ] The "first sync" hand-off after the wizard must trigger a sync
+      for the just-authorised config specifically, not a global
+      `syncAllUserConfigs`
+
+None of this is needed for the Microsoft-only MVP — `CurveConfig` has
+a soft "one per user" invariant in practice — but the seams are easy
+to miss when Gmail lands and the assumption silently breaks. This item
+is the reminder to walk the call sites end-to-end before flipping the
+multi-config switch.
+
 ## 12. Open questions for the design session
 
 These are decisions to make together before the polish pass starts:
