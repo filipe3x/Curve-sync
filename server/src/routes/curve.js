@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import User from '../models/User.js';
@@ -36,17 +36,28 @@ router.use('/oauth', oauthRouter);
 // "Sincronizar agora" or scripting against POST /api/curve/sync).
 // Because curveRouter is mounted AFTER `authenticate` in index.js,
 // req.userId is guaranteed to be populated by the time keyGenerator
-// runs. The req.ip fallback exists only as a defensive no-op in case
+// runs. The IP fallback exists only as a defensive no-op in case
 // the middleware order ever changes — with the current wiring it is
 // unreachable. The `user:`/`ip:` prefixes namespace the two buckets
 // so a user id can never collide with someone's IP string.
+//
+// IPv6 note: the IP fallback funnels req.ip through `ipKeyGenerator`
+// (re-exported by express-rate-limit) instead of using the raw string.
+// Without it, express-rate-limit v8 throws ERR_ERL_KEY_GEN_IPV6 at
+// startup because a naive req.ip fallback would let an IPv6 client
+// rotate through every address in their /64 to bypass the bucket.
+// `ipKeyGenerator` collapses an IPv6 address to its /56 prefix and
+// passes IPv4 through unchanged, so a single host gets exactly one
+// bucket regardless of address family. This branch only fires if the
+// `authenticate` middleware ever stops running before the limiter,
+// but the helper is cheap and silences the validator unconditionally.
 const perUserSyncLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 3,              // 3 syncs per minute, per authenticated user
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) =>
-    req.userId ? `user:${req.userId}` : `ip:${req.ip}`,
+    req.userId ? `user:${req.userId}` : `ip:${ipKeyGenerator(req.ip)}`,
   message: { error: 'Demasiados pedidos de sync. Aguarda um momento.' },
 });
 

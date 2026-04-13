@@ -21,7 +21,7 @@
  */
 
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import {
   providerForEmail,
   startDag,
@@ -55,16 +55,25 @@ const router = Router();
 //     the button while a previous flow is pending" is exactly the
 //     cadence we want to throttle.
 //
-// The req.ip fallback in keyGenerator is defensive only — with the
+// The IP fallback in keyGenerator is defensive only — with the
 // current middleware order it is unreachable. Prefixes namespace the
 // two bucket spaces so a user id cannot collide with an IP string.
+//
+// IPv6 note: the IP fallback funnels req.ip through `ipKeyGenerator`
+// (re-exported by express-rate-limit) instead of using the raw string.
+// Without it, express-rate-limit v8 throws ERR_ERL_KEY_GEN_IPV6 at
+// startup because a naive req.ip fallback would let an IPv6 client
+// rotate through every address in their /64 to bypass the bucket.
+// `ipKeyGenerator` collapses an IPv6 address to its /56 prefix and
+// passes IPv4 through unchanged. The same fix is applied to the
+// per-user sync limiter in routes/curve.js.
 const perUserOauthStartLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 5,                    // 5 DAG kickoffs per hour, per authenticated user
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) =>
-    req.userId ? `user:${req.userId}` : `ip:${req.ip}`,
+    req.userId ? `user:${req.userId}` : `ip:${ipKeyGenerator(req.ip)}`,
   message: {
     error:
       'Demasiados pedidos de autorização. Tenta novamente daqui a uma hora.',
