@@ -54,18 +54,30 @@ const syncLimiter = rateLimit({
   message: { error: 'Demasiados pedidos de sync. Aguarda um momento.' },
 });
 
-// OAuth DAG start is intentionally rate-limited tighter than the rest
-// of the API. `POST /api/curve/oauth/start` kicks off a Microsoft
+// OAuth DAG start — per-IP ceiling in a hybrid scheme, mirroring the
+// /sync split. `POST /api/curve/oauth/start` kicks off a Microsoft
 // Device Authorization Grant, which:
-//   - holds an in-memory flow slot with a 15 min TTL per user,
+//   - holds an in-memory `pendingDags` slot with a 15 min TTL per user
+//     (see services/oauthWizard.js),
 //   - consumes Azure AD quota against our single public-client app_id,
+//   - writes a `CurveConfig` stub + an `oauth_start` audit row,
 //   - cannot be meaningfully retried at sub-hour cadence by a real human.
-// Anything faster than a handful per hour is either a frontend bug or
-// a script hammering the endpoint. The spec in
-// docs/EMAIL_AUTH_MVP.md §4 PR 5 calls for 5/hour explicitly.
+//
+// This bucket is the shared-NAT layer: it caps an IP regardless of how
+// many synthetic accounts a caller spins up, protecting the shared
+// Azure quota from multi-account abuse. The real per-account abuse
+// guard is `perUserOauthStartLimiter` in routes/curveOAuth.js, which
+// runs after `authenticate` so it can key on req.userId. Keep this
+// one at ~3× the per-user cap so a household with three legitimate
+// users onboarding in parallel doesn't trip on each other.
+//
+// 15/hour derives from 3 × 5/hour; `docs/EMAIL_AUTH_MVP.md` §4 PR 5
+// originally spec'd the blanket 5/hour per-IP cap, which assumed a
+// single human per IP — this hybrid relaxes the ceiling for shared
+// NATs without loosening the per-account guard.
 const oauthStartLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5,                    // 5 DAG kickoffs per hour per IP
+  max: 15,                   // 15 DAG kickoffs per hour per IP — shared NAT ceiling
   standardHeaders: true,
   legacyHeaders: false,
   message: {
