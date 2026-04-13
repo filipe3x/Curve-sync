@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { register as apiRegister } from '../services/api';
+import { EyeIcon, EyeSlashIcon } from '../components/layout/Icons';
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -13,6 +14,12 @@ export default function RegisterPage() {
   const [passwordConfirmation, setPasswordConfirmation] = useState('');
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  // Independent toggles per input — the user might want to verify the
+  // confirmation matches what they typed in the first field without
+  // also exposing the original. Mirrors the 1Password / browser-native
+  // pattern (each input owns its own visibility state).
+  const [showPassword, setShowPassword] = useState(false);
+  const [showPasswordConfirmation, setShowPasswordConfirmation] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -89,15 +96,31 @@ export default function RegisterPage() {
 
           <label className="mb-4 block">
             <span className="mb-1 block text-sm font-medium text-sand-700">Password</span>
-            <input
-              type="password"
-              className="input"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={MIN_PASSWORD_LENGTH}
-              autoComplete="new-password"
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                className="input pr-11"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+                autoComplete="new-password"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                tabIndex={-1}
+                aria-label={showPassword ? 'Esconder password' : 'Mostrar password'}
+                aria-pressed={showPassword}
+                className="absolute inset-y-0 right-0 flex items-center pr-3 text-sand-500 transition-colors hover:text-curve-700 focus:text-curve-700 focus:outline-none"
+              >
+                {showPassword ? (
+                  <EyeSlashIcon className="h-5 w-5" />
+                ) : (
+                  <EyeIcon className="h-5 w-5" />
+                )}
+              </button>
+            </div>
             <span className="mt-1 block text-xs text-sand-500">
               Mínimo {MIN_PASSWORD_LENGTH} caracteres.
             </span>
@@ -107,15 +130,35 @@ export default function RegisterPage() {
             <span className="mb-1 block text-sm font-medium text-sand-700">
               Confirmar password
             </span>
-            <input
-              type="password"
-              className="input"
-              value={passwordConfirmation}
-              onChange={(e) => setPasswordConfirmation(e.target.value)}
-              required
-              minLength={MIN_PASSWORD_LENGTH}
-              autoComplete="new-password"
-            />
+            <div className="relative">
+              <input
+                type={showPasswordConfirmation ? 'text' : 'password'}
+                className="input pr-11"
+                value={passwordConfirmation}
+                onChange={(e) => setPasswordConfirmation(e.target.value)}
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+                autoComplete="new-password"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPasswordConfirmation((v) => !v)}
+                tabIndex={-1}
+                aria-label={
+                  showPasswordConfirmation
+                    ? 'Esconder confirmação da password'
+                    : 'Mostrar confirmação da password'
+                }
+                aria-pressed={showPasswordConfirmation}
+                className="absolute inset-y-0 right-0 flex items-center pr-3 text-sand-500 transition-colors hover:text-curve-700 focus:text-curve-700 focus:outline-none"
+              >
+                {showPasswordConfirmation ? (
+                  <EyeSlashIcon className="h-5 w-5" />
+                ) : (
+                  <EyeIcon className="h-5 w-5" />
+                )}
+              </button>
+            </div>
           </label>
 
           <button type="submit" className="btn-primary w-full" disabled={loading}>
