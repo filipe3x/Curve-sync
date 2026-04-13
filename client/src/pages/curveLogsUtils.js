@@ -94,6 +94,16 @@ export function describeLog(log) {
 // page through unrelated rows that happen to be 4s apart but were not
 // part of the same sync run. Requiring adjacency in the sorted stream
 // is a cheap proxy for "same orchestrator pass".
+//
+// Known limitation — page-boundary splitting:
+//   Pagination happens server-side (limit=30 by default) and this
+//   helper runs on the page payload AFTER it lands in the client. A
+//   cluster of 5 receipts that straddles the page-30 boundary will
+//   surface as a 3-row batch on page 1 and a 2-row batch on page 2,
+//   never as one 5-row batch. Fixing it means moving grouping
+//   server-side and shipping mixed shapes through GET /api/curve/logs,
+//   which is not worth it until real users complain. See
+//   docs/CURVE_LOGS.md §6.6.
 export function groupSyncBatches(logs) {
   const out = [];
   let i = 0;

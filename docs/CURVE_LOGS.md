@@ -150,6 +150,33 @@ as `ok`. **If you add a new action that represents a failure, either
 rename it to include `failed` OR add an explicit case to this
 heuristic.** Future PR may replace this with a per-action map.
 
+### 4.3 Adding a new audit action — the 3-file footgun
+
+Adding a new value to the `action` enum is **not** a one-file change.
+The per-row-shape renderer on the frontend is enum-coupled to the
+model, which means a new action that doesn't get every site updated
+will silently fall through to a default branch and render with a
+generic label.
+
+Checklist for any new `action`:
+
+1. **`server/src/models/CurveLog.js`** — add the value to the
+   `action` enum (Mongoose will reject the write otherwise)
+2. **`server/src/services/audit.js`** — if the action represents a
+   failure, make sure the status heuristic picks it up (see §4.2)
+   or add an explicit branch
+3. **`client/src/pages/curveLogsUtils.js`** — add a `case` to the
+   `describeLog` switch with the canonical pt-PT message; otherwise
+   the row renders with the raw enum value as title
+4. **This document (§4 table)** — add the row so the next person
+   knows the action exists
+
+The frontend coupling is the real cost of the per-row-shape
+rendering — before the rewrite the table had no per-action knowledge
+and missing actions degraded gracefully into empty rows. The new
+renderer trades that graceful degradation for canonical messages.
+Worth the trade, but worth knowing.
+
 ## 5. API contract
 
 ```
@@ -274,6 +301,52 @@ Inside an expanded batch sub-row, `error_detail` is printed on its
 own line in `text-curve-700` monospace under the entity/amount so
 the failure stands out without needing the old full-width sub-row
 that the V1 table used.
+
+### 6.6 Known limitations of the rewrite
+
+The current `/curve/logs` page is intentionally minimal. The items
+below are deliberate cuts, not bugs — but a future PR that wants to
+grow the page should know they exist:
+
+- **Hard-coded 5 s batch window.** `BATCH_WINDOW_MS` in
+  `curveLogsUtils.js` is a constant. A sync run with IMAP latency
+  spikes >5 s between successive receipts will produce two adjacent
+  batches instead of one. Fine today because the orchestrator
+  processes in tight bursts; revisit if real users see split batches
+  in the wild. Tuning candidates: per-config setting, or anchor the
+  window on `sync_started_at` if we ever stamp it on the rows.
+
+- **Expand state is local to each `BatchRow`.** Built on
+  `useState(false)` with no persistence. Switching pages, tabs, or
+  refreshing the page collapses everything. OK for now; only a
+  problem if we ever want to deep-link to a specific log
+  (`/curve/logs#log-abc123`).
+
+- **Active tab is not in the URL.** `tab` is component state, not a
+  query string. Refreshing the page bounces the user back to "Tudo".
+  Cheap fix when needed: swap to `useSearchParams`.
+
+- **`ip` is fetched but never rendered.** The audit rows carry the
+  client IP (see §4 table) but the renderer drops it to keep the
+  table calm. For security investigations (e.g. inspecting a
+  `login_failed` cluster) the IP is still visible via the API or a
+  Mongo query, just not in the UI. Candidate places to surface it:
+  hover tooltip on the date cell, or an "expand row" affordance on
+  audit rows.
+
+- **No keyboard handler on `BatchRow`.** Toggle is mouse-only —
+  there's no `onKeyDown` for `Enter`/`Space`, and no `role="button"`
+  / `tabIndex={0}` on the `<tr>`. A11y backlog item, blocking for
+  full keyboard navigation.
+
+- **Page-boundary batch splitting.** Pagination happens server-side
+  (see §5) and grouping happens client-side after the page lands.
+  If a 5-receipt cluster straddles the page-30 boundary, the user
+  sees a 3-row batch on page 1 and a 2-row batch on page 2 instead
+  of one 5-row batch. Fixing this properly means moving grouping
+  server-side, which doubles complexity and forces the UI to deal
+  with mixed shapes from the API. Not worth it unless real users
+  complain.
 
 ## 7. Retention
 
