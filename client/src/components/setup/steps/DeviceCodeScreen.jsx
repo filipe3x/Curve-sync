@@ -5,21 +5,28 @@
  * the backend every ~3 s. This screen just surfaces the code + URL
  * + QR and a cancel button. It does NOT poll on its own.
  *
- * On success, the parent advances to SuccessScreen. On error it
- * surfaces `error` in the red slot.
+ * On success, the parent advances to SuccessScreen. On error (code
+ * expired, user denied consent, Azure 5xx, ...) `pollStatus` flips to
+ * `'error'` and `error` carries the message — we swap "Abrir página"
+ * for a "Tentar de novo" button wired to `onRetry`, which calls the
+ * container's `handleStartAuth` to kick off a fresh DAG. The old code
+ * is greyed out so it's obvious the shown digits are dead.
  */
 import { QRCodeSVG } from 'qrcode.react';
-import { ExternalLink, Loader2 } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import WizardLayout from '../WizardLayout.jsx';
 
 export default function DeviceCodeScreen({
   codeInfo,
   pollStatus,
   error,
+  loading,
   onCancel,
+  onRetry,
 }) {
   const userCode = codeInfo?.userCode || '········';
   const uri = codeInfo?.verificationUri || 'https://microsoft.com/devicelogin';
+  const hasError = pollStatus === 'error';
 
   return (
     <WizardLayout
@@ -33,15 +40,30 @@ export default function DeviceCodeScreen({
           <button type="button" className="btn-secondary" onClick={onCancel}>
             Cancelar
           </button>
-          <a
-            href={uri}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-primary inline-flex items-center gap-2"
-          >
-            <ExternalLink className="w-4 h-4" strokeWidth={1.75} />
-            Abrir página
-          </a>
+          {hasError ? (
+            <button
+              type="button"
+              className="btn-primary inline-flex items-center gap-2"
+              onClick={onRetry}
+              disabled={loading}
+            >
+              <RefreshCw
+                className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`}
+                strokeWidth={1.75}
+              />
+              {loading ? 'A reiniciar…' : 'Tentar de novo'}
+            </button>
+          ) : (
+            <a
+              href={uri}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-primary inline-flex items-center gap-2"
+            >
+              <ExternalLink className="w-4 h-4" strokeWidth={1.75} />
+              Abrir página
+            </a>
+          )}
           <span className="ml-auto inline-flex items-center gap-2 text-sm text-sand-600">
             {pollStatus === 'pending' && (
               <>
@@ -53,7 +75,11 @@ export default function DeviceCodeScreen({
         </>
       }
     >
-      <div className="flex flex-col md:flex-row items-center gap-6">
+      <div
+        className={`flex flex-col md:flex-row items-center gap-6 transition-opacity ${
+          hasError ? 'opacity-40' : ''
+        }`}
+      >
         {/* Big code */}
         <div className="flex-1 w-full text-center md:text-left">
           <p className="text-xs uppercase tracking-[0.18em] text-sand-600 mb-2">

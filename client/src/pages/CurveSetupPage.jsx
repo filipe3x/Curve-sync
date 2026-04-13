@@ -225,7 +225,22 @@ export default function CurveSetupPage() {
   }, [email, goTo]);
 
   // ----- Step 3 polling loop ------------------------------------------
-  // Runs while step === 'code'. Clears itself on unmount / step change.
+  //
+  // Runs while step === 'code' AND `codeInfo` is set. The `codeInfo`
+  // dep is load-bearing: clicking "Tentar de novo" on the error state
+  // calls `handleStartAuth` which stamps a fresh `codeInfo` object,
+  // and the effect re-runs to start a new polling loop. Without that
+  // dep the retry button would be silent (step stays 'code' → effect
+  // doesn't re-run → stopped interval never restarts).
+  //
+  // Every terminal branch (done / error / none / throw) calls
+  // `stopPolling()` BEFORE setting state, so we never race a late
+  // tick against the error message. Pre-fix, hitting `error` left the
+  // interval running, so 3 s later the next tick saw `{status:'none'}`
+  // (server-side state is cleared on the first terminal read) and
+  // silently warped the user back to the trust step via `goTo('trust')`
+  // — which happened to call `setError(null)` first, erasing the only
+  // feedback the user would have gotten.
   useEffect(() => {
     if (step !== 'code') {
       if (pollTimer.current) {
@@ -234,10 +249,17 @@ export default function CurveSetupPage() {
       }
       return;
     }
+    const stopPolling = () => {
+      if (pollTimer.current) {
+        clearInterval(pollTimer.current);
+        pollTimer.current = null;
+      }
+    };
     const tick = async () => {
       try {
         const res = await pollOAuth();
         if (res.status === 'done') {
+          stopPolling();
           setPollStatus('done');
           setEmail(res.email || email);
           // Prefetch the folder list in parallel with the success
@@ -246,17 +268,26 @@ export default function CurveSetupPage() {
           prefetchFolders();
           goTo('success');
         } else if (res.status === 'error') {
+          // MSAL rejected: user denied consent, code expired (~15 min),
+          // Azure 5xx, ... Stop the loop and leave the user on the code
+          // screen with the error message. The retry button on the
+          // screen kicks off a fresh DAG via `handleStartAuth`.
+          stopPolling();
           setPollStatus('error');
           setError(res.error || 'Falha na autorização.');
         } else if (res.status === 'none') {
-          // Server forgot about us — the slot was cleared. Most
-          // likely the user left the wizard open after a terminal
-          // outcome. Bounce them back to the trust screen.
-          setPollStatus('idle');
-          setError('A sessão de autorização expirou. Tenta novamente.');
-          goTo('trust');
+          // Server has no record of a DAG for this user. Usually means
+          // a previous tick already consumed a terminal status (the
+          // server-side slot is cleared on the first terminal read),
+          // or the server restarted. Either way there's nothing more
+          // to poll — show a clear message and stop the loop. The
+          // retry button is the recovery path from here.
+          stopPolling();
+          setPollStatus('error');
+          setError('A sessão de autorização expirou. Tenta de novo.');
         }
       } catch (e) {
+        stopPolling();
         setPollStatus('error');
         setError(e.message);
       }
@@ -270,7 +301,7 @@ export default function CurveSetupPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [step, codeInfo]);
 
   // ----- Step 3 cancel -------------------------------------------------
   const handleCancelAuth = useCallback(async () => {
@@ -373,7 +404,9 @@ export default function CurveSetupPage() {
             codeInfo={codeInfo}
             pollStatus={pollStatus}
             error={error}
+            loading={loading}
             onCancel={handleCancelAuth}
+            onRetry={handleStartAuth}
           />
         )}
         {step === 'success' && (
