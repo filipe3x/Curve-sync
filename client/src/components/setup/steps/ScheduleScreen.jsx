@@ -15,9 +15,20 @@ const INTERVAL_OPTIONS = [
   { value: 60, label: 'Cada hora' },
 ];
 
-export default function ScheduleScreen({ loading, error, onFinish, onSkip }) {
-  const [syncEnabled, setSyncEnabled] = useState(true);
-  const [interval, setIntervalValue] = useState(15);
+export default function ScheduleScreen({
+  loading,
+  error,
+  initialSyncEnabled = true,
+  initialInterval = 15,
+  onFinish,
+  onSkip,
+}) {
+  // Defaults match the fresh-user wizard behaviour. The wizard
+  // container overrides these via props when a prior CurveConfig
+  // exists (re-auth flow) so the user's current schedule is already
+  // selected instead of the generic 15-min / enabled default.
+  const [syncEnabled, setSyncEnabled] = useState(initialSyncEnabled);
+  const [interval, setIntervalValue] = useState(initialInterval);
 
   const finish = () => {
     onFinish({ syncEnabled, intervalMinutes: interval });

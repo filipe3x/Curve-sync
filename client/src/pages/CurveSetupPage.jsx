@@ -43,6 +43,8 @@ import {
   cancelOAuth,
   testConnection,
   updateCurveConfig,
+  getCurveConfig,
+  getOAuthStatus,
 } from '../services/api.js';
 import HeroScreen from '../components/setup/steps/HeroScreen.jsx';
 import EmailScreen from '../components/setup/steps/EmailScreen.jsx';
@@ -83,6 +85,67 @@ export default function CurveSetupPage() {
   const [foldersLoading, setFoldersLoading] = useState(false);
   const [foldersError, setFoldersError] = useState(null);
   const [selectedFolder, setSelectedFolder] = useState(null);
+
+  // ----- Schedule prefill state (schedule step) ------------------------
+  //
+  // Defaults mirror the fresh-user wizard behaviour. The mount effect
+  // below overwrites these when a prior CurveConfig exists so re-auth
+  // users see their current schedule already selected instead of the
+  // generic "ativo, 15 min" default.
+  const [initialSyncEnabled, setInitialSyncEnabled] = useState(true);
+  const [initialInterval, setInitialInterval] = useState(15);
+
+  // ----- Re-auth prefill from existing CurveConfig ---------------------
+  //
+  // The wizard is reused as the re-auth entry point (see
+  // docs/EMAIL_AUTH_MVP.md §7 item 3). For a brand-new user, every
+  // field starts empty and the defaults above apply. For a re-auth,
+  // the backend already knows the email, the folder, and the sync
+  // schedule — retyping all of that would be a UX regression.
+  //
+  // We do NOT skip any step: the full consent + DAG flow still runs so
+  // the token cache refresh is visually identical to the first-time
+  // flow (and matches the MVP rule that re-auth = "todo o wizard outra
+  // vez"). This effect only seeds the initial values of the fields so
+  // the user can click through instead of retyping.
+  //
+  // Failures are swallowed on purpose: a broken /config or
+  // /oauth/status endpoint must not block the wizard — the user can
+  // always retype. Runs exactly once on mount; the cleanup flag
+  // prevents a late resolve from overwriting user edits.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [configRes, oauthRes] = await Promise.allSettled([
+        getCurveConfig(),
+        getOAuthStatus(),
+      ]);
+      if (cancelled) return;
+      const config =
+        configRes.status === 'fulfilled' ? configRes.value?.data : null;
+      const oauth = oauthRes.status === 'fulfilled' ? oauthRes.value : null;
+
+      // Prefer the OAuth status email (authoritative for the OAuth
+      // branch: comes from the MSAL account record). Fall back to the
+      // legacy App Password `imap_username`, then to the synthetic
+      // `email` field GET /config resolves from the user_id.
+      const knownEmail =
+        oauth?.email || config?.imap_username || config?.email;
+      if (knownEmail) setEmail(knownEmail);
+      if (config?.imap_folder) setSelectedFolder(config.imap_folder);
+      if (typeof config?.sync_enabled === 'boolean') {
+        setInitialSyncEnabled(config.sync_enabled);
+      }
+      if (config?.sync_interval_minutes) {
+        setInitialInterval(Number(config.sync_interval_minutes));
+      }
+    })().catch(() => {
+      /* best-effort prefill — wizard still works with empty fields */
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ----- Step navigation -----
   const goTo = useCallback((next) => {
@@ -339,6 +402,8 @@ export default function CurveSetupPage() {
             key="schedule"
             loading={loading}
             error={error}
+            initialSyncEnabled={initialSyncEnabled}
+            initialInterval={initialInterval}
             onFinish={handleFinish}
             onSkip={handleSkip}
           />
