@@ -242,6 +242,6 @@ Curve sync:
 OAuth wizard (`server/src/routes/curveOAuth.js`):
 - `POST /api/curve/oauth/check-email` — Classifies an email domain → `{ provider: 'microsoft' | 'google' | null }`
 - `POST /api/curve/oauth/start` — Kicks off MSAL `acquireTokenByDeviceCode`, returns `{ userCode, verificationUri, expiresAt }`
-- `GET /api/curve/oauth/poll` — Polled ~every 3 s by the frontend during the DAG; resolves to `pending | completed | failed | cancelled`
+- `POST /api/curve/oauth/poll` — Polled ~every 3 s by the frontend during the DAG; resolves to `pending | completed | failed | cancelled`
 - `POST /api/curve/oauth/cancel` — Aborts the pending DAG session (user backed out)
 - `GET /api/curve/oauth/status` — Returns `{ connected, provider, email }` for the current user (feeds the dashboard banner gate and the config page's Ligação card)
