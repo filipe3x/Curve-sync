@@ -21,6 +21,7 @@
  */
 
 import { Router } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import {
   providerForEmail,
   startDag,
@@ -31,6 +32,53 @@ import {
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
+
+// Per-user OAuth DAG start limiter — tight half of the hybrid scheme.
+// The loose per-IP ceiling lives in server/src/index.js at
+// /api/curve/oauth/start and catches shared-NAT / multi-account DDoS;
+// this one catches the individual-account variant. 5/hour is the
+// blanket cap originally spec'd in docs/EMAIL_AUTH_MVP.md §4 PR 5 —
+// generous enough for a human retrying a stuck wizard a few times,
+// tight enough to make scripted abuse uninteresting.
+//
+// Dependencies verified:
+//   - curveOAuth is mounted as a sub-router inside curveRouter, which
+//     is mounted behind `authenticate` in index.js. req.userId is
+//     therefore guaranteed at keyGenerator time.
+//   - startDag() in services/oauthWizard.js upserts a CurveConfig
+//     stub, allocates an in-memory pendingDags slot, starts the MSAL
+//     acquireTokenByDeviceCode promise, and writes an audit row. All
+//     of these run AFTER this middleware, so a 429 short-circuits
+//     every side effect cleanly.
+//   - DAG_IN_PROGRESS (409) responses from startDag still count
+//     against the bucket — that is deliberate, since "user hammering
+//     the button while a previous flow is pending" is exactly the
+//     cadence we want to throttle.
+//
+// The IP fallback in keyGenerator is defensive only — with the
+// current middleware order it is unreachable. Prefixes namespace the
+// two bucket spaces so a user id cannot collide with an IP string.
+//
+// IPv6 note: the IP fallback funnels req.ip through `ipKeyGenerator`
+// (re-exported by express-rate-limit) instead of using the raw string.
+// Without it, express-rate-limit v8 throws ERR_ERL_KEY_GEN_IPV6 at
+// startup because a naive req.ip fallback would let an IPv6 client
+// rotate through every address in their /64 to bypass the bucket.
+// `ipKeyGenerator` collapses an IPv6 address to its /56 prefix and
+// passes IPv4 through unchanged. The same fix is applied to the
+// per-user sync limiter in routes/curve.js.
+const perUserOauthStartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,                    // 5 DAG kickoffs per hour, per authenticated user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) =>
+    req.userId ? `user:${req.userId}` : `ip:${ipKeyGenerator(req.ip)}`,
+  message: {
+    error:
+      'Demasiados pedidos de autorização. Tenta novamente daqui a uma hora.',
+  },
+});
 
 // POST /api/curve/oauth/check-email
 // Pure lookup — returns which OAuth provider (if any) matches the
@@ -64,7 +112,12 @@ router.post('/check-email', async (req, res) => {
 // < 1 s) — after that the call returns and the promise keeps running
 // in the background. Subsequent polls discover whether the user
 // completed the code entry.
-router.post('/start', async (req, res) => {
+//
+// Rate limits (hybrid, multi-user safe):
+//   - 15/hour per IP   (server/src/index.js → oauthStartLimiter, NAT cap)
+//   - 5/hour per user  (perUserOauthStartLimiter above, real abuse guard)
+// Both apply; whichever bucket empties first returns 429.
+router.post('/start', perUserOauthStartLimiter, async (req, res) => {
   try {
     const { email } = req.body || {};
     if (!email) {

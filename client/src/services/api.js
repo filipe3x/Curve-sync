@@ -42,6 +42,12 @@ async function request(path, options = {}) {
 export const login = (data) =>
   request('/auth/login', { method: 'POST', body: JSON.stringify(data) });
 
+// Self-service registration. Mirrors the login response shape on
+// success ({ token, user }) so the caller can hand it straight to
+// AuthContext.login() for auto-login.
+export const register = (data) =>
+  request('/auth/register', { method: 'POST', body: JSON.stringify(data) });
+
 // Expenses
 export const getExpenses = (params) =>
   request(`/expenses?${new URLSearchParams(params)}`);

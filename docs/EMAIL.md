@@ -4,32 +4,34 @@ This document covers everything needed to implement the core feature of Curve Sy
 
 ## Current State
 
-### What's Done
+All components of the email pipeline are shipped. The table below
+maps each piece to its code location — see the phase-by-phase sections
+further down for the design rationale behind each one.
 
-| Component | Location | Status |
-|-----------|----------|--------|
-| Expense model (with digest unique index) | `server/src/models/Expense.js` | Done |
-| CurveConfig model (IMAP credentials, sync settings) | `server/src/models/CurveConfig.js` | Done |
-| CurveLog model (audit trail, TTL 90 days) | `server/src/models/CurveLog.js` | Done |
-| `computeDigest()` — SHA-256 matching `curve.py` | `server/src/services/expense.js` | Done |
-| `assignCategory()` — entity-based auto-categorization | `server/src/services/expense.js` | Done |
-| `GET/PUT /api/curve/config` | `server/src/routes/curve.js` | Done |
-| `GET /api/curve/logs` | `server/src/routes/curve.js` | Done |
-| `POST /api/expenses` (with digest dedup + auto-category) | `server/src/routes/expenses.js` | Done |
-| `node-cron` dependency | `server/package.json` | Installed (unused) |
+| Component | Location |
+|-----------|----------|
+| Expense model (with `(digest, user_id)` compound unique index) | `server/src/models/Expense.js` |
+| CurveConfig model (IMAP credentials, sync settings, OAuth fields) | `server/src/models/CurveConfig.js` |
+| CurveLog model (audit trail, TTL 90 days) | `server/src/models/CurveLog.js` |
+| `computeDigest()` — SHA-256 matching `curve.py` | `server/src/services/expense.js` |
+| `assignCategoryFromList()` — entity-based auto-categorization | `server/src/services/expense.js` |
+| Email HTML parser (cheerio, with regex fallbacks) | `server/src/services/emailParser.js` |
+| IMAP reader — dual auth: App Password + XOAUTH2 via `createImapReader()` | `server/src/services/imapReader.js` |
+| Sync orchestrator — parse → dedup → insert → log pipeline | `server/src/services/syncOrchestrator.js` |
+| Scheduler (node-cron, iterates per-config) | `server/src/services/scheduler.js` |
+| `GET/PUT /api/curve/config` | `server/src/routes/curve.js` |
+| `POST /api/curve/sync` (manual trigger + `?dry_run=1`) | `server/src/routes/curve.js` |
+| `POST /api/curve/test-connection` (IMAP smoke test + folder list) | `server/src/routes/curve.js` |
+| `GET /api/curve/logs` | `server/src/routes/curve.js` |
+| `POST /api/expenses` (with digest dedup + auto-category) | `server/src/routes/expenses.js` |
+| OAuth wizard routes (`/api/curve/oauth/*`) | `server/src/routes/curveOAuth.js` |
 
-### What's Missing
-
-| Component | Target Location | Status |
-|-----------|----------------|--------|
-| Email HTML parser (cheerio) | `server/src/services/emailParser.js` | Done (Phase 1) |
-| `cheerio` dependency | `server/package.json` | Installed |
-| IMAP reader | `server/src/services/imapReader.js` | Done (Phase 2) |
-| `imapflow` dependency | `server/package.json` | Installed |
-| `POST /api/curve/test-connection` | `server/src/routes/curve.js` | Done (Phase 2) |
-| Sync orchestrator | `server/src/services/syncOrchestrator.js` | **Not started** |
-| Scheduler (node-cron) | `server/src/services/scheduler.js` | **Not started** |
-| `POST /api/curve/sync` | `server/src/routes/curve.js` | Placeholder only |
+Authentication lives in a sibling doc: see
+[`EMAIL_AUTH.md`](./EMAIL_AUTH.md) for the OAuth wizard + token
+lifecycle and [`EMAIL_AUTH_MVP.md`](./EMAIL_AUTH_MVP.md) for the V2
+rollout history (direct XOAUTH2 via `@azure/msal-node`, replacing the
+V1 `email-oauth2-proxy` bridge that shipped in the original Embers
+pipeline).
 
 ---
 
@@ -79,204 +81,57 @@ Known issues with this approach: no error recovery, no logging, offlineimap can 
 
 ---
 
-## Outlook365 / Microsoft 365 Authentication
+## IMAP Authentication — see [`EMAIL_AUTH.md`](./EMAIL_AUTH.md)
 
-**This is the single biggest constraint on Phase 2.** The dev mailbox for
-Curve receipts lives on Outlook / Microsoft 365, which no longer accepts
-plain IMAP passwords for most accounts.
+Curve Sync uses direct XOAUTH2 against `outlook.office365.com:993` via
+`@azure/msal-node`. The full architecture — OAuth wizard, MSAL token
+cache, encrypted persistence, silent refresh, re-auth banner — lives
+in `EMAIL_AUTH.md`. The MVP rollout and acceptance criteria live in
+`EMAIL_AUTH_MVP.md`. This section only captures what the email
+pipeline (this doc) needs to know about the auth layer, plus the
+historical context that motivates the whole project.
 
-### What Embers did (and why it broke)
+### Historical context: the silent-failure mode
 
-The legacy Embers pipeline used `offlineimap` (external tool, cron every
-minute) to mirror the `Curve Receipts` folder to disk, then piped each
-file into `curve.py`. But `offlineimap` itself did NOT talk OAuth —
-investigation on the live brasume host revealed the actual topology:
+The legacy Embers pipeline used `offlineimap` (cron every minute) to
+mirror the `Curve Receipts` folder to disk, then piped each new file
+into `curve.py`. `offlineimap` itself did NOT talk OAuth — it connected
+to a loopback `email-oauth2-proxy` (Simon Robinson's Python bridge),
+which held a Fernet-encrypted refresh token and translated plain IMAP
+into XOAUTH2 against Microsoft.
 
 ```
 curve.py  ←  cat  ←  offlineimap  →  127.0.0.1:1993  →  OAuth2/IMAP  →  outlook.com
-             (Maildir)   (plain IMAP)    (email-oauth2-proxy,           (real Microsoft)
-                                          Python, local loopback)
+             (Maildir)   (plain IMAP)    (email-oauth2-proxy)           (real Microsoft)
 ```
 
-`~/.offlineimaprc` on brasume has `remotehost = 127.0.0.1`, `remoteport =
-1993`, `ssl = no`, `auth_mechanisms = PLAIN` — offlineimap is blissfully
-unaware of OAuth; it just talks trivial plain IMAP to a local bridge.
-That bridge is [`email-oauth2-proxy`](https://github.com/simonrob/email-oauth2-proxy),
-a single-file Python program that listens on a loopback port, accepts
-plain IMAP/SMTP from dumb clients, and translates every command to
-XOAUTH2 against Microsoft's endpoints (or Google's). Its config
-(`emailproxy.config`) stores a Fernet-encrypted refresh token; the
-decryption key is derived via PBKDF2 from a password the user types
-interactively on first run (and then supplies as the "IMAP password"
-from every client that connects).
+When the refresh token inside `emailproxy.config` expired, the proxy
+silently returned zero new messages, `offlineimap` dutifully reported a
+successful sync of nothing, and expenses stopped flowing without any
+log trace. That single silent-failure mode is the main reason Curve
+Sync exists as a standalone service — and why the orchestrator still
+raises `last_sync_status = 'error'` when a sync that historically saw
+traffic suddenly sees none. The V1 proxy topology (including its
+systemd unit and the Pi installation runbook) has been retired — V2
+speaks XOAUTH2 directly from Node and owns the token lifecycle in
+MongoDB.
 
-The comment *"OAuth token expiry causes silent failures"* in this file
-was the tell: when the refresh token inside `emailproxy.config` expired,
-email-oauth2-proxy silently returned zero new messages, offlineimap
-dutifully reported a successful sync of nothing, and expenses stopped
-flowing without any log trace. That single silent failure mode is the
-main reason Curve Sync exists as a standalone service.
+### What this means for `imapReader.js`
 
-### Microsoft's current stance
+The IMAP reader is constructed via an async factory,
+`createImapReader(config)`, which picks one of two auth branches based
+on whether `config.oauth_provider` is set:
 
-- **Basic Authentication for IMAP/POP is disabled by default since
-  October 2022** for almost every Microsoft 365 tenant. Personal
-  outlook.com accounts had it disabled in September 2024.
-- There are only two supported mechanisms for IMAP access today:
-  1. **App Passwords** — a secondary 16-character credential that
-     bypasses MFA for legacy protocols. Requires MFA / 2-step verification
-     to be ENABLED on the account first (counterintuitively: no MFA → no
-     app passwords). Generated at <https://account.microsoft.com/security>
-     → Advanced security options → App passwords.
-  2. **OAuth2 (XOAUTH2 / Modern Auth)** — requires registering an Azure AD
-     application, obtaining `client_id` / `tenant_id`, running a one-time
-     consent flow to get a refresh token, then exchanging that refresh
-     token for short-lived access tokens on every IMAP connect.
-
-### Curve Sync's supported approaches — Caminho A and Caminho B
-
-Curve Sync's IMAP reader (`server/src/services/imapReader.js`) is
-deliberately dumb: it talks plain IMAP over a TCP socket with basic auth,
-controlled by four `CurveConfig` fields (`imap_server`, `imap_port`,
-`imap_username`, `imap_password`) and one toggle (`imap_tls`, default
-`true`). That single client supports two very different authentication
-topologies depending on what you put in those fields:
-
-| | **Caminho A — App Password direto** | **Caminho B — email-oauth2-proxy localhost** |
+| Branch | `oauth_provider` | How `imapflow` connects |
 |---|---|---|
-| Server | `outlook.office365.com` | `127.0.0.1` |
-| Port | `993` | `1993` |
-| TLS | **on** (`imap_tls = true`) | **off** (`imap_tls = false`) — loopback only |
-| Username | real email address | real email address |
-| Password | **16-char App Password** generated in the MS account portal | **encryption password** for `emailproxy.config` (not an MS credential) |
-| Network auth | TLS → basic auth → Microsoft IMAP servers | plain IMAP → `email-oauth2-proxy` → XOAUTH2 → Microsoft |
-| Prereq on account | MFA must be enabled | None — uses an existing OAuth grant stored in `emailproxy.config` |
-| External process | None | `email-oauth2-proxy` running on localhost (systemd unit) |
-| Setup time | ~2 minutes in MS account UI | ~10 minutes: clone proxy, copy config, systemd unit |
-| Schema / code impact | None beyond `imap_tls` (already landed) | None beyond `imap_tls` (already landed) |
-| Silent failure mode | App password revoked → hard `535 AUTHENTICATIONFAILED`, visible | Refresh token expires → proxy returns zero rows silently (*the Embers failure mode*) — mitigated in Curve Sync by the orchestrator raising `last_sync_status = 'error'` when a sync that historically saw traffic suddenly sees none |
-| Portability of consent | Per-user (MFA-enabled MS account) | `emailproxy.config` is file-portable — the refresh token that worked on brasume keeps working on the Pi with zero re-consent, as long as the encryption password matches |
+| **OAuth (XOAUTH2)** — default for new users | `'microsoft'` | MSAL `acquireTokenSilent` returns a fresh access token from the encrypted cache on `CurveConfig`; `imapflow` opens a TLS session to `outlook.office365.com:993` with `auth: { user, accessToken }`. Refresh is transparent; corrupt / revoked caches raise `OAuthReAuthRequired`, which the orchestrator maps to `ImapError('AUTH')`. |
+| **Legacy App Password** — holdout | `null` | The stored `imap_password` (AES-256-GCM encrypted in Mongo, decrypted at read) is passed as `auth: { user, pass }`. The fields `imap_server` / `imap_port` / `imap_tls` drive the connection. New users never write these — the wizard only produces OAuth configs. |
 
-**Both are supported at the same time** — they are literally different
-values in the same four fields. You can flip between them by editing
-`/curve/config` in the UI. No code change, no restart.
-
-#### Which one for which situation?
-
-- **Caminho A (App Password direto)**: use it if (a) MFA is already on
-  and you don't mind generating a new 16-char code, (b) you don't have a
-  working `email-oauth2-proxy` installation to inherit, or (c) you want
-  the simplest possible ops story (zero extra processes).
-- **Caminho B (email-oauth2-proxy localhost)**: use it if you already
-  have a working proxy on another machine with a live refresh token
-  (exactly the brasume → Pi migration this repo is doing), or if you
-  want an auth flow that keeps working after Microsoft inevitably
-  disables App Passwords too in some future "security improvement".
-
-The production Curve Sync deployment on the Raspberry Pi uses
-**Caminho B** — the `emailproxy.config` from brasume was copied to the
-Pi, systemd unit launches the proxy at boot, and Curve Sync's
-`CurveConfig` points at `127.0.0.1:1993` with `imap_tls = false`. See
-the "Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)"
-section below for the exact steps.
-
-Phase 6 (security) adds AES-256 encryption at rest for `imap_password`
-regardless of which path is used — the field holds a secret either way
-(App Password OR the proxy's encryption password).
-
-### Installing email-oauth2-proxy on the Raspberry Pi (Caminho B)
-
-**Status: validated on 2026-04-09.** `email-oauth2-proxy` is running on
-the production Pi (`raspberrypi.local`), a live IMAP client session was
-successfully authenticated end-to-end (proxy log shows
-`Successfully authenticated IMAP connection - releasing session`), and
-the proxy re-keyed the stored tokens on first use (`Rotating stored
-secrets ... to use new cryptographic parameters`). The current
-`emailproxy.config` on the Pi has therefore diverged from the brasume
-copy — treat the Pi version as authoritative from now on.
-
-Prereq: a working `emailproxy.config` (already containing the encrypted
-refresh token) from another host, and the encryption password that was
-used to create it.
-
-```bash
-# 1. Clone and set up a venv
-cd ~
-git clone https://github.com/simonrob/email-oauth2-proxy.git
-cd email-oauth2-proxy
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-core.txt
-
-# 2. Copy the existing config from the old host (do NOT commit it anywhere).
-#    The encrypted refresh token is portable — no re-consent needed as
-#    long as the encryption password matches on the new host.
-scp ember@brasume:~/Mail/email-oauth2-proxy/emailproxy.config .
-
-# 3. Smoke test manually. The proxy starts listening immediately — it
-#    does NOT prompt for a password at startup. You should see:
-#      "Starting IMAP server at 127.0.0.1:1993 (unsecured) ..."
-#      "Initialised Email OAuth 2.0 Proxy - listening for authentication requests"
-#    That is enough to confirm the binary + config parse. Ctrl-C.
-.venv/bin/python3 emailproxy.py --config-file=emailproxy.config --no-gui
-
-# 4. Install as a systemd unit (template at docs/email-oauth2-proxy.service).
-#    Replace <USER> and <HOME> with the real values, then:
-sudo cp docs/email-oauth2-proxy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now email-oauth2-proxy
-systemctl status email-oauth2-proxy
-journalctl -u email-oauth2-proxy -f   # watch it come up
-
-# 5. In Curve Sync at /curve/config, set:
-#      Servidor IMAP:    127.0.0.1
-#      Porta:            1993
-#      Utilizador:       your-email@outlook.pt
-#      App Password:     <the encryption password of emailproxy.config>
-#      Usar TLS:         unchecked
-#      Pasta IMAP:       Curve Receipts
-#    Save, then "Testar ligação" — you should see the folder list.
-```
-
-If the test connection comes back with `authentication failed`, the
-most likely cause is a typo in the encryption password (Curve Sync
-passes that through verbatim — the proxy then uses it as the PBKDF2
-input to decrypt the stored tokens). Try decrypting manually via the
-proxy CLI to confirm before blaming Curve Sync.
-
-**Heads-up on first successful login**: email-oauth2-proxy may log
-something like `Rotating stored secrets for account <email> to use new
-cryptographic parameters` the first time you authenticate on the new
-host. This is normal — the proxy is re-encrypting the refresh tokens
-with fresh `token_salt` / `token_iterations` values. The password you
-use stays the same, but the on-disk `emailproxy.config` is rewritten
-in-place and will no longer be byte-identical to the brasume copy.
-Take a backup (`cp emailproxy.config emailproxy.config.bak`) right
-after that first successful sync.
-
-### What happens later (own OAuth2 implementation, Phase 7+)
-
-`email-oauth2-proxy` is a perfectly good bridge and we use it
-deliberately — but it's still an external process we don't control. If
-at some point we want to remove that dependency (e.g., for a simpler
-single-container deployment), we can port the XOAUTH2 logic into
-`imapReader.js` directly:
-
-- `CurveConfig` gets new optional fields: `oauth_tenant_id`,
-  `oauth_client_id`, `oauth_refresh_token`, `oauth_access_token`,
-  `oauth_expires_at`
-- `imapReader.js` gains a branch: if `oauth_refresh_token` is set,
-  `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
-  to mint an access token, then authenticate IMAP with XOAUTH2
-  (`imapflow` supports `auth: { user, accessToken }` natively)
-- Frontend adds a third auth mode next to A and B
-- A new route `GET /api/curve/oauth/callback` handles the consent flow
-- The orchestrator's "historically saw traffic but suddenly sees none"
-  heuristic remains as a silent-failure canary, because this failure
-  mode is inherent to any long-lived refresh-token scheme
-
-Do NOT add this until a concrete need exists. Caminho B already gives
-us the benefits of OAuth2 with zero Azure AD setup work of our own, by
-leveraging the existing proxy installation.
+Both branches land on the same `imapflow` client, so everything
+downstream in `syncOrchestrator.js` is auth-agnostic. Future provider
+support (Gmail is the next target — see `EMAIL_AUTH.md` §2.2 for the
+fan-out plan) will add a third value to `oauth_provider` without
+disturbing the parser, the dedup path, or the scheduler.
 
 ---
 
@@ -363,18 +218,29 @@ Implemented at `server/src/services/imapReader.js`. Key points:
   → `fetchUnseen()` → `markSeen(uid)` → `close()` lifecycle. The
   orchestrator (Phase 3) drives this step-by-step so it can decide
   per-email whether to mark seen based on insert success.
-- **Basic auth only** (the reader speaks plain IMAP PLAIN / LOGIN, not
-  XOAUTH2). This is deliberate — it lets the same client drive both
-  Caminho A (App Password → Outlook directly over TLS:993) and Caminho
-  B (encryption password → `email-oauth2-proxy` over plain:1993 on
-  loopback). See the Outlook365 section above for the full topology.
-- **`imap_tls` toggle** (default `true`): lets Caminho B turn off TLS
-  for the localhost relay. Curve Sync logs a WARN on startup if TLS is
-  off AND the host isn't a loopback address, because that combination
-  would expose credentials over the network.
+- **Dual auth via `createImapReader(config)` factory**. The factory
+  inspects `config.oauth_provider`:
+    - `null` → legacy App Password branch: `imapflow` opens TLS to
+      `outlook.office365.com:993` (or whatever `imap_server` says) with
+      `auth: { user, pass }` using the decrypted `imap_password`.
+    - `'microsoft'` → OAuth branch: `oauthManager.getOAuthToken(config)`
+      returns a fresh XOAUTH2 access token from the encrypted MSAL
+      cache, which `imapflow` consumes as `auth: { user, accessToken }`.
+      A missing / revoked / expired refresh token raises
+      `OAuthReAuthRequired`, classified by the orchestrator as
+      `ImapError('AUTH')` and surfaced in the dashboard re-auth banner.
+
+  Both branches land on the same `ImapReader` instance, so the
+  orchestrator, dedup path, and scheduler are auth-agnostic. See
+  `EMAIL_AUTH.md` for the full OAuth token lifecycle.
+- **`imap_tls` toggle** (default `true`): retained for the legacy
+  branch, which historically needed to disable TLS for loopback relays.
+  OAuth configs always connect over TLS to `outlook.office365.com:993`.
 - **`ImapError` with `code`** — `CONFIG`, `AUTH`, `CONNECT`, `FOLDER`,
   `FETCH`, `FLAG`, `UNKNOWN`. The route layer maps these to HTTP status
-  codes so the frontend can surface a useful hint (e.g., 401 for AUTH).
+  codes so the frontend can surface a useful hint. Note: `AUTH` maps to
+  **502** (Bad Gateway), not 401 — a 401 on `/api/curve/*` would collide
+  with the session-expiry dispatch in the frontend's API wrapper.
 - **`fetchUnseen()` returns raw email source as a `latin1` string** —
   same byte-preserving convention as `validate-fixtures.js` uses for
   on-disk fixtures, so `emailParser.extractHtml()` can run its
@@ -396,14 +262,14 @@ the folder list on success. The "Testar ligação" button in
 to HTTP status so the UI shows distinct messages for wrong-host (503),
 wrong-password (401), wrong-folder (404), and missing-config (400).
 
-### Phase 3 — Sync Orchestrator (`syncOrchestrator.js`)
+### Phase 3 — Sync Orchestrator (`syncOrchestrator.js`) — DONE
 
 Coordinates parser + IMAP reader + Mongo inserts + logging. The bullet
-list at the bottom of this section is the actual implementation TODO;
-everything above it is design rationale captured during
-pre-implementation analysis so a future reader can understand *why*
-the orchestrator is shaped the way it is — all the tripwires we hit on
-paper before writing any code.
+list at the bottom of this section is the original implementation
+punch list (now all shipped); everything above it is design rationale
+captured during pre-implementation analysis so a future reader can
+understand *why* the orchestrator is shaped the way it is — all the
+tripwires we hit on paper before writing any code.
 
 #### Signature and multi-user scoping (decided: day 1)
 
@@ -530,10 +396,10 @@ single good email mid-run keeps the sync going.
 
 The failure mode we're guarding against: sync runs look healthy
 (`last_sync_status = 'ok'`), but the mailbox is returning zero new
-emails because of an upstream problem (OAuth token silently expired
-in email-oauth2-proxy; the Curve Receipts folder rule broke; Microsoft
-changed something). This is the Embers failure mode that motivates
-Curve Sync's existence.
+emails because of an upstream problem (OAuth refresh token revoked but
+`acquireTokenSilent` still returning a stale hit somehow; the Curve
+Receipts folder rule broke; Microsoft changed something). This is the
+Embers failure mode that motivates Curve Sync's existence.
 
 **Schema addition (`CurveConfig`):**
 
@@ -698,62 +564,79 @@ The route serializes this verbatim. The dashboard renders a
 per-category breakdown; if `halted === true`, it switches to a warning
 style and links to the latest CurveLog entries for triage.
 
-#### Implementation checklist
+#### Implementation checklist (historical punch list — all shipped)
 
 Schema groundwork first (small, safe diffs):
 
-- [ ] Add `last_email_at: Date` and `is_syncing: Boolean` to
+- [x] Add `last_email_at: Date` and `is_syncing: Boolean` to
       `CurveConfig.js`
-- [ ] Add `dry_run: Boolean` to `CurveLog.js`
-- [ ] Convert `imapReader.fetchUnseen()` to an `async *` generator
-- [ ] Add 5-second timeout to `imapReader.close()`
-- [ ] Extract `assignCategoryFromList(entity, categories)` in
+- [x] Add `dry_run: Boolean` to `CurveLog.js`
+- [x] Convert `imapReader.fetchUnseen()` to an `async *` generator
+- [x] Add 5-second timeout to `imapReader.close()`
+- [x] Extract `assignCategoryFromList(entity, categories)` in
       `services/expense.js` alongside the existing `assignCategory`
 
 Then the orchestrator module itself:
 
-- [ ] Create `server/src/services/syncOrchestrator.js`
-- [ ] Define and document the `EmailReader` contract
-- [ ] Implement `FixtureReader` for dev / tests
-- [ ] Implement `syncEmails({ config, reader, dryRun })`
-- [ ] Per-email pipeline with duplicate 11000 + `keyPattern.digest`
+- [x] Create `server/src/services/syncOrchestrator.js`
+- [x] Define and document the `EmailReader` contract
+- [x] Implement `FixtureReader` for dev / tests
+- [x] Implement `syncEmails({ config, reader, dryRun })`
+- [x] Per-email pipeline with duplicate 11000 + `keyPattern.digest`
       check
-- [ ] Circuit breaker (≥10 consecutive parse_errors with 0 ok)
-- [ ] In-memory sync lock + exported `isSyncing()`
-- [ ] Category cache loaded once per run
-- [ ] `error_detail` truncation helper
-- [ ] Per-email `parseEmail` timeout wrapper
-- [ ] Canary update (`last_email_at`) only when reader is `ImapReader`
+- [x] Circuit breaker (≥10 consecutive parse_errors with 0 ok)
+- [x] In-memory sync lock + exported `isSyncing()`
+- [x] Category cache loaded once per run
+- [x] `error_detail` truncation helper
+- [x] Per-email `parseEmail` timeout wrapper
+- [x] Canary update (`last_email_at`) only when reader is `ImapReader`
 
 And the glue (overlaps with Phase 4):
 
-- [ ] Wire `POST /api/curve/sync` to the orchestrator, handling
+- [x] Wire `POST /api/curve/sync` to the orchestrator, handling
       `SyncConflictError` → 409
-- [ ] Dev test: run `syncEmails()` with `FixtureReader` against a
+- [x] Dev test: run `syncEmails()` with `FixtureReader` against a
       clean Mongo, then again, and assert the second run is all
       `duplicates`
 
-### Phase 4 — Wire Up Routes
+### Phase 4 — Wire Up Routes — DONE
 
-- [ ] Implement `POST /api/curve/sync` — calls orchestrator, returns summary
-- [ ] Implement `POST /api/curve/test-connection` — IMAP connect + list folders + disconnect
-- [ ] Add proper error responses (401 for auth fail, 503 for connection issues)
+`POST /api/curve/sync` (manual trigger, with `?dry_run=1`) and
+`POST /api/curve/test-connection` (IMAP smoke test + folder list) live
+in `server/src/routes/curve.js` and map `ImapError.code` → HTTP status
+via `{ CONFIG: 400, AUTH: 502, CONNECT: 503, FOLDER: 404 }[err.code]`.
+The `AUTH → 502` mapping is deliberate: a 401 on `/api/curve/*` would
+collide with the frontend `api.request()` wrapper's session-expiry
+dispatch and bounce the user to `/login`, which is the wrong UX when
+the upstream IMAP/Azure auth is what actually failed. See the comment
+block at `server/src/routes/curve.js:215-223` for the full rationale.
 
-### Phase 5 — Scheduler (`scheduler.js`)
+### Phase 5 — Scheduler (`scheduler.js`) — DONE
 
-- [ ] Create `server/src/services/scheduler.js`
-- [ ] Use `node-cron` to run sync at interval from `CurveConfig.sync_interval_minutes`
-- [ ] Add concurrency lock (prevent overlapping executions)
-- [ ] Initialize scheduler on server startup
-- [ ] Re-schedule when config is updated via API
-- [ ] Log scheduler start/stop/error events
+`server/src/services/scheduler.js` runs on `node-cron` with a single
+global interval (`startScheduler(intervalMinutes = 5)`). On each tick
+it loads `CurveConfig.find({ sync_enabled: true })` fresh, skips any
+config whose sync is already in flight (`isSyncing(config._id)` —
+in-memory lock from the orchestrator), decrypts the `imap_password`
+if present, builds a reader via `createImapReader()`, and calls
+`syncEmails()` sequentially for each remaining config. It auto-starts
+on boot from `index.js` when any config has `sync_enabled: true`.
+Re-reading the config set every tick means `sync_enabled` toggles
+made via `PUT /api/curve/config` take effect without a restart. Note:
+`sync_interval_minutes` on individual configs is not currently honoured
+by the scheduler — every enabled config runs at the same cadence. The
+scheduler's own lifecycle events (`started`, `stopped`, per-config
+failures) go to `stdout` / `stderr`; per-sync `ok` / `error` rows in
+`/curve/logs` come from `syncEmails()` inside the orchestrator.
 
-### Phase 6 — Environment & Security
+### Phase 6 — Environment & Security — DONE
 
-- [ ] Add new env vars to `server/.env.example`:
-  - `IMAP_ENCRYPTION_KEY` — for AES-256 password encryption at rest
-- [ ] Encrypt IMAP passwords before storing in `CurveConfig`
-- [ ] Decrypt on read when connecting to IMAP
+`IMAP_ENCRYPTION_KEY` ships in `server/.env.example` and protects both
+the legacy `imap_password` field and the OAuth token cache blob via
+AES-256-GCM (`server/src/services/crypto.js`). Passwords are encrypted
+on `PUT /api/curve/config` and decrypted by `toPlainConfig()` before
+`createImapReader()` runs. The same key encrypts the MSAL cache via
+`oauthCachePlugin.js`.
 
 ---
 
@@ -761,8 +644,8 @@ And the glue (overlaps with Phase 4):
 
 ### Problem statement
 
-The first real run of `POST /api/curve/sync` against Outlook via Caminho B
-failed with:
+The first real run of `POST /api/curve/sync` against Outlook failed
+with:
 
 ```
 "INBOX/Curve Receipts" doesn't exist. (code=UNKNOWN)
@@ -1014,11 +897,12 @@ Config-level observability is handled elsewhere:
 We considered having `PUT /api/curve/config` open an IMAP connection
 and verify the folder exists on save. Rejected:
 
-1. **Latency.** A cold IMAP connect + login + list takes 2-5 seconds
-   on the Pi via Caminho B. That penalty applies to every config save,
+1. **Latency.** A cold IMAP connect + login + folder list takes 2-5
+   seconds against Outlook. That penalty applies to every config save,
    even ones that don't touch the folder (e.g. toggling `sync_enabled`).
-2. **Availability coupling.** A transient proxy outage would block
-   unrelated config updates.
+2. **Availability coupling.** A transient Microsoft outage (or a
+   silent-refresh failure inside MSAL) would block unrelated config
+   updates.
 3. **Redundancy.** The client ALREADY has the authoritative list from
    the most recent `testConnection` call. Saving any folder outside
    that list requires bypassing the UI, at which point the user has
@@ -1401,7 +1285,7 @@ yet.
 | `capped = true` | Set `max_emails_per_run: 3` via mongosh, run sync | Low — verified by code review |
 | SyncConflictError 409 | Two simultaneous `curl POST /sync` | Low — in-memory lock, trivial |
 | FOLDER error + auto-invalidation | Set `imap_folder` to a non-existent folder, run sync | Tested manually (was the original bug) |
-| Socket timeout recovery | Kill email-oauth2-proxy mid-sync | Medium — fixed by error handler + batch markSeen |
+| Socket timeout recovery | Drop the IMAP connection mid-sync (e.g. `iptables` block of `outlook.office365.com:993` while a fetch is in flight) | Medium — fixed by error handler + batch markSeen |
 | Auth failure | Set wrong password, run sync | Low — classifyError regex covers it |
 
 ---
@@ -1441,4 +1325,4 @@ yet.
 - **Expenses are INSERT-only**: Never update or delete existing expense records (owned by Embers).
 - **Mongoose snake_case**: All timestamps use `created_at`/`updated_at` for Mongoid compatibility.
 - **Mark Seen last**: Only mark an email as `\Seen` after the expense is successfully inserted (or confirmed as duplicate). If parsing fails, leave it UNSEEN for retry.
-- **Single user (for now)**: Routes currently return the first `CurveConfig`. Multi-user scoping is Phase 2.
+- **Multi-user scoped**: Every route, orchestrator call, and scheduler tick keys off `user_id`. Configs, expenses, logs, and the in-memory sync/OAuth locks are namespaced per user — see `docs/EMAIL_AUTH_MVP.md` §8 for the multi-user acceptance criteria.

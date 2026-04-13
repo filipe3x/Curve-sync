@@ -42,7 +42,7 @@ Server env: copy `server/.env.example` to `server/.env` and set `MONGODB_URI`.
 
 ### MongoDB Collection Access Rules
 
-- **`users`** — READ-ONLY (owned by Embers)
+- **`users`** — READ + INSERT + UPDATE (never DELETE — Embers owns the destroy path, including the "last admin" guard). Curve Sync drives its own registration and profile flows; writes MUST stay schema-compatible with Embers' `User` model: `email` lowercased + format `/.*@.*\..*/`, `salt` = `SHA256("${ISO_timestamp}--${password}")`, `encrypted_password` = `SHA256("${password}--${salt}")`, `role` ∈ `{'user', 'admin'}` defaulting to `'user'` for new rows (admin assignment stays exclusive to Embers — never downgrade an existing admin via UPDATE). New records created by Curve Sync are valid Embers users — they can log into the Embers app unchanged. See `docs/embers-reference/models/user.rb` for the canonical schema and `server/src/services/auth.js` for the hash helpers.
 - **`categories`** — READ-ONLY (owned by Embers)
 - **`expenses`** — READ + INSERT only (never UPDATE/DELETE existing records)
 - **`curve_configs`** — Full CRUD (owned by this service, per-user IMAP settings)
@@ -55,7 +55,7 @@ These rules are critical to avoid breaking the shared database:
 - Use `{ timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } }` (snake_case, not camelCase)
 - Set explicit collection names to prevent Mongoose auto-pluralization
 - Store relationships as `<name>_id` ObjectId fields (e.g., `user_id`, `category_id`, `config_id`)
-- Never modify the schema of existing `users`, `categories`, or `expenses` collections
+- Never modify the **schema** of `users`, `categories`, or `expenses`. Curve Sync may CRUD `users` rows, but only with the exact field shape Embers uses (see the access rules above) — adding new fields, renaming existing ones, or storing values outside Embers' enums (`role`, etc.) is out of scope.
 
 ### Expense Deduplication
 
@@ -242,6 +242,6 @@ Curve sync:
 OAuth wizard (`server/src/routes/curveOAuth.js`):
 - `POST /api/curve/oauth/check-email` — Classifies an email domain → `{ provider: 'microsoft' | 'google' | null }`
 - `POST /api/curve/oauth/start` — Kicks off MSAL `acquireTokenByDeviceCode`, returns `{ userCode, verificationUri, expiresAt }`
-- `GET /api/curve/oauth/poll` — Polled ~every 3 s by the frontend during the DAG; resolves to `pending | completed | failed | cancelled`
+- `POST /api/curve/oauth/poll` — Polled ~every 3 s by the frontend during the DAG; resolves to `pending | completed | failed | cancelled`
 - `POST /api/curve/oauth/cancel` — Aborts the pending DAG session (user backed out)
 - `GET /api/curve/oauth/status` — Returns `{ connected, provider, email }` for the current user (feeds the dashboard banner gate and the config page's Ligação card)

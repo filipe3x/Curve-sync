@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import User from '../models/User.js';
@@ -27,6 +28,38 @@ const router = Router();
 // inherits the `authenticate` middleware applied to /api/curve in
 // index.js. See server/src/routes/curveOAuth.js for the endpoint list.
 router.use('/oauth', oauthRouter);
+
+// Per-user sync limiter — tight half of the hybrid scheme. The loose
+// per-IP ceiling lives in server/src/index.js at /api/curve/sync and
+// catches shared-NAT / multi-account DDoS; this one catches the
+// individual-account variant (a single logged-in user hammering
+// "Sincronizar agora" or scripting against POST /api/curve/sync).
+// Because curveRouter is mounted AFTER `authenticate` in index.js,
+// req.userId is guaranteed to be populated by the time keyGenerator
+// runs. The IP fallback exists only as a defensive no-op in case
+// the middleware order ever changes — with the current wiring it is
+// unreachable. The `user:`/`ip:` prefixes namespace the two buckets
+// so a user id can never collide with someone's IP string.
+//
+// IPv6 note: the IP fallback funnels req.ip through `ipKeyGenerator`
+// (re-exported by express-rate-limit) instead of using the raw string.
+// Without it, express-rate-limit v8 throws ERR_ERL_KEY_GEN_IPV6 at
+// startup because a naive req.ip fallback would let an IPv6 client
+// rotate through every address in their /64 to bypass the bucket.
+// `ipKeyGenerator` collapses an IPv6 address to its /56 prefix and
+// passes IPv4 through unchanged, so a single host gets exactly one
+// bucket regardless of address family. This branch only fires if the
+// `authenticate` middleware ever stops running before the limiter,
+// but the helper is cheap and silences the validator unconditionally.
+const perUserSyncLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 3,              // 3 syncs per minute, per authenticated user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) =>
+    req.userId ? `user:${req.userId}` : `ip:${ipKeyGenerator(req.ip)}`,
+  message: { error: 'Demasiados pedidos de sync. Aguarda um momento.' },
+});
 
 /**
  * Return a plain-object copy of a CurveConfig with imap_password
@@ -120,7 +153,12 @@ router.put('/config', async (req, res) => {
 // Returns the orchestrator's summary contract verbatim, plus a top-level
 // `message` for the frontend toast. Concurrency: in-memory lock — a second
 // call while a sync is in progress returns 409 with SyncConflictError.
-router.post('/sync', async (req, res) => {
+//
+// Rate limits (hybrid, multi-user safe):
+//   - 10/min per IP  (server/src/index.js → syncLimiter, shared NAT cap)
+//   - 3/min per user (perUserSyncLimiter below, real abuse guard)
+// Both apply; whichever bucket empties first returns 429.
+router.post('/sync', perUserSyncLimiter, async (req, res) => {
   const dryRun = req.query.dry_run === '1' || req.query.dry_run === 'true';
   try {
     const config = await CurveConfig.findOne({ user_id: req.userId });
