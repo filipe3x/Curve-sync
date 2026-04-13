@@ -307,6 +307,18 @@ export async function pollDag({ userId }, overrides = {}) {
             // case where the user typed an alias but the mailbox is
             // actually at a different primary address.
             imap_username: account.username,
+            // Clear the stale "last sync errored" signal as soon as
+            // the wizard hands us fresh tokens. The dashboard's
+            // re-auth banner gate (DashboardPage.jsx → needsReauth)
+            // ORs `oauthStatus.connected === false` with
+            // `syncStatus.last_sync_status === 'error'`, so without
+            // this clear the banner kept firing after a successful
+            // re-auth until the user manually clicked "Sincronizar
+            // agora" to overwrite the field. From the user's POV that
+            // was wrong — they JUST proved the auth works. Setting
+            // back to `null` ("unknown until next sync") is the right
+            // semantic: the previous error is no longer informative.
+            last_sync_status: null,
           },
         },
       );
