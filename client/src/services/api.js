@@ -67,6 +67,23 @@ export const updateExpenseCategory = (id, category_id) =>
 // Categories (read-only)
 export const getCategories = () => request('/categories');
 
+// Spend aggregate over a cycle. `cycle` defaults to the day-22 current
+// cycle; pass `'previous'` for the one-back view, or `{start, end}`
+// for an explicit YYYY-MM-DD range. See docs/Categories.md §8.6 for
+// the response shape — the response always has `totals: []` and
+// `grand_total: 0` for users with no expenses in the window.
+export const getCategoryStats = ({ cycle, start, end } = {}) => {
+  const params = new URLSearchParams();
+  if (start && end) {
+    params.set('start', start);
+    params.set('end', end);
+  } else if (cycle) {
+    params.set('cycle', cycle);
+  }
+  const qs = params.toString();
+  return request(`/categories/stats${qs ? `?${qs}` : ''}`);
+};
+
 // Category overrides — personal matching rules. All four calls are
 // user-scoped on the server (docs/Categories.md §7.3): the caller only
 // ever sees or mutates their own rows, regardless of role. 404 from

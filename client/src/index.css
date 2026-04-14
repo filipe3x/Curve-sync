@@ -53,3 +53,20 @@
     @apply badge bg-amber-50 text-amber-700;
   }
 }
+
+/* Accessibility — kill every animation/transition for users who ask
+   for reduced motion. Covers all the keyframes registered in
+   tailwind.config.js (fade-in, fade-in-up, slide-in-right, grow-x)
+   so the `/categories` page and its cousins degrade to a static
+   layout without touching any component code. The count-up hook has
+   its own runtime guard via matchMedia — this block covers the CSS
+   side. See docs/Categories.md §9.8 #9. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

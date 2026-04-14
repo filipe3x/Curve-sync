@@ -14,11 +14,25 @@ const router = Router();
 // GET /api/expenses
 router.get('/', async (req, res) => {
   try {
-    const { page = 1, limit = 20, sort = '-date', search } = req.query;
+    const { page = 1, limit = 20, sort = '-date', search, category_id } = req.query;
     const filter = { user_id: req.userId };
     if (search) {
       const regex = new RegExp(search, 'i');
       filter.$or = [{ entity: regex }, { card: regex }];
+    }
+    // Narrow to a specific category. `null`/`uncategorised` (the
+    // literal strings) select the synthetic uncategorised bucket —
+    // the /categories page uses this to populate the "Despesas
+    // recentes" tab for each row, including the uncategorised one.
+    if (category_id) {
+      if (category_id === 'null' || category_id === 'uncategorised') {
+        filter.category_id = null;
+      } else if (mongoose.isValidObjectId(category_id)) {
+        filter.category_id = category_id;
+      }
+      // Any other value (malformed id) falls through — the user-scoped
+      // filter still applies, so nothing leaks. The client never
+      // sends a malformed id in practice.
     }
 
     const skip = (Number(page) - 1) * Number(limit);

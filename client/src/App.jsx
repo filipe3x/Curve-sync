@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
 import ExpensesPage from './pages/ExpensesPage';
+import CategoriesPage from './pages/CategoriesPage';
 import CurveConfigPage from './pages/CurveConfigPage';
 import CurveLogsPage from './pages/CurveLogsPage';
 import CurveSetupPage from './pages/CurveSetupPage';
@@ -48,6 +49,7 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/expenses" element={<ExpensesPage />} />
+                <Route path="/categories" element={<CategoriesPage />} />
                 <Route path="/curve/config" element={<CurveConfigPage />} />
                 <Route path="/curve/logs" element={<CurveLogsPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
