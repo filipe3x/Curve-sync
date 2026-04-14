@@ -1182,20 +1182,15 @@ escopo do MVP).
   por construção — re-correr após crash salta rows já correctas, e
   a linha de guarda `new_cat !== current` garante isso.
 - **Audit trail obrigatório.** Uma entrada em `curve_logs` por
-  execução:
-  ```json
-  {
-    "action": "apply_to_all",
-    "actor_id": "<user ou admin que clicou>",
-    "target_type": "override | global_entity",
-    "target_id": "<_id da regra editada>",
-    "scope": "personal | platform",
-    "affected_count": 42,
-    "before": { "<old_category_id>": 30, "<other_old>": 12 }
-  }
-  ```
-  O campo `before` é o snapshot `{ category_id → count }` que permite
-  undo numa fase futura.
+  execução, com `action: 'apply_to_all'` (item #32 do catálogo do
+  §13.2). O shape final segue o contrato do `CurveLog` actual
+  — sem schema extension — e empacota `scope`, `target`,
+  `affected`, `skipped_personal` no `error_detail` em formato
+  k=v space-separated. O snapshot `before` proposto nas primeiras
+  iterações deste capítulo ficou explicitamente de fora: é dead
+  weight enquanto o undo estiver out-of-scope (§6.10) e pode ser
+  reintroduzido como colecção dedicada quando o undo for
+  implementado. Ver §13.3 para a justificação detalhada.
 - **Idempotência por design.** Dois cliques seguidos no mesmo botão
   produzem o mesmo estado; o segundo run é no-op porque
   `resolveCategory` já devolve a categoria que lá está.
@@ -2085,7 +2080,11 @@ Dois casos onde faz sentido adicionar detail ao log:
   regra".
 
 Ambos são *opcionais* para o rollout inicial — o pipeline
-funciona sem eles.
+funciona sem eles. O catálogo completo de `action` values novos
+que **são** obrigatórios (apply-to-all, CRUD de categorias,
+CRUD de overrides, quick-edit) está consolidado no §13.2 — este
+capítulo só cobre as anotações ao sync path já existente, não os
+eventos administrativos.
 
 ### 10.6 Backwards-compat e shape idêntico
 
@@ -2671,3 +2670,238 @@ o popover do frontend é um rollback de uma linha (remover o
 - **A11y.** Navegação por teclado completa (Tab/Enter/Escape)
   no popover e no modal de confirmação, focus trap ao abrir,
   focus restore ao fechar (volta ao chip clicado).
+
+## 13. Auditoria e observabilidade
+
+Os capítulos 6, 7, 10 e 12 mencionam logs em várias situações
+(apply-to-all, 403 admin, override → name no `detail`, etc.) mas
+de forma dispersa. Este capítulo consolida toda a camada de
+auditoria numa única tabela de referência, alinhada com o contrato
+já existente em `docs/CURVE_LOGS.md`. O objectivo é triplo: (1)
+deixar rasto de qualquer decisão que mude a forma como uma
+despesa é categorizada, (2) dar visibilidade ao `/curve/logs`
+sobre actos administrativos raros (criar categoria, mover
+entidade) sem inventar uma UI nova, e (3) **não introduzir
+alterações ao schema do `CurveLog`** — tudo assenta no `action`
+enum actual + packing em `error_detail`.
+
+### 13.1 Porquê auditar — e o que justifica o custo
+
+- **Debug.** Quando um user pergunta "porque é que esta despesa
+  caiu em Groceries e não em Coffee?", o trail de logs tem de
+  permitir reconstruir a cadeia de decisões (que override
+  existia, quando foi criado, se houve apply-to-all no meio).
+- **Segurança.** Acções admin (criar/apagar categoria, adicionar
+  entidade ao catálogo global) afectam todos os users — são
+  exactamente as acções que um ataque queria fazer se obtivesse
+  escalada de privilégio.
+- **Undo futuro.** O §6.10 deixou o undo fora do escopo do MVP.
+  Mesmo sem ele ser implementado já, o log tem de guardar o
+  suficiente para um admin conseguir reverter manualmente (via
+  novo apply-to-all) com base no registo.
+- **Ruído controlado.** Nem tudo vale um log — o §13.4 lista o
+  que é deliberadamente *não* auditado para evitar poluir o
+  `/curve/logs`.
+
+### 13.2 Catálogo de novas `action` — tabela de referência
+
+Estas linhas estendem a tabela do `docs/CURVE_LOGS.md §4`. Todas
+as entradas têm `status: 'ok'` excepto se indicado. O formato de
+`error_detail` segue a convenção k=v space-separated (mesmo do
+`oauth_token_refreshed` existente), tudo passa pelo
+`truncateDetail` (120 chars) do `audit.js`.
+
+| # | `action` | Source | `status` | `ip` | `error_detail` content | Canonical pt-PT message |
+|---|----------|--------|----------|------|------------------------|-------------------------|
+| 23 | `category_created` | `routes/categories.js::POST /` (admin) | `ok` | yes | `name=<name> entity_count=<n>` | `"Categoria criada: <name>"` |
+| 24 | `category_updated` | `routes/categories.js::PUT /:id` (admin) | `ok` | yes | `name=<name> changed=<fields>` | `"Categoria actualizada: <name>"` |
+| 25 | `category_deleted` | `routes/categories.js::DELETE /:id` (admin) | `ok` | yes | `name=<name> expense_count=<n>` | `"Categoria apagada: <name>"` |
+| 26 | `category_entity_added` | `routes/categories.js::POST /:id/entities` (admin) | `ok` | yes | `category=<name> entities=<n>[,<n>…]` | `"Entidades adicionadas a <name>: <lista>"` |
+| 27 | `category_entity_removed` | `routes/categories.js::DELETE /:id/entities/:entity` (admin) | `ok` | yes | `category=<name> entity=<value>` | `"Entidade removida de <name>: <value>"` |
+| 28 | `category_entity_moved` | bulk move handler (admin) | `ok` | yes | `from=<name> to=<name> count=<n>` | `"Entidades movidas de <from> para <to>"` |
+| 29 | `override_created` | `routes/categoryOverrides.js::POST /` (user) | `ok` | yes | `pattern=<value> match_type=<type> category=<name>` | `"Regra pessoal criada: <pattern> → <category>"` |
+| 30 | `override_updated` | `routes/categoryOverrides.js::PUT /:id` (user) | `ok` | yes | `pattern=<value> category=<name> changed=<fields>` | `"Regra pessoal actualizada: <pattern> → <category>"` |
+| 31 | `override_deleted` | `routes/categoryOverrides.js::DELETE /:id` (user) | `ok` | yes | `pattern=<value> category=<name>` | `"Regra pessoal apagada: <pattern>"` |
+| 32 | `apply_to_all` | `routes/categoryOverrides.js::POST /:id/apply-to-all` + admin counterpart | `ok` | yes | `scope=<personal\|platform> target=<override\|category> affected=<n> skipped_personal=<n>` | `"Aplicado a <n> despesas: <pattern> → <category>"` |
+| 33 | `apply_to_all_failed` | mesma rota, catch | `error` | yes | `reason=<msg>` | `"Aplicação em massa falhou: <reason>"` |
+| 34 | `expense_category_changed` | `routes/expenses.js::PUT /:id/category` (user, §12.7) | `ok` | yes | `expense_id=<id> from=<name> to=<name> entity=<value>` | `"Despesa recategorizada: <entity> → <to>"` |
+| 35 | `admin_denied` | `middleware/requireAdmin.js` (§7.2) | `error` | yes | `method=<METHOD> path=<path>` | `"Acesso admin recusado: <method> <path>"` |
+
+**Notas sobre a tabela:**
+
+- O index 23 é o seguinte ao último de `CURVE_LOGS.md §4` (#22
+  = `first_sync_completed`). Ao adicionar, respeitar a sequência
+  para manter a tabela ordenada.
+- `category_entity_added` pode receber várias entidades no mesmo
+  POST (§8.3 permite `{ entities: [] }`). O `error_detail` lista
+  a primeira + contador total para respeitar os 120 chars:
+  `category=Groceries entities=lidl,continente,+3`.
+- `apply_to_all` **não usa `action: 'apply_to_all_failed'`** no
+  caminho de sucesso — só o caminho de erro tem o sufixo
+  `_failed`, como já é convenção pelo `audit.js §4.2`.
+- `expense_category_changed` é o único evento deste capítulo que
+  é **batched no frontend** (§13.5) — cada click no chip do §12
+  gera uma linha, mas o `describeLog` agrupa adjacentes do mesmo
+  dia para evitar flood.
+
+### 13.3 Schema do CurveLog — zero alterações
+
+Tudo assenta no que já existe:
+
+- **`action`** — adicionar as 13 novas entradas ao enum do
+  `server/src/models/CurveLog.js` (linha 19 do modelo actual).
+- **`user_id`** — já obrigatório, capta o `actor_id` implicitamente
+  (o user que chamou a rota). Para eventos admin, é o admin; para
+  eventos de override, é o dono do override.
+- **`error_detail`** — absorve toda a metadata estruturada (target
+  ids, counts, snapshots minimos) em formato k=v space-separated.
+  Truncado a 120 chars pelo helper existente.
+- **`expense_id`** — já existe no schema. Preenchido no
+  `expense_category_changed` (§34) com o `_id` da despesa. Para
+  `apply_to_all` fica `null` — a operação é multi-doc, não aponta
+  para uma única.
+- **`entity`** — preenchido no `expense_category_changed` e no
+  `override_*` com o valor raw do pattern / entidade. Dá ao
+  `/curve/logs` uma forma de filtrar por entidade sem parsear o
+  `error_detail`.
+
+**Porquê não adicionar `target_id`, `target_type`, `before`, etc.
+ao schema.** Três razões:
+
+1. **3-file footgun já documentado.** `CURVE_LOGS.md §4.3` avisa
+   que cada nova action exige 4 sítios actualizados. Adicionar
+   também campos novos multiplica a superfície de mudança.
+2. **Padrão pré-existente.** O `oauth_token_refreshed` já usa
+   `error_detail` como saco estruturado
+   (`"provider=microsoft accountId=… email=…"`). Seguir o padrão
+   é mais barato que inventar um novo.
+3. **Undo fica out-of-scope do MVP.** O "snapshot `before`"
+   proposto em §6.8 era condição para o undo — que está
+   explicitamente fora do escopo (§6.10). Sem undo, o snapshot
+   é dead weight. Quando o undo for implementado em fase futura,
+   a decisão de estender schema ou criar colecção dedicada
+   (`curve_apply_to_all_history`) fica para essa PR.
+
+### 13.4 O que NÃO é logado (deliberadamente)
+
+Ruído a evitar, com razão explícita:
+
+- **Leituras (GET).** `GET /api/categories`, `GET /api/category-
+  overrides`, `GET /api/categories/stats` — alto volume, baixo
+  valor informativo. Não deixam rasto.
+- **Edições admin em curso no ecrã `/categories`.** O autosave de
+  campo a campo (nome, ícone) não gera um log por keystroke —
+  só o `PUT` final consolidado gera um `category_updated`.
+- **Reordenações visuais.** Mudar a ordenação da lista do §9.3
+  é estado local do cliente, não toca no backend, não há log.
+- **Click no chip que fecha o popover sem guardar.** O §12.2
+  trata dismiss como no-op — `PUT` só acontece em `Guardar`.
+- **Apply-to-all em `dry_run: true`.** O preview do §8.5 não
+  escreve ao DB nem loga — é só uma query com
+  `$facet` ou equivalente, para o modal do §12.5 contar os
+  afectados.
+- **Eventos `expense_category_changed` consecutivos do mesmo user
+  e entity no mesmo segundo.** Raros (dupla-click) mas dedup
+  via `describeLog` no frontend (§13.5), não via supressão no
+  backend.
+
+### 13.5 Rendering no `/curve/logs` (delta do `CURVE_LOGS.md`)
+
+O `client/src/pages/curveLogsUtils.js::describeLog(log)` ganha
+os novos `case` correspondentes às acções da tabela §13.2. A
+`CURVE_LOGS.md §4.3` já avisa deste acoplamento — os novos
+labels aqui são a source of truth pt-PT (coluna "Canonical
+pt-PT message"), copiada verbatim no switch.
+
+**Batching.** O `groupSyncBatches` (`CURVE_LOGS.md §6.2`) agrupa
+hoje linhas `sync` adjacentes do mesmo user com `entity != null`.
+Proposta de extensão mínima:
+
+- `expense_category_changed` beneficia do mesmo agrupamento —
+  linhas adjacentes do mesmo user + `entity != null` do mesmo
+  dia ficam clustered como *"N despesas recategorizadas
+  manualmente"*.
+- `category_entity_added` com várias entidades no mesmo POST já
+  é uma única linha no backend (uma `audit()` call por POST,
+  não uma por entidade). Não precisa de batching client-side.
+- `apply_to_all` é sempre single row — o batching seria
+  contra-produtivo, cada execução merece visibilidade.
+
+**Filtros.** O `type=audit|sync` do §5 do `CURVE_LOGS.md` continua
+a funcionar porque `action != null` marca todos estes como audit
+rows. Proposta opcional: sub-filtro adicional
+`?action_prefix=category_|override_|apply_to_all|expense_` para
+o `/curve/logs` mostrar só eventos de categorização quando um
+admin está a debugar. Extensão pequena, não bloqueante.
+
+**Destaque visual.** As acções destrutivas (`category_deleted`,
+`apply_to_all`, `apply_to_all_failed`, `admin_denied`) ganham
+`bg-amber-50` ou `bg-red-50` consoante o `status`, consistente
+com o padrão de `CURVE_LOGS.md §6.3`. As criações (`created`,
+`added`) ficam com o neutral `bg-sand-100` — o acto em si é
+benigno.
+
+### 13.6 Retenção — consistente com `CURVE_LOGS.md §7`
+
+O TTL de 90 dias do `CurveLog` (`created_at` index) aplica-se a
+todos estes eventos sem excepção. Consequência importante: **o
+rasto de auditoria para apply-to-all desaparece 90 dias depois**.
+Para histórico permanente (compliance, forensic), seria preciso
+um job de archival para outra colecção — fora do escopo do MVP
+(§11.3 Fase 7).
+
+Mitigação para o período do MVP: o `updated_at` das próprias
+despesas re-catalogadas preserva a data da alteração para sempre
+(não há TTL nos `expenses`), portanto mesmo passados 90 dias é
+possível reconstruir quais despesas foram tocadas — só se perde
+o actor e a regra que despoletou. Aceitável para já.
+
+### 13.7 Checklist para implementação
+
+Ao adicionar os 13 `action` values novos, cumprir o "3-file
+footgun" de `CURVE_LOGS.md §4.3` **para cada um**:
+
+1. **`server/src/models/CurveLog.js`** — adicionar ao enum.
+2. **`server/src/services/audit.js`** — verificar a heurística
+   de status: `apply_to_all_failed` e `admin_denied` são
+   automáticos (contêm `failed` / são `*_denied`? ver §4.2 do
+   `CURVE_LOGS.md`). `admin_denied` **não** contém `failed` no
+   nome — adicionar branch explícito no helper, ou renomear
+   para `admin_access_failed`. Recomendação: renomear para
+   cumprir a convenção existente.
+3. **`client/src/pages/curveLogsUtils.js`** — adicionar os 13
+   `case` com os textos canónicos da tabela §13.2.
+4. **`docs/CURVE_LOGS.md §4`** — acrescentar as 13 linhas à
+   tabela de referência (ou linkar para esta §13.2 como source
+   of truth e evitar duplicação). Preferência: **link**, para
+   manter uma única fonte de verdade.
+
+**Correcção à tabela §13.2.** O item #35 `admin_denied` deve
+ser renomeado para `admin_access_failed` antes da implementação,
+para cumprir o mandato do `CURVE_LOGS.md §4.2` (heurística
+`includes('failed')`). O `action` canonical fica
+`admin_access_failed`; a mensagem pt-PT permanece `"Acesso
+admin recusado: <method> <path>"`.
+
+### 13.8 Resposta às perguntas do user
+
+- **"Há log quando altero a categoria em todas as despesas de uma
+  entidade?"** — Sim, item #32 `apply_to_all` da tabela §13.2.
+  Carrega `scope`, `target`, `affected`, `skipped_personal`, e
+  a canonical message mostra `"Aplicado a N despesas: <pattern>
+  → <category>"`. Falha catastrófica gera #33
+  `apply_to_all_failed`.
+- **"Há log quando uma entidade é associada a uma categoria?"** —
+  Depende de qual camada:
+  - **Admin adiciona ao catálogo global** → #26
+    `category_entity_added` (batch-capable, até N entidades por
+    POST).
+  - **User cria override pessoal** → #29 `override_created` com o
+    pattern no `error_detail`.
+  - **User faz quick-edit single-expense** → #34
+    `expense_category_changed`, com `entity`, `from`, `to` e
+    `expense_id`.
+- **"Que logs consideras importantes?"** — Todos os 13 da
+  tabela §13.2 têm justificação no §13.1 (debug, segurança,
+  undo futuro). A §13.4 lista o que deliberadamente fica de
+  fora para não poluir o `/curve/logs`.
