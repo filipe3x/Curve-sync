@@ -55,6 +55,15 @@ export const getExpenses = (params) =>
 export const createExpense = (data) =>
   request('/expenses', { method: 'POST', body: JSON.stringify(data) });
 
+// Single-expense quick-edit path (docs/Categories.md §12.7). Accepts
+// a category_id or null to clear the association. Returns the
+// enriched expense (`{ data: { ...expense, category_name } }`).
+export const updateExpenseCategory = (id, category_id) =>
+  request(`/expenses/${id}/category`, {
+    method: 'PUT',
+    body: JSON.stringify({ category_id }),
+  });
+
 // Categories (read-only)
 export const getCategories = () => request('/categories');
 

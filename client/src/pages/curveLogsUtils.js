@@ -24,7 +24,15 @@ export function describeLog(log) {
   // ---- Audit events (action != null) ----
   if (log.action) {
     const auth = ['login', 'login_failed', 'logout', 'session_expired', 'password_changed'];
-    const type = auth.includes(log.action) ? 'auth' : 'sistema';
+    // `despesa` for category-management rows so the badge colour is
+    // consistent with the chip they originated from on /expenses and /.
+    // Source: docs/Categories.md §13.5.
+    const despesaActions = ['expense_category_changed'];
+    const type = auth.includes(log.action)
+      ? 'auth'
+      : despesaActions.includes(log.action)
+        ? 'despesa'
+        : 'sistema';
 
     switch (log.action) {
       case 'login':            return { type, title: 'Login efectuado' };
@@ -47,6 +55,24 @@ export function describeLog(log) {
         return { type, title: `Autorização falhou${log.error_detail ? `: ${log.error_detail}` : ''}` };
       case 'oauth_token_refreshed':  return { type, title: 'Token Microsoft renovado automaticamente' };
       case 'first_sync_completed':   return { type, title: 'Primeira sincronização concluída' };
+      case 'expense_category_changed': {
+        // docs/Categories.md §13.2 #34 — canonical pt-PT:
+        // "Despesa recategorizada: <entity> → <to>"
+        //
+        // `error_detail` follows the k=v convention ("from=X to=Y").
+        // We display the `to` side because that's what the user is
+        // going to look for when scanning history; the `from` is
+        // useful context but would bloat the row.
+        const toMatch = log.error_detail?.match(/to=([^\s]+)/);
+        const to = toMatch ? toMatch[1] : null;
+        const entity = log.entity ?? '—';
+        return {
+          type,
+          title: to
+            ? `Despesa recategorizada: ${entity} → ${to}`
+            : `Despesa recategorizada: ${entity}`,
+        };
+      }
       default:                       return { type, title: log.action };
     }
   }
@@ -86,6 +112,15 @@ export function describeLog(log) {
 
 // Groups consecutive expense rows (action == null && entity != null)
 // that landed within BATCH_WINDOW_MS into a single batch entry.
+//
+// `expense_category_changed` rows (docs/Categories.md §13.2 #34) have
+// `action != null` so they fall through to `{ kind: 'single' }` by
+// design — each manual recategorisation surfaces as its own line for
+// now. §13.5 proposes clustering adjacent recat rows into
+// "N despesas recategorizadas manualmente" but that needs the batch
+// renderer in CurveLogsPage.jsx to understand two batch flavours
+// (sync vs recat), which is out of scope for PR #1. Revisit once
+// users start complaining about flood.
 //
 // Input  : logs sorted newest-first by created_at (the API contract).
 // Output : array of { kind: 'single', log } | { kind: 'batch', logs, summary, key }

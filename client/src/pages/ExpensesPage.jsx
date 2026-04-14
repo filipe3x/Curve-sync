@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
+import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
 
@@ -12,6 +13,18 @@ export default function ExpensesPage() {
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  // Category catalogue for the <CategoryPickerPopover>. Loaded once on
+  // mount; the list is small (§5.5 assumes ≤ 30 entries) and static
+  // within a page lifetime, so there's no reason to refetch per click.
+  // Failures are silent — the popover's empty-state covers them.
+  const [categories, setCategories] = useState([]);
+  // Which row has the popover open. Single-open-at-a-time by design;
+  // the popover is a focused modal-ish interaction and two of them on
+  // screen would muddle the "click outside to dismiss" heuristic.
+  const [pickerExpenseId, setPickerExpenseId] = useState(null);
+  const [pickerSaving, setPickerSaving] = useState(false);
+  // Inline toast. null = silent, { type: 'ok'|'error', text } otherwise.
+  const [toast, setToast] = useState(null);
 
   const fetchExpenses = async () => {
     setLoading(true);
@@ -35,6 +48,61 @@ export default function ExpensesPage() {
     fetchExpenses();
   }, [page]);
 
+  useEffect(() => {
+    api
+      .getCategories()
+      .then((res) => setCategories(res.data ?? []))
+      .catch(() => setCategories([]));
+  }, []);
+
+  // Quick-edit save: optimistic update first, then PUT, then rollback
+  // on failure. Matches the flow described in docs/Categories.md §12.4
+  // (default "inofensivo" path). `category_id` may be null to clear.
+  const handleCategorySave = async (expenseId, newCategoryId) => {
+    const prev = expenses;
+    // Optimistic: swap the chip name immediately. We don't know the
+    // new category_name locally yet, so look it up from the catalogue
+    // and fall back to `—` for null.
+    const newCategoryName = newCategoryId
+      ? categories.find((c) => String(c._id) === String(newCategoryId))?.name ?? null
+      : null;
+    setExpenses((rows) =>
+      rows.map((e) =>
+        e._id === expenseId
+          ? { ...e, category_id: newCategoryId, category_name: newCategoryName }
+          : e,
+      ),
+    );
+    setPickerSaving(true);
+    try {
+      const res = await api.updateExpenseCategory(expenseId, newCategoryId);
+      // Authoritative update from the server — mostly to keep
+      // `updated_at` in sync and catch the edge case where the name
+      // lookup missed (race with a category being renamed elsewhere).
+      setExpenses((rows) =>
+        rows.map((e) => (e._id === expenseId ? { ...e, ...res.data } : e)),
+      );
+      setToast({ type: 'ok', text: 'Categoria actualizada.' });
+      setPickerExpenseId(null);
+    } catch (err) {
+      // Rollback to the pre-click snapshot so the chip reverts.
+      setExpenses(prev);
+      setToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível actualizar a categoria.',
+      });
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  // Auto-dismiss ok toasts; keep errors visible until the user acts.
+  useEffect(() => {
+    if (toast?.type !== 'ok') return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   const handleSearch = (e) => {
     e.preventDefault();
     setPage(1);
@@ -46,6 +114,23 @@ export default function ExpensesPage() {
   return (
     <>
       <PageHeader title="Despesas" description="Todas as despesas importadas" />
+
+      {/* Inline toast — surfaces optimistic-update success / failure for
+          the quick-edit popover (docs/Categories.md §12.8). Green on
+          success auto-dismisses after 4 s; errors stay until the next
+          action so the user can read the reason. */}
+      {toast && (
+        <div
+          className={`mb-4 animate-slide-in-right rounded-2xl px-4 py-3 text-sm ${
+            toast.type === 'ok'
+              ? 'bg-emerald-50 text-emerald-800'
+              : 'bg-red-50 text-curve-700'
+          }`}
+          role={toast.type === 'error' ? 'alert' : 'status'}
+        >
+          {toast.text}
+        </div>
+      )}
 
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">
@@ -84,30 +169,54 @@ export default function ExpensesPage() {
               </tr>
             </thead>
             <tbody>
-              {expenses.map((exp, i) => (
-                <tr
-                  key={exp._id ?? i}
-                  className="border-b border-sand-50 transition-colors duration-150 hover:bg-sand-50"
-                >
-                  <td className="px-5 py-3 font-medium text-sand-900">
-                    {exp.entity}
-                  </td>
-                  <td className="px-5 py-3 font-semibold text-curve-700">
-                    €{Number(exp.amount).toFixed(2)}
-                  </td>
-                  <td className="px-5 py-3 text-sand-500">{exp.date}</td>
-                  <td className="px-5 py-3 text-sand-500">{exp.card}</td>
-                  <td className="px-5 py-3">
-                    {exp.category_name ? (
-                      <span className="badge bg-sand-100 text-sand-600">
-                        {exp.category_name}
-                      </span>
-                    ) : (
-                      <span className="text-sand-300">—</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {expenses.map((exp, i) => {
+                const pickerOpen = pickerExpenseId === exp._id;
+                return (
+                  <tr
+                    key={exp._id ?? i}
+                    className="border-b border-sand-50 transition-colors duration-150 hover:bg-sand-50"
+                  >
+                    <td className="px-5 py-3 font-medium text-sand-900">
+                      {exp.entity}
+                    </td>
+                    <td className="px-5 py-3 font-semibold text-curve-700">
+                      €{Number(exp.amount).toFixed(2)}
+                    </td>
+                    <td className="px-5 py-3 text-sand-500">{exp.date}</td>
+                    <td className="px-5 py-3 text-sand-500">{exp.card}</td>
+                    <td className="relative px-5 py-3">
+                      <button
+                        type="button"
+                        onClick={() => setPickerExpenseId(exp._id)}
+                        className="rounded-lg text-left transition-colors hover:bg-sand-100 focus:outline-none focus:ring-2 focus:ring-curve-500/30"
+                        aria-label={`Alterar categoria de ${exp.entity}`}
+                      >
+                        {exp.category_name ? (
+                          <span className="badge bg-sand-100 text-sand-600">
+                            {exp.category_name}
+                          </span>
+                        ) : (
+                          <span className="px-2 text-sand-300">—</span>
+                        )}
+                      </button>
+                      {pickerOpen && (
+                        <CategoryPickerPopover
+                          expense={exp}
+                          categories={categories}
+                          saving={pickerSaving}
+                          onSelect={(newId) =>
+                            handleCategorySave(exp._id, newId)
+                          }
+                          onCancel={() => {
+                            if (pickerSaving) return;
+                            setPickerExpenseId(null);
+                          }}
+                        />
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
 

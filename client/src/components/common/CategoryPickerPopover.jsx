@@ -1,0 +1,246 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { MagnifyingGlassIcon } from '../layout/Icons';
+
+/**
+ * <CategoryPickerPopover>
+ *
+ * Single-expense quick-edit popover (docs/Categories.md §12.2-§12.4).
+ *
+ * Trigger: click on a category chip in the /expenses or / table.
+ * Action:  reassigns a single expense to a different category via
+ *          PUT /api/expenses/:id/category. No entity-wide checkbox
+ *          in this PR — the opt-in path of §12.5 lands with the
+ *          override/apply-to-all phase.
+ *
+ * Focus + dismissal:
+ *   - Mount focuses the search input.
+ *   - `Escape` or click outside calls `onCancel`.
+ *   - `Tab` naturally cycles through children inside the panel — no
+ *     explicit focus trap because the popover is small and flat, and
+ *     the surrounding table still needs to tab out if the user dismisses
+ *     the popover mid-interaction.
+ *
+ * Props:
+ *   @param {Object} expense
+ *     The expense whose chip was clicked. Needs `_id`, `entity`, and
+ *     optionally `category_id` + `category_name` for pre-selection.
+ *   @param {Array}  categories
+ *     Pre-loaded category catalogue. The parent page calls
+ *     `api.getCategories()` once on mount and passes the list in —
+ *     avoids a round-trip per click.
+ *   @param {Function} onSelect(categoryId | null)
+ *     Called when the user clicks Save with a changed selection. The
+ *     parent handles the PUT, optimistic update and rollback.
+ *   @param {Function} onCancel()
+ *     Called on Escape, click-outside, or the × button.
+ *   @param {boolean} [saving]
+ *     Parent-controlled spinner state. The popover disables the Save
+ *     button and shows "A guardar..." while truthy.
+ */
+export default function CategoryPickerPopover({
+  expense,
+  categories,
+  onSelect,
+  onCancel,
+  saving = false,
+}) {
+  const panelRef = useRef(null);
+  const searchRef = useRef(null);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState(
+    expense?.category_id ? String(expense.category_id) : null,
+  );
+
+  // Focus the search box on mount — users landing in the popover via a
+  // click expect to type-to-filter immediately. Restore focus to the
+  // opener on dismiss is handled by the parent via <button> focus
+  // inheritance (the popover lives inside the same cell, so
+  // `document.activeElement` naturally returns to the chip button).
+  useEffect(() => {
+    searchRef.current?.focus();
+  }, []);
+
+  // Dismiss on Escape + click outside. Both paths call onCancel so the
+  // parent can close the popover uniformly.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onCancel?.();
+      }
+    };
+    const onPointerDown = (e) => {
+      if (panelRef.current && !panelRef.current.contains(e.target)) {
+        onCancel?.();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    // `mousedown` fires before any click handlers inside the popover,
+    // which is what we want: clicking a chip inside the panel should
+    // not count as "click outside".
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [onCancel]);
+
+  // Client-side filter. The catalogue is tiny (§5.5 assumes ≤30
+  // globals), so a simple includes() beats any fancy matcher.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return categories;
+    return categories.filter((c) => c.name.toLowerCase().includes(q));
+  }, [categories, query]);
+
+  const currentId = expense?.category_id ? String(expense.category_id) : null;
+  const changed = selected !== currentId;
+  const canSave = changed && !saving;
+
+  const handleSave = () => {
+    if (!canSave) return;
+    onSelect?.(selected);
+  };
+
+  return (
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label="Alterar categoria"
+      className="absolute right-0 top-full z-30 mt-2 w-80 rounded-2xl border border-sand-200 bg-white p-4 shadow-lg animate-fade-in"
+      // Keep clicks inside the popover from bubbling up to the table
+      // row — the row's hover state should not flicker while the user
+      // navigates inside the picker.
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-sand-900">
+          Alterar categoria
+        </h3>
+        <button
+          type="button"
+          aria-label="Fechar"
+          onClick={onCancel}
+          className="rounded-full p-1 text-sand-400 transition-colors hover:bg-sand-100 hover:text-sand-700"
+        >
+          {/* inline × — lighter than pulling heroicons for one glyph */}
+          <svg
+            className="h-4 w-4"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M6 18 18 6M6 6l12 12"
+            />
+          </svg>
+        </button>
+      </div>
+
+      {/* Search */}
+      <div className="relative mb-3">
+        <MagnifyingGlassIcon className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-sand-400" />
+        <input
+          ref={searchRef}
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Procurar…"
+          className="input pl-10 text-sm"
+        />
+      </div>
+
+      {/* Chip grid */}
+      {categories.length === 0 ? (
+        <p className="py-6 text-center text-xs text-sand-400">
+          Sem categorias — pede ao admin para criar.
+        </p>
+      ) : filtered.length === 0 ? (
+        <p className="py-6 text-center text-xs text-sand-400">
+          Nenhuma categoria corresponde a "{query}".
+        </p>
+      ) : (
+        <div className="grid max-h-64 grid-cols-3 gap-2 overflow-y-auto pb-1">
+          {filtered.map((cat, i) => {
+            const id = String(cat._id);
+            const isSelected = selected === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setSelected(id)}
+                className={`flex aspect-square flex-col items-center justify-center gap-1 rounded-xl border p-2 text-center transition-all duration-150 active:scale-[0.97] animate-fade-in ${
+                  isSelected
+                    ? 'border-curve-400 bg-curve-50 ring-2 ring-curve-500'
+                    : 'border-sand-200 bg-sand-50 hover:bg-sand-100'
+                }`}
+                style={{ animationDelay: `${i * 30}ms` }}
+              >
+                <span
+                  className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold uppercase ${
+                    isSelected
+                      ? 'bg-curve-500 text-white'
+                      : 'bg-sand-200 text-sand-700'
+                  }`}
+                  aria-hidden
+                >
+                  {cat.name.slice(0, 1)}
+                </span>
+                <span className="line-clamp-2 text-[11px] font-medium leading-tight text-sand-900">
+                  {cat.name}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* "Sem categoria" row — matches the §12.9 uncategorised path.
+          Offered as an explicit action because the grid itself cannot
+          represent "nothing". */}
+      {categories.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setSelected(null)}
+          className={`mt-2 w-full rounded-lg border px-3 py-2 text-xs transition-colors ${
+            selected === null
+              ? 'border-curve-400 bg-curve-50 text-curve-800 ring-1 ring-curve-500'
+              : 'border-sand-200 bg-white text-sand-500 hover:bg-sand-50'
+          }`}
+        >
+          Sem categoria
+        </button>
+      )}
+
+      {/* Footer */}
+      <div className="mt-4 flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-lg px-3 py-1.5 text-sm text-sand-600 transition-colors hover:bg-sand-100"
+          disabled={saving}
+        >
+          Cancelar
+        </button>
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!canSave}
+          className="btn-primary px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? (
+            <>
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              A guardar…
+            </>
+          ) : (
+            'Guardar'
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}

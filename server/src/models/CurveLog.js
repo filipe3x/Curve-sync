@@ -44,6 +44,16 @@ const curveLogSchema = new mongoose.Schema(
       //                            end-to-end happy path for new users.
       'oauth_start', 'oauth_completed', 'oauth_cancelled', 'oauth_failed',
       'oauth_token_refreshed', 'first_sync_completed',
+      // Category management (docs/Categories.md §13.2). PR #1 of the
+      // roadmap only ships the single-expense quick-edit path; the other
+      // 12 action values (category_created, override_*, apply_to_all, …)
+      // are added in later phases when their routes land.
+      //   expense_category_changed — user clicked the chip in the
+      //     `/expenses` or `/` table and reassigned a single expense to
+      //     a different category via PUT /api/expenses/:id/category
+      //     (§12.7). Carries `expense_id`, `entity`, and
+      //     `error_detail = "from=<name> to=<name>"`.
+      'expense_category_changed',
     ]},
     ip: String,
   },

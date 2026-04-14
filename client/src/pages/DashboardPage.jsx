@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import StatCard from '../components/common/StatCard';
 import EmptyState from '../components/common/EmptyState';
+import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
 
@@ -45,6 +46,13 @@ export default function DashboardPage() {
   const [error, setError] = useState(null);
   const [syncStatus, setSyncStatus] = useState(null);
   const [oauthStatus, setOauthStatus] = useState(null);
+  // Category catalogue + popover state for the quick-edit chip on the
+  // "Despesas recentes" table. Mirrors ExpensesPage so the same
+  // component handles both entry points from docs/Categories.md §12.
+  const [categories, setCategories] = useState([]);
+  const [pickerExpenseId, setPickerExpenseId] = useState(null);
+  const [pickerSaving, setPickerSaving] = useState(false);
+  const [categoryToast, setCategoryToast] = useState(null);
   // Short-lived inline message for the sync button — success summary
   // or non-banner error. The re-auth banner handles OAuth breakage;
   // this covers everything else (parse errors, IMAP folder gone, etc.)
@@ -76,7 +84,53 @@ export default function DashboardPage() {
     // swallowed — the banner just stays hidden. The dashboard must
     // not become a hostage to /oauth/status being unreachable.
     refreshStatuses();
+
+    // Category catalogue for the quick-edit popover — tiny payload,
+    // failures are silent (popover just shows an empty state).
+    api
+      .getCategories()
+      .then((res) => setCategories(res.data ?? []))
+      .catch(() => setCategories([]));
   }, []);
+
+  // Quick-edit save with optimistic update + rollback. Mirrors the
+  // ExpensesPage helper; see docs/Categories.md §12.4.
+  const handleCategorySave = async (expenseId, newCategoryId) => {
+    const prev = recentExpenses;
+    const newCategoryName = newCategoryId
+      ? categories.find((c) => String(c._id) === String(newCategoryId))?.name ?? null
+      : null;
+    setRecentExpenses((rows) =>
+      rows.map((e) =>
+        e._id === expenseId
+          ? { ...e, category_id: newCategoryId, category_name: newCategoryName }
+          : e,
+      ),
+    );
+    setPickerSaving(true);
+    try {
+      const res = await api.updateExpenseCategory(expenseId, newCategoryId);
+      setRecentExpenses((rows) =>
+        rows.map((e) => (e._id === expenseId ? { ...e, ...res.data } : e)),
+      );
+      setCategoryToast({ type: 'ok', text: 'Categoria actualizada.' });
+      setPickerExpenseId(null);
+    } catch (err) {
+      setRecentExpenses(prev);
+      setCategoryToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível actualizar a categoria.',
+      });
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (categoryToast?.type !== 'ok') return;
+    const t = setTimeout(() => setCategoryToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [categoryToast]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -226,6 +280,21 @@ export default function DashboardPage() {
           Despesas recentes
         </h2>
 
+        {/* Quick-edit popover feedback — mirrors ExpensesPage so the
+            two entry points surface identically (§12.8). */}
+        {categoryToast && (
+          <div
+            className={`mb-4 animate-slide-in-right rounded-2xl px-4 py-3 text-sm ${
+              categoryToast.type === 'ok'
+                ? 'bg-emerald-50 text-emerald-800'
+                : 'bg-red-50 text-curve-700'
+            }`}
+            role={categoryToast.type === 'error' ? 'alert' : 'status'}
+          >
+            {categoryToast.text}
+          </div>
+        )}
+
         {error && (
           <p className="mb-4 text-sm text-curve-600">{error}</p>
         )}
@@ -248,31 +317,55 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {recentExpenses.map((exp, i) => (
-                  <tr
-                    key={exp._id ?? i}
-                    className="border-b border-sand-50 transition-colors duration-150 hover:bg-sand-50"
-                    style={{ animationDelay: `${i * 60}ms` }}
-                  >
-                    <td className="px-5 py-3 font-medium text-sand-900">
-                      {exp.entity}
-                    </td>
-                    <td className="px-5 py-3 text-curve-700 font-semibold">
-                      €{Number(exp.amount).toFixed(2)}
-                    </td>
-                    <td className="px-5 py-3 text-sand-500">{exp.date}</td>
-                    <td className="px-5 py-3 text-sand-500">{exp.card}</td>
-                    <td className="px-5 py-3">
-                      {exp.category_name ? (
-                        <span className="badge bg-sand-100 text-sand-600">
-                          {exp.category_name}
-                        </span>
-                      ) : (
-                        <span className="text-sand-300">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {recentExpenses.map((exp, i) => {
+                  const pickerOpen = pickerExpenseId === exp._id;
+                  return (
+                    <tr
+                      key={exp._id ?? i}
+                      className="border-b border-sand-50 transition-colors duration-150 hover:bg-sand-50"
+                      style={{ animationDelay: `${i * 60}ms` }}
+                    >
+                      <td className="px-5 py-3 font-medium text-sand-900">
+                        {exp.entity}
+                      </td>
+                      <td className="px-5 py-3 text-curve-700 font-semibold">
+                        €{Number(exp.amount).toFixed(2)}
+                      </td>
+                      <td className="px-5 py-3 text-sand-500">{exp.date}</td>
+                      <td className="px-5 py-3 text-sand-500">{exp.card}</td>
+                      <td className="relative px-5 py-3">
+                        <button
+                          type="button"
+                          onClick={() => setPickerExpenseId(exp._id)}
+                          className="rounded-lg text-left transition-colors hover:bg-sand-100 focus:outline-none focus:ring-2 focus:ring-curve-500/30"
+                          aria-label={`Alterar categoria de ${exp.entity}`}
+                        >
+                          {exp.category_name ? (
+                            <span className="badge bg-sand-100 text-sand-600">
+                              {exp.category_name}
+                            </span>
+                          ) : (
+                            <span className="px-2 text-sand-300">—</span>
+                          )}
+                        </button>
+                        {pickerOpen && (
+                          <CategoryPickerPopover
+                            expense={exp}
+                            categories={categories}
+                            saving={pickerSaving}
+                            onSelect={(newId) =>
+                              handleCategorySave(exp._id, newId)
+                            }
+                            onCancel={() => {
+                              if (pickerSaving) return;
+                              setPickerExpenseId(null);
+                            }}
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
