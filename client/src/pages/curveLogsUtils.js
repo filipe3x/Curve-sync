@@ -73,6 +73,51 @@ export function describeLog(log) {
             : `Despesa recategorizada: ${entity}`,
         };
       }
+      case 'apply_to_all': {
+        // docs/Categories.md §13.2 #32 — canonical pt-PT:
+        // "Aplicado a <n> despesas: <pattern> → <category>"
+        //
+        // The server writes `error_detail = "scope=personal
+        // target=override affected=<n> skipped_personal=0
+        // category=<name>"` and mirrors the raw pattern into
+        // `entity`. `affected=` is the number of rows actually
+        // rewritten; `category=` is at the tail so it may contain
+        // spaces — the regex stops at end-of-string to capture it.
+        const pattern = log.entity ?? '—';
+        const affectedMatch = log.error_detail?.match(/affected=(\d+)/);
+        const catMatch = log.error_detail?.match(/category=(.+)$/);
+        const affected = affectedMatch ? Number(affectedMatch[1]) : null;
+        const category = catMatch ? catMatch[1] : null;
+        // "1 despesa" vs "N despesas" — the singular form matters
+        // for the dry-run preview that shows "1 despesa" after
+        // surgical edits. Portuguese pluralisation is regular here.
+        const noun = affected === 1 ? 'despesa' : 'despesas';
+        if (affected !== null && category) {
+          return {
+            type,
+            title: `Aplicado a ${affected} ${noun}: ${pattern} → ${category}`,
+          };
+        }
+        return { type, title: `Aplicado a ${pattern}` };
+      }
+      case 'apply_to_all_failed': {
+        // docs/Categories.md §13.2 #33 — canonical pt-PT:
+        // "Aplicação em massa falhou: <reason>"
+        //
+        // `error_detail` starts with `reason=<msg>` and may carry
+        // `pattern=` / `category=` tail for correlation; we surface
+        // only the reason in the title. `audit.js` sets
+        // `status: 'error'` on any action that `includes('failed')`,
+        // so the badge colour is already "error" at the renderer.
+        const reasonMatch = log.error_detail?.match(/reason=([^]*?)(?: pattern=|$)/);
+        const reason = reasonMatch ? reasonMatch[1] : null;
+        return {
+          type,
+          title: reason
+            ? `Aplicação em massa falhou: ${reason}`
+            : 'Aplicação em massa falhou',
+        };
+      }
       case 'override_created':
       case 'override_updated':
       case 'override_deleted': {

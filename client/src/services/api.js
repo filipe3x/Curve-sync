@@ -89,6 +89,32 @@ export const updateCategoryOverride = (id, data) =>
 export const deleteCategoryOverride = (id) =>
   request(`/category-overrides/${id}`, { method: 'DELETE' });
 
+// Apply-to-all: retroactively re-run the resolver against every
+// expense owned by the caller and rewrite `category_id` wherever the
+// new verdict differs. See docs/Categories.md §6 and §8.5.
+//
+// - `dryRun: true` returns a preview with `matched`, `updated: 0`,
+//   and up to 10 `samples` (entity + date + current/new category
+//   names). Safe to call on every save to drive the "Aplicar a N
+//   despesas passadas" CTA in the UI.
+// - `dryRun: false` (default) writes through `reassignCategoryBulk`
+//   and emits an `apply_to_all` audit row.
+//
+// 404 override_not_found covers missing and cross-user ids (§7.5).
+// The server scopes every query to `req.userId`, so the caller never
+// needs to pass `user_id` from the client.
+export const applyCategoryOverride = (id, { dryRun = false } = {}) =>
+  request(`/category-overrides/${id}/apply-to-all`, {
+    method: 'POST',
+    body: JSON.stringify({ dry_run: dryRun }),
+    // Bulk re-validation over every user expense is not bounded by
+    // a coarse filter in the MVP (§6.6 — full scan was simpler than
+    // a provably permissive regex). Give the request enough slack
+    // for a ~10k-expense scan without tripping the default fetch
+    // timeout.
+    timeoutMs: 30_000,
+  });
+
 // Curve Config
 export const getCurveConfig = () => request('/curve/config');
 

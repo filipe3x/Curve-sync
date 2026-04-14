@@ -59,8 +59,21 @@ const curveLogSchema = new mongoose.Schema(
       //     the endpoints are usable via API right away. Carry
       //     `entity` (the raw pattern) and `error_detail` with the
       //     pattern + match_type + category name per §13.2 #29-31.
+      //   apply_to_all / apply_to_all_failed — retroactive
+      //     recategorisation via POST /api/category-overrides/:id/
+      //     apply-to-all. Success carries
+      //     `error_detail = "scope=personal target=override
+      //     affected=<n> skipped_personal=0 category=<name>"` and
+      //     `entity` = raw pattern, so the renderer can build the
+      //     §13.2 #32 pt-PT message without parsing
+      //     (`skipped_personal` stays 0 on the personal path —
+      //     shape parity with the admin variant that lands in
+      //     Fase 3). Failure carries `reason=<msg>` and inherits
+      //     `status: 'error'` from the audit helper heuristic
+      //     (`includes('failed')`).
       'expense_category_changed',
       'override_created', 'override_updated', 'override_deleted',
+      'apply_to_all', 'apply_to_all_failed',
     ]},
     ip: String,
   },

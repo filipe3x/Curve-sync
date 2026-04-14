@@ -2,7 +2,13 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import CategoryOverride from '../models/CategoryOverride.js';
 import Category from '../models/Category.js';
-import { normalize } from '../services/categoryResolver.js';
+import Expense from '../models/Expense.js';
+import {
+  loadContext,
+  normalize,
+  resolveCategory,
+} from '../services/categoryResolver.js';
+import { reassignCategoryBulk } from '../services/expense.js';
 import { audit, clientIp } from '../services/audit.js';
 
 /**
@@ -345,6 +351,206 @@ router.delete('/:id', async (req, res) => {
     });
 
     res.status(204).end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/category-overrides/:id/apply-to-all
+//
+// Retroactive recategorisation for a personal override. Re-runs the
+// full resolver (§5) over every expense owned by the caller and
+// rewrites `category_id` wherever the new verdict differs from the
+// stored value. Scope is ALWAYS the caller's own expenses — a user
+// never touches another user's rows, even on the admin path (§6.10).
+//
+// Invariants preserved by construction (§6.5, §6.8):
+//   - "Personal is sacred" emerges for free: a more-specific override
+//     that already wins inside resolveCategory keeps winning, so the
+//     bulk pass will skip those rows on its own — no special case.
+//   - Idempotent: two consecutive runs produce the same state because
+//     the second run finds current === next on every candidate.
+//   - Uses `reassignCategoryBulk` (§4.4) as the ONLY write surface
+//     into `expenses.category_id`. No `updateMany` calls here.
+//
+// Body / query:
+//   { dry_run: true }  or  ?dry_run=true
+//     → returns `{ matched, updated: 0, samples: [...up to 10] }`
+//       with before/after category names, no writes, no audit row.
+//   (default) → writes + audit row.
+//
+// Response shape (§6.4 + §8.5):
+//   200 { data: { dry_run, matched, updated, samples? } }
+//   404 override_not_found  (missing or cross-user, §7.5)
+//   500 on partial failure — any already-applied group stays applied;
+//       an `apply_to_all_failed` audit row captures the reason.
+//
+// Candidate set: `Expense.find({ user_id })` with NO coarse regex
+// pre-filter. §6.6 allows a pre-filter to narrow the scan, but
+// designing one that's provably permissive against the normalise()
+// pipeline (accent-fold + punctuation-to-space + lowercase) is tricky
+// — a naive `pattern` regex produces false NEGATIVES on entities like
+// "LIDL — CASCAIS" vs pattern "lidl cascais". At MVP scale (<10k
+// expenses/user, §6.7 <100 ms budget) a user-scoped full scan is both
+// simpler and provably correct. Revisit the pre-filter when a real
+// user hits the perf wall.
+//
+// Rate limiting (§8.5 → `429 apply_to_all_rate_limited`) is NOT
+// implemented in the MVP — there is no rate-limit scaffolding in the
+// codebase yet, and apply-to-all is a human-initiated single click.
+// Add when scaffolding lands.
+// ─────────────────────────────────────────────────────────────────────
+router.post('/:id/apply-to-all', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'override_not_found' });
+    }
+
+    // Cross-user access returns 404 per §7.5 — same posture as the
+    // other handlers in this file.
+    const override = await CategoryOverride.findOne({
+      _id: id,
+      user_id: req.userId,
+    }).lean();
+    if (!override) {
+      return res.status(404).json({ error: 'override_not_found' });
+    }
+
+    // `dry_run` accepts body or query form. Body is the documented
+    // shape (§8.5); query form is a convenience for GET-like curl
+    // probing and matches §6.4 where the preview is described as a
+    // dry-run of the same endpoint.
+    const dryRun =
+      req.body?.dry_run === true ||
+      req.query?.dry_run === 'true' ||
+      req.query?.dry_run === '1';
+
+    // One `loadContext` call. This is the critical re-validation
+    // input: every candidate runs through `resolveCategory(entity,
+    // ctx)` with the user's FULL override set, which is why personal
+    // more-specific rules survive a broader apply-to-all — the
+    // resolver's own tie-break keeps them winning (§6.5 "A
+    // re-validação é crítica").
+    const ctx = await loadContext(req.userId);
+
+    // Full user-scoped scan — see the header comment for the
+    // no-coarse-filter decision. `select` keeps the payload small;
+    // no need to load `card`, `digest`, `amount`, etc. for a re-match.
+    const candidates = await Expense.find({ user_id: req.userId })
+      .select('_id entity category_id date')
+      .lean();
+
+    // Re-validate + group. `diffs` captures every expense whose
+    // current category differs from the resolver's current verdict;
+    // `grouped` buckets them by TARGET category so each
+    // `reassignCategoryBulk` call is one round trip with `$in: [...]`.
+    //
+    // `null` is a valid target (uncategorise) — we key it as the
+    // literal string `'__null__'` in the map to keep the key type
+    // stable, and translate back before the write.
+    const NULL_KEY = '__null__';
+    const grouped = new Map();
+    const diffs = [];
+    for (const e of candidates) {
+      const newCatId = resolveCategory(e.entity, ctx);
+      const cur = e.category_id ? e.category_id.toString() : null;
+      const nxt = newCatId ? newCatId.toString() : null;
+      if (cur === nxt) continue;
+      diffs.push({ expense: e, from: cur, to: nxt });
+      const key = nxt ?? NULL_KEY;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(e._id);
+    }
+
+    const matched = diffs.length;
+
+    if (dryRun) {
+      // Samples preview. Pull every category name referenced in the
+      // first 10 diffs in one batch query so the render is friendly
+      // to UI consumers (current_category and new_category as
+      // strings, not ObjectIds). 10 is the §6.4 preview cap — more
+      // would bloat the response for no user value.
+      const preview = diffs.slice(0, 10);
+      const catIdsToLookup = new Set();
+      for (const d of preview) {
+        if (d.from) catIdsToLookup.add(d.from);
+        if (d.to) catIdsToLookup.add(d.to);
+      }
+      const catMap = await loadCategoryMap([...catIdsToLookup]);
+      const samples = preview.map(({ expense, from, to }) => ({
+        _id: expense._id.toString(),
+        entity: expense.entity,
+        date: expense.date,
+        current_category: from ? catMap.get(from) ?? null : null,
+        new_category: to ? catMap.get(to) ?? null : null,
+      }));
+      return res.json({
+        data: { dry_run: true, matched, updated: 0, samples },
+      });
+    }
+
+    // Real run. One `reassignCategoryBulk` per target category —
+    // typically 1-2 round trips because most apply-to-all runs funnel
+    // everything into the same `override.category_id`, but the
+    // fan-out path handles the case where re-validation moves some
+    // expenses to yet another category (e.g. a more-specific rule
+    // that now wins after an unrelated edit).
+    //
+    // The filter always re-includes `user_id: req.userId` as a
+    // safety belt, even though the candidate set already guarantees
+    // ownership — defence in depth matches the pattern in
+    // routes/expenses.js single-expense path.
+    let updated = 0;
+    try {
+      for (const [key, ids] of grouped) {
+        const target = key === NULL_KEY ? null : key;
+        const result = await reassignCategoryBulk(
+          { _id: { $in: ids }, user_id: req.userId },
+          target,
+        );
+        updated += result.modified ?? 0;
+      }
+    } catch (err) {
+      // Partial failure: one group may have landed before the
+      // throwing one. The already-applied rows stay applied — this
+      // is fine because the next retry is idempotent (resolver
+      // returns the same verdict, `cur === nxt` skips the row).
+      // Emit the failure row with enough context to correlate
+      // against the pattern + the caller.
+      const category = await Category.findById(override.category_id)
+        .select('name')
+        .lean();
+      audit({
+        action: 'apply_to_all_failed',
+        userId: req.userId,
+        ip: clientIp(req),
+        detail: `reason=${err.message} pattern=${override.pattern} category=${category?.name ?? '—'}`,
+        entity: override.pattern,
+      });
+      return res.status(500).json({ error: err.message });
+    }
+
+    // Success audit. `skipped_personal=0` is always zero on the
+    // personal path — the caller is the only user whose expenses we
+    // touch. The field stays in the detail anyway so the shape
+    // mirrors §13.2 #32 and the `/curve/logs` renderer can share one
+    // parser with the admin variant that lands in Fase 3.
+    const category = await Category.findById(override.category_id)
+      .select('name')
+      .lean();
+    audit({
+      action: 'apply_to_all',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail:
+        `scope=personal target=override affected=${updated} ` +
+        `skipped_personal=0 category=${category?.name ?? '—'}`,
+      entity: override.pattern,
+    });
+
+    res.json({ data: { dry_run: false, matched, updated } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
