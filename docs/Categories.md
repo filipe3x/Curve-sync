@@ -401,18 +401,160 @@ coberto pelos capítulos 3 a 11.
 
 ## 3. Arquitectura de dois níveis (conceptual)
 
-_Placeholder._ Apresenta o modelo mental antes do schema:
+Este capítulo descreve só o **modelo mental** — quem decide o quê,
+como decisões diferentes convivem, o que acontece quando há conflito.
+O _schema_ que materializa esta ideia em MongoDB vive no capítulo 4; o
+algoritmo concreto de matching vive no capítulo 5; a API que a expõe
+vive no capítulo 8. Aqui ficamos ao nível dos conceitos.
 
-- **Nível admin (global):** um admin define o catálogo base de entidades
-  por categoria, aplicado a todos os utilizadores. Ex.: Lidl →
-  Supermercado.
-- **Nível user (override):** cada utilizador pode sobrepor uma entidade
-  ao seu catálogo pessoal (Lidl → Coffee apenas para mim).
-- **Ordem de resolução:** override do user > catálogo global > sem
-  categoria.
-- **Retroactividade opcional:** qualquer edição (admin ou user) oferece
-  um botão "aplicar a despesas passadas" que vai reprocessar
-  `category_id` do escopo correspondente.
+### 3.1 Os dois níveis
+
+O sistema tem exactamente **duas camadas** sobrepostas de regras de
+catalogação. Qualquer despesa importada do Curve Card passa por ambas,
+por esta ordem:
+
+1. **Nível global (admin).** O admin da plataforma — o mesmo papel
+   `role: 'admin'` que já existe na colecção `users` — é o único que
+   pode criar, editar ou apagar categorias e definir quais entidades
+   cada categoria cataloga automaticamente para _toda_ a plataforma.
+   Uma edição deste nível afecta, por omissão, todos os utilizadores
+   ao mesmo tempo. É o "catálogo de referência" do serviço.
+
+2. **Nível pessoal (user).** Cada utilizador pode sobrepor o catálogo
+   global com uma lista de **overrides pessoais**. Um override diz:
+   _"no meu caso, quando vires esta entidade, cataloga-a nesta
+   categoria em vez daquela que o catálogo global diria"_. Os
+   overrides nunca saem do user que os criou e nunca tocam no
+   catálogo global.
+
+O utilizador comum **não cria categorias** (isso é do admin) e **não
+edita o catálogo global** (idem). A única coisa que faz é dizer "para
+mim, esta entidade vai para esta categoria". Tudo o resto — qual é a
+lista de categorias disponíveis, como elas se chamam, qual o catálogo
+base — é decidido pelo admin e herdado por todos.
+
+### 3.2 Quem edita o quê
+
+| Objecto | User comum | Admin |
+|---------|------------|-------|
+| Lista de categorias (criar, renomear, apagar) | — | ✓ |
+| Catálogo global de entidades de uma categoria | — | ✓ |
+| Overrides pessoais (próprios) | ✓ | ✓ |
+| Overrides pessoais de outro user | — | — |
+| `category_id` de uma despesa individual | ✓ (só as suas) | ✓ (só as suas) |
+
+Um admin, quando está a usar a sua própria conta, tem os _mesmos_
+overrides pessoais que qualquer outro user — os overrides são
+sempre pessoais, nunca globais. Ser admin não desliga a camada
+pessoal; ser admin só _acrescenta_ a capacidade de mexer no nível
+global.
+
+### 3.3 Exemplo concreto — Lidl
+
+O caso que o produto tem de resolver:
+
+1. O **admin** decide que, por omissão, despesas cuja entidade seja
+   "Lidl" pertencem à categoria **Supermercado**. Adiciona a string
+   "Lidl" ao catálogo global da categoria Supermercado.
+2. A partir desse momento, qualquer user da plataforma que sincronize
+   despesas do Curve vê as suas idas ao Lidl caírem automaticamente em
+   Supermercado. Nada mais é preciso do lado do user.
+3. Um user em particular — chamemos-lhe o Filipe — só vai ao Lidl
+   comprar café. Para ele, categorizar Lidl como Supermercado distorce
+   o dashboard e mete-lhe despesas de café fora da categoria Café.
+4. O Filipe abre o ecrã de categorias, entra na categoria **Café** e
+   cria um override pessoal: "Lidl → Café". Só isto.
+5. A partir desse momento:
+    - As despesas **do Filipe** no Lidl passam a ir para Café.
+    - As despesas **de qualquer outro user** no Lidl continuam a ir
+      para Supermercado, exactamente como antes. O catálogo global
+      não foi tocado.
+
+Se mais tarde o Filipe apagar o seu override, o comportamento
+reverte: a partir daí volta a receber Supermercado no Lidl, como toda
+a gente.
+
+### 3.4 Ordem de resolução
+
+Para cada despesa importada, o sistema resolve a categoria por esta
+ordem determinística (detalhe algorítmico no capítulo 5):
+
+1. **Overrides pessoais do user dono da despesa.** Se alguma regra
+   pessoal casar com a entidade, essa regra vence sempre — é a
+   promessa do "para mim, isto é assim".
+2. **Catálogo global.** Se nenhum override casar, recorre-se ao
+   catálogo global (o `Category.entities[]` que o admin mantém).
+3. **Sem categoria.** Se nenhuma das duas camadas casar, a despesa é
+   gravada com `category_id = null` e aparece no UI como
+   "sem categoria", aguardando classificação manual ou uma nova regra.
+
+O ponto-chave é a _estrita ordem entre camadas_: um override pessoal
+nunca é "somado" ao global — _substitui-o_. O Filipe pode ter Lidl →
+Café mesmo que o global diga Lidl → Supermercado, e o sistema honra
+a decisão pessoal sem ambiguidade.
+
+### 3.5 "Apply to all" — aplicar a despesas passadas
+
+Por omissão, qualquer edição de regras (global ou pessoal) afecta
+apenas **despesas futuras**. As despesas que já foram importadas
+mantêm o `category_id` que tinham no momento do insert. Isto é
+deliberado: muitas edições são tentativas, e não queremos que
+afinar uma regra reescreva meses de histórico sem o utilizador o ter
+pedido.
+
+Ao mesmo tempo, o caso de uso real é retroactivo: quando o Filipe
+cria o override Lidl → Café, ele _quer_ que as idas anteriores ao
+Lidl que já tinham sido catalogadas como Supermercado passem também
+para Café — senão o dashboard dele continua com os dados errados
+para sempre.
+
+A resposta é um **botão "Aplicar a despesas passadas"** que aparece
+logo após qualquer edição de regras, com estas propriedades:
+
+- **Visível sempre que uma regra muda** — criar, editar ou apagar um
+  override pessoal, adicionar ou remover uma entidade no catálogo
+  global, mudar o nome de uma categoria que tenha entidades
+  catalogadas.
+- **Opt-in explícito.** Nunca é automático. Se o user clicar noutro
+  sítio ou fechar o ecrã, a edição vale só daí para a frente.
+- **Pré-visualização.** Antes de confirmar, mostra quantas despesas
+  vão ser afectadas. Esta contagem é o sinal de "estás mesmo a
+  reescrever histórico — sabes o que estás a fazer".
+- **Escopo correspondente ao nível da regra.**
+    - Override pessoal → só as despesas _desse_ user são tocadas.
+      Os outros users nunca são afectados.
+    - Regra global editada pelo admin → apenas as despesas de users
+      que _ainda não têm_ um override pessoal conflituante. Os
+      overrides pessoais são sagrados: um apply-to-all global nunca
+      os sobrepõe.
+- **Auditável.** Cada execução fica registada em `curve_logs` com
+  contexto suficiente para investigar: quem clicou, qual foi a
+  regra, quantas despesas foram tocadas e qual era o `category_id`
+  anterior de cada uma. A implementação detalhada está no
+  capítulo 6.
+
+### 3.6 Invariantes que a arquitectura preserva
+
+Independentemente do schema, da API ou da UI, estas propriedades
+têm de se manter verdadeiras em qualquer ponto no tempo:
+
+- **Isolamento pessoal.** Nada que um user faça pode alterar a
+  experiência de outro user. Overrides são privados por construção.
+- **Primazia do pessoal.** Um override pessoal vence sempre a
+  regra global correspondente, sem excepção.
+- **Não-destruição silenciosa.** Uma mudança de regra nunca reescreve
+  `category_id` de despesas passadas sem o user pedir explicitamente
+  via apply-to-all.
+- **Respeito pelo schema partilhado.** O nível global vive na
+  colecção `categories` partilhada com Embers e respeita o schema
+  canónico. Toda a extensão (overrides, metadados de match, etc.)
+  vive em colecções novas pertencentes a Curve Sync, sem poluir o
+  schema Embers.
+- **Transparência de decisão.** Dada uma despesa, o sistema consegue
+  sempre responder à pergunta _"porque é que esta despesa ficou nesta
+  categoria?"_ — com a regra exacta (pessoal ou global) que decidiu.
+  Isto é o que torna a automação confiável; a materialização prática
+  aparece no capítulo 9 (UIX).
 
 ## 4. Modelo de dados
 
