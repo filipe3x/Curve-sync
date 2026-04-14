@@ -1351,20 +1351,244 @@ rota. 401 já tem audit trail via `authenticate`.
 
 ## 8. API
 
-_Placeholder._ Lista completa de endpoints novos/alterados, com shape
-de request/response, códigos de erro e rate-limiting relevante:
+Os capítulos 3–7 definiram o *o quê* e o *porquê*. Este capítulo é a
+tradução HTTP: lista fechada de endpoints, shape de request/response
+e códigos de erro. Tudo assenta em `authenticate` + (opcional)
+`requireAdmin`, com o filtro `user_id: req.userId` enforced dentro
+dos handlers de overrides (ver §7.3).
 
-- `GET/POST/PUT/DELETE /api/categories[/:id]` — CRUD admin-only (exceto
-  GET que fica aberto).
-- `POST/DELETE /api/categories/:id/entities` — gestão granular de
-  entidades globais (evita PUT pesado na categoria inteira).
-- `GET/POST/PUT/DELETE /api/category-overrides[/:id]` — CRUD dos
-  overrides pessoais do user autenticado.
-- `POST /api/categories/:id/apply-to-all` e
-  `POST /api/category-overrides/:id/apply-to-all` — endpoints
-  dedicados à re-catalogação retroactiva.
-- `GET /api/categories/stats` — totais mensais por categoria, alinhados
-  ao ciclo do dia 22.
+### 8.1 Convenções
+
+- **Base URL.** Tudo debaixo de `/api`. Sessão por cookie assinado
+  (mesmo fluxo de `docs/AUTH.md`) — nenhum destes endpoints é público.
+- **Content-type.** `application/json` em request e response.
+- **Shape padrão de sucesso.** `{ data: ... }` (lista ou objecto).
+  `POST` devolve `201 Created` + `{ data }`, `PUT` devolve `200` +
+  `{ data }`, `DELETE` devolve `204 No Content`.
+- **Shape padrão de erro.** `{ error: string, code?: string, field?:
+  string }`. `code` é uma string estável (`name_taken`,
+  `override_exists`, `category_not_found`, …) para o frontend
+  distinguir sem parsear mensagens em português.
+- **Rate limiting.** Os endpoints de escrita (`POST`/`PUT`/`DELETE` +
+  `apply-to-all`) passam pelo mesmo `express-rate-limit` já usado em
+  `auth` (30 req/min por IP). `apply-to-all` tem um cap adicional
+  de 10 execuções por hora por user (§6.4 já assume isto).
+
+### 8.2 Catálogo global — `categories` (admin-only, excepto GET)
+
+`GET /api/categories` — leitura aberta a qualquer user autenticado.
+
+```json
+// 200 OK
+{
+  "data": [
+    {
+      "id": "65f…",
+      "name": "Groceries",
+      "entities": ["lidl", "continente", "pingo doce"],
+      "icon_url": "/images/categories/groceries.png",
+      "created_at": "2024-01-12T…",
+      "updated_at": "2024-03-04T…"
+    }
+  ]
+}
+```
+
+`POST /api/categories` — cria categoria global (admin). Body:
+
+```json
+{ "name": "Groceries", "entities": ["lidl", "continente"] }
+```
+
+- `201` → `{ data: Category }`
+- `400 name_required` — `name` vazio ou em falta
+- `409 name_taken` — já existe categoria com esse `name`
+  (case-insensitive)
+- `403` — sem `role: 'admin'`
+
+`PUT /api/categories/:id` — edita nome e/ou ícone (o array
+`entities` é mexido pelos endpoints granulares de §8.3, não aqui).
+Body aceita `{ name?: string, icon_url?: string }`.
+
+- `200` → `{ data: Category }`
+- `404 category_not_found`
+- `409 name_taken`
+- `403`
+
+`DELETE /api/categories/:id` — apaga categoria. Regras:
+
+- Bloqueado se houver `expenses` ou `curve_category_overrides` a
+  referenciar a categoria → `409 category_in_use` com
+  `{ expenses_count, overrides_count }` no body para o modal do
+  frontend informar o admin.
+- O admin só consegue apagar depois de reatribuir os refs (ou
+  aceitar o apply-to-all inverso, fora do escopo do MVP).
+- `204` em sucesso.
+
+### 8.3 Catálogo de entidades globais (admin-only)
+
+Evita `PUT` pesado da categoria inteira e garante auditoria
+granular.
+
+`POST /api/categories/:id/entities` — adiciona N entidades ao
+catálogo global:
+
+```json
+{ "entities": ["mercadona", "auchan"] }
+```
+
+- Normalização acontece no server (§5.2). Duplicados (já
+  existentes, em qualquer forma normalizada) são descartados sem
+  erro.
+- Se alguma das entidades já estiver noutra categoria global, o
+  handler devolve `409 entity_conflict` com `{ conflicts: [{ entity,
+  category_id, category_name }] }`. O admin decide no frontend se
+  faz *move* (remove da origem + adiciona aqui) — operação separada,
+  não implícita.
+- `200` → `{ data: Category }` (versão actualizada).
+
+`DELETE /api/categories/:id/entities/:entity` — remove uma única
+entidade do catálogo global. `entity` na URL vai URL-encoded e
+match é feito sobre `pattern_normalized`. `204` em sucesso, `404
+entity_not_found` caso contrário.
+
+### 8.4 Overrides pessoais — `curve_category_overrides`
+
+Todas as rotas abaixo correm com `authenticate` e aplicam
+`user_id: req.userId` no filtro (§7.3). Admins não vêem overrides
+alheios.
+
+`GET /api/category-overrides` — lista os overrides do user:
+
+```json
+{
+  "data": [
+    {
+      "id": "66a…",
+      "category_id": "65f…",
+      "category_name": "Coffee",
+      "pattern": "Lidl",
+      "pattern_normalized": "lidl",
+      "match_type": "exact",
+      "priority": 0,
+      "created_at": "…",
+      "updated_at": "…"
+    }
+  ]
+}
+```
+
+`POST /api/category-overrides` — cria override pessoal. Body:
+
+```json
+{
+  "category_id": "65f…",
+  "pattern": "Lidl",
+  "match_type": "exact",
+  "priority": 0
+}
+```
+
+- `201` → `{ data: Override }`
+- `400 pattern_required` | `400 invalid_match_type` |
+  `400 invalid_priority`
+- `404 category_not_found` — `category_id` não existe no catálogo
+  global
+- `409 override_exists` — já existe override do mesmo user com o
+  mesmo `(pattern_normalized, match_type)` (índice único de §4.3)
+
+`PUT /api/category-overrides/:id` — edita um override. Só mexe em
+`category_id`, `pattern`, `match_type`, `priority`.
+
+- `200` → `{ data: Override }`
+- `404 override_not_found` — inclui o caso de outro user (por
+  §7.5, 404 em vez de 403)
+- `409 override_exists` — edição colide com outro do próprio user
+
+`DELETE /api/category-overrides/:id` — `204` em sucesso, `404
+override_not_found` caso contrário.
+
+### 8.5 Apply-to-all (retroactivo)
+
+Dois endpoints separados, um por camada, ambos com a mesma semântica
+descrita no capítulo 6.
+
+`POST /api/categories/:id/apply-to-all` — admin-only, para regras
+globais. Body opcional:
+
+```json
+{ "dry_run": false, "scope": "affected" }
+```
+
+- `scope: "affected"` (default) → só expenses cuja
+  `entity_normalized` bate com o `pattern_normalized` da categoria.
+- `scope: "missing"` → só expenses sem `category_id` (cenário de
+  primeira corrida).
+- `dry_run: true` → não escreve, devolve só o preview.
+- `200` → `{ data: { matched, updated, skipped_personal, dry_run } }`
+  onde `skipped_personal` conta quantas expenses não foram tocadas
+  porque o dono tem override pessoal (§6.2, "personal is sacred").
+- `429 apply_to_all_rate_limited` — ultrapassou o cap por hora.
+- `403` | `404 category_not_found`.
+
+`POST /api/category-overrides/:id/apply-to-all` — user-side, para
+regras pessoais. Mesmo shape de body e response, mas o filtro é
+sempre `user_id: req.userId` (nunca toca despesas de outros users).
+Sem flag `skipped_personal` — aqui só há o próprio.
+
+- `404 override_not_found` em vez de 403 para overrides alheios.
+
+### 8.6 Estatísticas — `GET /api/categories/stats`
+
+Alimenta a strip de KPIs do ecrã de gestão (§9) e a coluna esquerda
+do master-detail. Alinhado ao ciclo do dia 22 (`docs/expense-
+tracking.md`).
+
+Query params: `?cycle=current` (default) | `?cycle=previous` |
+`?start=YYYY-MM-DD&end=YYYY-MM-DD`.
+
+```json
+{
+  "data": {
+    "cycle": { "start": "2026-03-22", "end": "2026-04-21" },
+    "totals": [
+      {
+        "category_id": "65f…",
+        "category_name": "Groceries",
+        "total": 312.47,
+        "expense_count": 18,
+        "entity_count": 6
+      }
+    ],
+    "grand_total": 874.12
+  }
+}
+```
+
+- `200` sempre — se o user não tem despesas, devolve `totals: []` e
+  `grand_total: 0`.
+- `400 invalid_range` — `start` > `end` ou formato inválido.
+
+### 8.7 Tabela-resumo de códigos de erro
+
+| Code | HTTP | Onde |
+|------|------|------|
+| `name_required` | 400 | POST/PUT categories |
+| `name_taken` | 409 | POST/PUT categories |
+| `invalid_match_type` | 400 | POST/PUT overrides |
+| `invalid_priority` | 400 | POST/PUT overrides |
+| `pattern_required` | 400 | POST overrides |
+| `category_not_found` | 404 | PUT/DELETE categories, POST overrides |
+| `category_in_use` | 409 | DELETE categories |
+| `override_not_found` | 404 | PUT/DELETE/apply overrides (inclui alheios) |
+| `override_exists` | 409 | POST/PUT overrides |
+| `entity_conflict` | 409 | POST categories/:id/entities |
+| `entity_not_found` | 404 | DELETE categories/:id/entities/:entity |
+| `apply_to_all_rate_limited` | 429 | POST apply-to-all (ambos) |
+| `invalid_range` | 400 | GET categories/stats |
+
+Os 401 e 403 genéricos (§7.5) não entram na tabela — são contratos
+dos middlewares, não dos handlers.
 
 ## 9. UIX — ecrã único de gestão de categorias
 
