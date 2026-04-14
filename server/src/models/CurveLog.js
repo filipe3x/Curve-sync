@@ -74,6 +74,21 @@ const curveLogSchema = new mongoose.Schema(
       'expense_category_changed',
       'override_created', 'override_updated', 'override_deleted',
       'apply_to_all', 'apply_to_all_failed',
+      // Admin-only catalogue surgery on the shared `categories`
+      // collection (docs/Categories.md §13.2 #27). Only the
+      // entity-removal variant ships in PR #6 — the rest of the
+      // §13.2 admin catalogue (category_created/updated/deleted,
+      // category_entity_added, category_entity_moved) will land
+      // when the admin full-CRUD slice does. Carries the category
+      // name + removed entity in `error_detail` as
+      // `category=<name> entity=<value>`.
+      'category_entity_removed',
+      // Admin-gate rejection fired by `middleware/requireAdmin.js`
+      // when a non-admin hits an admin-only route (§13.2 #35,
+      // renamed per §13.7 #2 to include the `failed` suffix so
+      // `audit.js` auto-flips `status: 'error'`). Carries
+      // `method=<METHOD> path=<path>` in `error_detail`.
+      'admin_access_failed',
     ]},
     ip: String,
   },

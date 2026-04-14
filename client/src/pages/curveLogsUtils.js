@@ -41,6 +41,11 @@ export function describeLog(log) {
       'override_deleted',
       'apply_to_all',
       'apply_to_all_failed',
+      // Admin surgery on the global catalogue (docs/Categories.md §13.2
+      // #27). Shares the Catálogo badge with personal-override rows
+      // because from the user's point of view it's still "something
+      // happened to the category system".
+      'category_entity_removed',
     ];
     const type = auth.includes(log.action)
       ? 'auth'
@@ -132,6 +137,50 @@ export function describeLog(log) {
           title: reason
             ? `Aplicação em massa falhou: ${reason}`
             : 'Aplicação em massa falhou',
+        };
+      }
+      case 'category_entity_removed': {
+        // docs/Categories.md §13.2 #27 — canonical pt-PT:
+        // "Entidade removida de <name>: <value>"
+        //
+        // The server writes `entity = <removed value>` and
+        // `error_detail = "category=<name> entity=<value>"`, so the
+        // category name is the interesting bit to pull out (entity
+        // itself is mirrored at the top level). The regex is
+        // non-greedy and stops at the next k=v separator — there is
+        // only one today (`entity=`), but keeping the pattern
+        // forward-compatible costs nothing.
+        const removed = log.entity ?? '—';
+        const catMatch = log.error_detail?.match(/category=(.+?)(?: entity=|$)/);
+        const category = catMatch ? catMatch[1] : null;
+        return {
+          type,
+          title: category
+            ? `Entidade removida de ${category}: ${removed}`
+            : `Entidade removida: ${removed}`,
+        };
+      }
+      case 'admin_access_failed': {
+        // docs/Categories.md §13.2 #35 — canonical pt-PT:
+        // "Acesso admin recusado: <method> <path>"
+        //
+        // `error_detail` is written verbatim by requireAdmin as
+        // `method=<METHOD> path=<path>`. Surface the method + path
+        // together so an admin scanning the audit trail can spot
+        // probes at a glance.
+        const methodMatch = log.error_detail?.match(/method=(\S+)/);
+        const pathMatch = log.error_detail?.match(/path=(.+?)$/);
+        const method = methodMatch ? methodMatch[1] : null;
+        const p = pathMatch ? pathMatch[1] : null;
+        // `type` is already `sistema` via the outer ternary (this
+        // action is not in auth / despesa / catalogActions). It's a
+        // security event, not a catalogue edit, so the Sistema badge
+        // is the right bucket.
+        return {
+          type,
+          title: method && p
+            ? `Acesso admin recusado: ${method} ${p}`
+            : 'Acesso admin recusado',
         };
       }
       case 'override_created':

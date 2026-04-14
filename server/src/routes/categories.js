@@ -1,6 +1,9 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import Category from '../models/Category.js';
 import Expense from '../models/Expense.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
+import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
 
@@ -207,6 +210,88 @@ router.get('/stats', async (req, res) => {
         grand_total: Math.round(grandTotal * 100) / 100,
       },
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// DELETE /api/categories/:id/entities/:entity   (admin only)
+//
+// Removes a single entity string from the `entities` array of a global
+// catalogue category. This is the minimal admin-surgery slice of the
+// `/categories` screen (PR #6 of the roadmap in docs/Categories.md
+// §11.3 Fase 5) — the full admin CRUD (create/rename/delete category,
+// batch-add entities) lands separately.
+//
+// Auth: requires `authenticate` (router-level, mounted in index.js)
+// AND `requireAdmin` (per-route below). Non-admins receive 403 plus
+// an `admin_access_failed` audit row; the middleware handles both.
+//
+// Route params:
+//   :id     — category _id (validated as ObjectId, 404 otherwise)
+//   :entity — URL-encoded entity string, matched verbatim (case-sensitive)
+//
+// Responses:
+//   204 on success
+//   404 category_not_found  — invalid id or no such category
+//   404 entity_not_found    — category exists but the entity is not in
+//                             its `entities` array (nothing to remove)
+//
+// Write shape: `$pull` is a single atomic mongo operation, so we don't
+// need to round-trip load→mutate→save. `modifiedCount === 1` is the
+// authoritative "did we remove something?" signal. The category
+// document is looked up beforehand so the audit row can carry the
+// category name without a second query.
+//
+// Audit (docs/Categories.md §13.2 #27):
+//   action: 'category_entity_removed'
+//   detail: `category=<name> entity=<value>`
+//   Canonical pt-PT (via curveLogsUtils): "Entidade removida de <name>: <value>"
+// ─────────────────────────────────────────────────────────────────────
+router.delete('/:id/entities/:entity', requireAdmin, async (req, res) => {
+  try {
+    const { id, entity } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    // Load first so the audit row can capture the category name, and
+    // so a missing category returns a clean 404 before we attempt the
+    // $pull (which would otherwise silently succeed with matched=0).
+    const category = await Category.findById(id).select('name entities').lean();
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    // URL-decoded by Express, so `entity` is the raw string as it
+    // appears in the array. Match is case-sensitive — admins edit with
+    // full awareness of the exact value they typed in.
+    if (!category.entities?.includes(entity)) {
+      return res.status(404).json({ error: 'entity_not_found' });
+    }
+
+    const result = await Category.updateOne(
+      { _id: id },
+      { $pull: { entities: entity } },
+    );
+
+    // Belt-and-braces: if the in-memory check passed but the atomic
+    // $pull removed nothing (racing admin, case drift, ...), treat it
+    // as not-found so the client re-renders with fresh state.
+    if (result.modifiedCount !== 1) {
+      return res.status(404).json({ error: 'entity_not_found' });
+    }
+
+    audit({
+      action: 'category_entity_removed',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `category=${category.name} entity=${entity}`,
+      entity,
+    });
+
+    res.status(204).end();
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -70,8 +70,22 @@ export const updateExpenseCategory = (id, category_id) =>
     body: JSON.stringify({ category_id }),
   });
 
-// Categories (read-only)
+// Categories (read-only for users; admin-only entity DELETE below)
 export const getCategories = () => request('/categories');
+
+// Admin-only catalogue surgery — removes a single entity string from
+// a global category's `entities` array. See docs/Categories.md §13.2
+// #27 for the audit contract. Returns 204 on success (short-circuits
+// via the 204 branch in `request()`); server responds 403
+// `admin_required` for non-admins and 404 for unknown id/entity.
+//
+// Case-sensitive match on the server — pass the entity string
+// verbatim (no lowercasing, no trimming) so the DB's `$pull` hits.
+export const deleteCategoryEntity = (categoryId, entity) =>
+  request(
+    `/categories/${categoryId}/entities/${encodeURIComponent(entity)}`,
+    { method: 'DELETE' },
+  );
 
 // Spend aggregate over a cycle. `cycle` defaults to the day-22 current
 // cycle; pass `'previous'` for the one-back view, or `{start, end}`

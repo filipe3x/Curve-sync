@@ -4,6 +4,7 @@ import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import { PlusIcon, MagnifyingGlassIcon } from '../components/layout/Icons';
 import { useCountUp } from '../hooks/useCountUp';
+import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 
 /**
@@ -301,7 +302,12 @@ function OverridesList({
   );
 }
 
-function GlobalEntitiesList({ entities }) {
+// The global entities panel is read-only for regular users but gains a
+// per-row "Apagar" action when the caller is an admin. The minimal
+// admin surgery slice (PR #6) only wires up entity DELETE — category
+// create/rename/delete and batch entity-add land later. When
+// `isAdmin` is false the component behaves exactly as it did in PR #5.
+function GlobalEntitiesList({ entities, isAdmin = false, busy = false, onDelete }) {
   const [q, setQ] = useState('');
   const filtered = useMemo(() => {
     if (!q) return entities;
@@ -333,12 +339,25 @@ function GlobalEntitiesList({ entities }) {
         {filtered.map((entity) => (
           <li
             key={entity}
-            className="flex items-center justify-between px-4 py-2.5"
+            className="flex items-center justify-between gap-3 px-4 py-2.5"
           >
-            <span className="text-sm text-sand-800">{entity}</span>
-            <span className="inline-flex items-center rounded-lg bg-sand-100 px-2 py-0.5 text-[11px] font-medium text-sand-500">
-              global
-            </span>
+            <span className="truncate text-sm text-sand-800">{entity}</span>
+            <div className="flex flex-shrink-0 items-center gap-2">
+              <span className="inline-flex items-center rounded-lg bg-sand-100 px-2 py-0.5 text-[11px] font-medium text-sand-500">
+                global
+              </span>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => onDelete?.(entity)}
+                  disabled={busy}
+                  title="Remover esta entidade do catálogo global"
+                  className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 transition-colors hover:bg-sand-100 hover:text-curve-700 disabled:opacity-40"
+                >
+                  Apagar
+                </button>
+              )}
+            </div>
           </li>
         ))}
         {!filtered.length && (
@@ -490,6 +509,9 @@ function ApplyConfirmDialog({ preview, onCancel, onConfirm, busy }) {
 // ─────────────────────────────────────────────────────────────────────
 
 export default function CategoriesPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   const [categories, setCategories] = useState([]);
   const [statsCurrent, setStatsCurrent] = useState(null);
   const [statsPrevious, setStatsPrevious] = useState(null);
@@ -502,6 +524,10 @@ export default function CategoriesPage() {
   const [applyPreview, setApplyPreview] = useState(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [toast, setToast] = useState(null);
+  // Separate busy flag for the admin global-entity DELETE — the button
+  // lives in GlobalEntitiesList alongside the personal-override list,
+  // but the two paths are independent and shouldn't share a lock.
+  const [globalEntityBusy, setGlobalEntityBusy] = useState(false);
 
   const refreshAll = async () => {
     setLoading(true);
@@ -629,6 +655,45 @@ export default function CategoriesPage() {
       setToast({ type: 'error', text: err.message ?? 'Erro a apagar regra.' });
     } finally {
       setOverrideBusy(false);
+    }
+  };
+
+  // Admin-only: remove a single entity from the global catalogue.
+  // Confirms via `window.confirm` — the whole admin slice is minimal
+  // and a full modal would bloat the PR. Optimistically mutates the
+  // local `categories` state so the row disappears immediately, then
+  // rolls back on server error. Re-categorisation of past expenses
+  // that referenced this entity is deliberately NOT triggered here —
+  // existing expenses keep their `category_id` because resolveCategory
+  // is only consulted on new sync, never retroactively by DELETE.
+  // If the user wants retroactive cleanup they can still apply the
+  // resolver via an override + apply-to-all.
+  const handleDeleteGlobalEntity = async (categoryId, entity) => {
+    if (!isAdmin) return;
+    const ok = window.confirm(
+      `Remover "${entity}" do catálogo global?\n\nAs despesas existentes que usam esta entidade mantêm a categoria actual — apenas novas sincronizações deixam de a associar automaticamente.`,
+    );
+    if (!ok) return;
+
+    setGlobalEntityBusy(true);
+    // Snapshot for rollback on failure.
+    const snapshot = categories;
+    setCategories((prev) =>
+      prev.map((c) =>
+        c._id.toString() === categoryId
+          ? { ...c, entities: (c.entities ?? []).filter((e) => e !== entity) }
+          : c,
+      ),
+    );
+    try {
+      await api.deleteCategoryEntity(categoryId, entity);
+      setToast({ type: 'ok', text: `Entidade "${entity}" removida.` });
+    } catch (err) {
+      // Restore on failure. The server's 403/404/500 all land here.
+      setCategories(snapshot);
+      setToast({ type: 'error', text: err.message ?? 'Erro a remover entidade.' });
+    } finally {
+      setGlobalEntityBusy(false);
     }
   };
 
@@ -882,6 +947,11 @@ export default function CategoriesPage() {
                       </h3>
                       <GlobalEntitiesList
                         entities={selectedRow.global_entities}
+                        isAdmin={isAdmin}
+                        busy={globalEntityBusy}
+                        onDelete={(entity) =>
+                          handleDeleteGlobalEntity(selectedRow.category_id, entity)
+                        }
                       />
                     </section>
                   )}
