@@ -67,6 +67,28 @@ export const updateExpenseCategory = (id, category_id) =>
 // Categories (read-only)
 export const getCategories = () => request('/categories');
 
+// Category overrides — personal matching rules. All four calls are
+// user-scoped on the server (docs/Categories.md §7.3): the caller only
+// ever sees or mutates their own rows, regardless of role. 404 from
+// update/delete means "not yours or not there" — the server refuses
+// to distinguish to avoid leaking existence.
+export const getCategoryOverrides = () => request('/category-overrides');
+
+export const createCategoryOverride = (data) =>
+  request('/category-overrides', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+
+export const updateCategoryOverride = (id, data) =>
+  request(`/category-overrides/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+
+export const deleteCategoryOverride = (id) =>
+  request(`/category-overrides/${id}`, { method: 'DELETE' });
+
 // Curve Config
 export const getCurveConfig = () => request('/curve/config');
 

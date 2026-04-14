@@ -53,7 +53,14 @@ const curveLogSchema = new mongoose.Schema(
       //     a different category via PUT /api/expenses/:id/category
       //     (§12.7). Carries `expense_id`, `entity`, and
       //     `error_detail = "from=<name> to=<name>"`.
+      //   override_created / override_updated / override_deleted —
+      //     personal matching rules (CategoryOverride). Landed with
+      //     PR #2 even though the UI to create them arrives later;
+      //     the endpoints are usable via API right away. Carry
+      //     `entity` (the raw pattern) and `error_detail` with the
+      //     pattern + match_type + category name per §13.2 #29-31.
       'expense_category_changed',
+      'override_created', 'override_updated', 'override_deleted',
     ]},
     ip: String,
   },

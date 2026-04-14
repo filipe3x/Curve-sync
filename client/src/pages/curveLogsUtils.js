@@ -73,6 +73,35 @@ export function describeLog(log) {
             : `Despesa recategorizada: ${entity}`,
         };
       }
+      case 'override_created':
+      case 'override_updated':
+      case 'override_deleted': {
+        // docs/Categories.md §13.2 #29-31 — canonical pt-PT:
+        //   #29 "Regra pessoal criada: <pattern> → <category>"
+        //   #30 "Regra pessoal actualizada: <pattern> → <category>"
+        //   #31 "Regra pessoal apagada: <pattern>"
+        //
+        // The route handlers in server/src/routes/categoryOverrides.js
+        // write `entity: <raw pattern>` so we never have to parse
+        // `pattern=` out of error_detail — the server already gave us
+        // a structured copy. `error_detail` still carries `category=`
+        // for the created/updated variants; we pull it with a
+        // non-greedy match that stops at the next k=v key (for update,
+        // `changed=` comes after) or end of string (for create).
+        const pattern = log.entity ?? '—';
+        if (log.action === 'override_deleted') {
+          return { type, title: `Regra pessoal apagada: ${pattern}` };
+        }
+        const catMatch = log.error_detail?.match(/category=(.+?)(?: changed=|$)/);
+        const category = catMatch ? catMatch[1] : null;
+        const verb = log.action === 'override_created' ? 'criada' : 'actualizada';
+        return {
+          type,
+          title: category
+            ? `Regra pessoal ${verb}: ${pattern} → ${category}`
+            : `Regra pessoal ${verb}: ${pattern}`,
+        };
+      }
       default:                       return { type, title: log.action };
     }
   }
