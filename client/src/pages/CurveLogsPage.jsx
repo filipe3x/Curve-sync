@@ -14,15 +14,17 @@ const TABS = [
 ];
 
 const TYPE_BADGE = {
-  despesa: 'bg-curve-50 text-curve-800',
-  sistema: 'bg-sand-100 text-sand-700',
-  auth:    'bg-indigo-50 text-indigo-700',
+  despesa:  'bg-curve-50 text-curve-800',
+  sistema:  'bg-sand-100 text-sand-700',
+  auth:     'bg-indigo-50 text-indigo-700',
+  catalogo: 'bg-violet-50 text-violet-700',
 };
 
 const TYPE_LABEL = {
-  despesa: 'Despesa',
-  sistema: 'Sistema',
-  auth:    'Auth',
+  despesa:  'Despesa',
+  sistema:  'Sistema',
+  auth:     'Auth',
+  catalogo: 'Catálogo',
 };
 
 export default function CurveLogsPage() {

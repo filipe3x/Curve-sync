@@ -24,15 +24,31 @@ export function describeLog(log) {
   // ---- Audit events (action != null) ----
   if (log.action) {
     const auth = ['login', 'login_failed', 'logout', 'session_expired', 'password_changed'];
-    // `despesa` for category-management rows so the badge colour is
-    // consistent with the chip they originated from on /expenses and /.
+    // `despesa` for the single-expense recat row so the badge colour is
+    // consistent with the chip it originated from on /expenses and /.
     // Source: docs/Categories.md §13.5.
     const despesaActions = ['expense_category_changed'];
+    // Dedicated `catalogo` bucket for rows that mutate the category
+    // catalogue / personal overrides — create/update/delete of a rule,
+    // and the bulk apply-to-all pass it triggers. Keeps them from
+    // drowning in the generic "Sistema" bucket so users can scan their
+    // own override history at a glance. `expense_category_changed`
+    // stays as `despesa` on purpose (it's a per-expense mutation, not a
+    // rule mutation).
+    const catalogActions = [
+      'override_created',
+      'override_updated',
+      'override_deleted',
+      'apply_to_all',
+      'apply_to_all_failed',
+    ];
     const type = auth.includes(log.action)
       ? 'auth'
       : despesaActions.includes(log.action)
         ? 'despesa'
-        : 'sistema';
+        : catalogActions.includes(log.action)
+          ? 'catalogo'
+          : 'sistema';
 
     switch (log.action) {
       case 'login':            return { type, title: 'Login efectuado' };
