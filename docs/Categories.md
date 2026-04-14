@@ -785,6 +785,16 @@ comportamento desejado: uma despesa re-catalogada fica com
 `updated_at` a apontar para o momento do apply-to-all, o que ajuda
 auditoria e debugging sem mexer noutro lado.
 
+**Consumidores desta relaxação.** A operação `reassignCategoryBulk`
+é chamada em dois sítios: (1) apply-to-all retroactivo (capítulo
+6), que opera sobre um filtro do tipo `{ entity_normalized,
+user_id }` e toca potencialmente milhares de documentos; e (2)
+quick-edit single-expense inline nas tabelas `/expenses` e `/`
+(capítulo 12), que passa o mesmo helper mas com um filtro
+`{ _id, user_id }` — uma única despesa. O contrato do helper é
+filter-agnóstico precisamente para suportar ambos os casos com
+um único caminho auditado.
+
 ### 4.5 Índices e queries quentes
 
 | Query | Onde | Índice que serve |
@@ -1213,6 +1223,22 @@ escopo do MVP).
   user nunca mexe nas despesas de outro user, mesmo que o admin o
   autorize.
 
+### 6.11 Entry-point adicional: quick-edit inline
+
+O apply-to-all aqui descrito é activado principalmente a partir
+do ecrã `/categories` (capítulo 9). **Existe um segundo
+entry-point** com o mesmo pipeline subjacente: o popover de
+quick-edit descrito no capítulo 12, accionado pelo click no chip
+de categoria dentro das tabelas de `/expenses` e `/` (dashboard).
+Nesse fluxo, o user tem um checkbox opt-in "Aplicar a todas as
+despesas de *<entity>*" que, quando marcado, faz upsert de um
+override pessoal (§4.3) e invoca imediatamente o mesmo
+`POST /api/category-overrides/:id/apply-to-all` do §8.5. Toda a
+mecânica (preview via `dry_run`, invariante "personal is sacred"
+do §6.2, idempotência do §6.8) aplica-se sem alterações — o
+popover é só uma superfície de UI diferente para a mesma
+operação.
+
 ## 7. Autorização e papéis
 
 O modelo de dois níveis do capítulo 3 assenta num sistema de
@@ -1569,7 +1595,29 @@ Query params: `?cycle=current` (default) | `?cycle=previous` |
   `grand_total: 0`.
 - `400 invalid_range` — `start` > `end` ou formato inválido.
 
-### 8.7 Tabela-resumo de códigos de erro
+### 8.7 Quick-edit inline (delta do capítulo 12)
+
+O capítulo 12 adiciona uma única rota nova à API, dedicada ao
+caminho single-expense do popover de edição:
+
+`PUT /api/expenses/:id/category` — actualiza apenas o
+`category_id` de uma despesa. Body `{ category_id: ObjectId |
+null }`. Enforced `user_id: req.userId` no filtro (cross-user
+devolve 404 por §7.5).
+
+- `200` → `{ data: Expense }`
+- `400 invalid_category_id`
+- `404 expense_not_found` (inclui cross-user)
+- `404 category_not_found` (quando `category_id` não existe)
+
+Qualquer user autenticado pode chamar — não requer `requireAdmin`.
+O handler invoca `reassignCategoryBulk({ _id, user_id },
+category_id)`, reutilizando o helper autorizado do §4.4 sem
+abrir nenhuma nova superfície de escrita. O modo entity-wide do
+popover (checkbox) reutiliza os endpoints de overrides do §8.4 e
+de apply-to-all do §8.5 — nenhum delta adicional.
+
+### 8.8 Tabela-resumo de códigos de erro
 
 | Code | HTTP | Onde |
 |------|------|------|
@@ -1586,6 +1634,8 @@ Query params: `?cycle=current` (default) | `?cycle=previous` |
 | `entity_not_found` | 404 | DELETE categories/:id/entities/:entity |
 | `apply_to_all_rate_limited` | 429 | POST apply-to-all (ambos) |
 | `invalid_range` | 400 | GET categories/stats |
+| `invalid_category_id` | 400 | PUT expenses/:id/category |
+| `expense_not_found` | 404 | PUT expenses/:id/category |
 
 Os 401 e 403 genéricos (§7.5) não entram na tabela — são contratos
 dos middlewares, não dos handlers.
@@ -2218,17 +2268,28 @@ toca na relaxação de `expenses`.
 - **Reversível:** flag `enableAdminCategoryEditing` no frontend
   ou hide do botão, sem remover código.
 
-**Fase 6 — Apply-to-all (endpoint + UX).**
+**Fase 6 — Apply-to-all + quick-edit inline (endpoint + UX).**
 - Primeira fase que **requer** a relaxação do §4.4 (UPDATE de
   `category_id` em `expenses`). Implementar `reassignCategoryBulk`
   em `services/expense.js`, os dois endpoints do §8.5, e o modal
   de confirmação do §9.7.
+- Três sub-entregáveis:
+  - **6a.** `reassignCategoryBulk` + endpoints de apply-to-all do
+    §8.5 — usado pelo ecrã `/categories` (§9.7).
+  - **6b.** `PUT /api/expenses/:id/category` do §8.7 — endpoint
+    único, reutiliza o mesmo helper com filtro `{ _id, user_id }`.
+  - **6c.** Componente `<CategoryPickerPopover>` + integração nas
+    tabelas `/expenses` e `/` (dashboard) — capítulo 12 inteiro.
+    Inclui o modal de confirmação reutilizável
+    `<ConfirmDialog>` para o opt-in entity-wide.
 - Testar exaustivamente com `dry_run: true` antes de ligar o
   flag escrita.
 - **Reversível, mas com asterisco:** um apply-to-all já
   executado é reversível só via novo apply-to-all (não há
   undo no MVP — ver §6.5). Um `git revert` para o código,
-  sim, trivial.
+  sim, trivial. O sub-entregável 6c é extra-reversível: basta
+  remover o `onClick` do chip para voltar ao comportamento
+  read-only actual, sem tocar no backend.
 
 **Fase 7 — Polimento e observabilidade.**
 - Campo `detail: "override → <name>"` nos logs `ok` (§10.5).
@@ -2306,3 +2367,307 @@ Embers sem exigir nenhuma alteração ao lado Embers — e abre a
 porta às melhorias opcionais (detalhe nos logs, métricas no
 dashboard, undo de apply-to-all) que ficaram conscientemente
 fora do MVP.
+
+## 12. Quick edit inline nas tabelas de despesas
+
+O capítulo 9 desenhou o ecrã `/categories` como o local certo para
+gerir *regras* (catálogo global, overrides pessoais, catálogos de
+entidades). Este capítulo cobre um caso adjacente: o user está a
+olhar para uma despesa concreta e quer **corrigir a categoria de
+*essa* despesa** sem sair da tabela, sem criar regras, sem efeito
+colateral nas outras despesas. É o "quick edit sem dor" que tira
+atrito do dia-a-dia.
+
+Duas tabelas recebem o mesmo componente:
+
+- `/expenses` — tabela paginada (`ExpensesPage.jsx:87-110`), coluna
+  "Categoria" com o chip neutro `badge bg-sand-100 text-sand-600`.
+- `/` (dashboard) — tabela "Despesas recentes"
+  (`DashboardPage.jsx:265-269`), mesmo chip, mesma estrutura.
+
+### 12.1 Princípios
+
+1. **O chip é o trigger.** Click no chip da categoria abre o
+   popover na mesma célula. Nenhum botão extra, nenhum menu
+   contextual, nenhuma navegação.
+2. **O default é inofensivo.** A acção-padrão afecta **apenas**
+   aquela despesa. O caminho destrutivo (aplicar a tudo) exige
+   opt-in explícito + confirmação.
+3. **Reutiliza o modelo existente.** Nada de novas colecções. A
+   operação sozinha usa a relaxação do §4.4; o modo entity-wide
+   reutiliza overrides (§4.3) + apply-to-all (§6 / §8.5).
+4. **Um só componente.** `<CategoryPickerPopover>` vive em
+   `client/src/components/common/` e é consumido pelas duas
+   tabelas com as mesmas props. Consistência visual e uma única
+   superfície para testar.
+
+### 12.2 Anatomia do popover
+
+```
+┌─ Alterar categoria ──────────────────── [×] ┐
+│                                              │
+│   > Procurar...                              │
+│                                              │
+│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐        │
+│  │ 🛒   │ │ ☕   │ │ 🏠   │ │ ⛽   │        │
+│  │Grocs │ │Coffe │ │Home  │ │Fuel  │        │
+│  └──────┘ └──────┘ └──────┘ └──────┘        │
+│  ┌──────┐ ┌──────┐ ┌──────┐                 │
+│  │ 💪   │ │ 🎬   │ │ ...  │                 │
+│  │Gym   │ │Media │ │      │                 │
+│  └──────┘ └──────┘ └──────┘                 │
+│                                              │
+│  ☐ Aplicar a todas as despesas de "Lidl"    │
+│                                              │
+│          [ Cancelar ]  [ Guardar ]           │
+└──────────────────────────────────────────────┘
+```
+
+- **Positioning.** Floating panel ancorado na célula do chip
+  (`position: absolute` com `right-0 top-full mt-2`), largura
+  `w-80`, sombra `shadow-lg`, `rounded-2xl`, `bg-white`, `border
+  border-sand-200`. Z-index acima das linhas da tabela.
+- **Dismiss.** Click fora, `Escape`, ou botão `×` fecha sem
+  guardar. Mudança pendente volta ao estado inicial.
+- **Focus trap.** `useEffect` foca o input de search ao abrir;
+  `Tab` cicla entre search → grid → checkbox → botões → `×`.
+- **Search.** Filtro client-side instantâneo sobre
+  `category.name` (o catálogo chega pré-carregado via
+  `GET /api/categories` no mount da página; sem round-trip extra).
+
+### 12.3 Grid de chips (colorido e iconográfico)
+
+Cada chip é um botão `rounded-xl` com:
+
+- **Ícone no topo.** Emoji ou SVG do §9.4 (o upload de ícone do
+  admin alimenta ambos). Fallback: inicial maiúscula da
+  categoria num círculo.
+- **Cor de fundo.** `bg-{category.color}/10` + `border
+  border-{category.color}/30`. A cor vem do swatch definido em
+  §9.3 — admin pode escolher, default gerado por hash estável
+  sobre `category.name` para já existir sem configuração
+  adicional.
+- **Nome.** `text-xs font-medium text-sand-900`, máximo 2 linhas
+  com `line-clamp-2`.
+- **Estado seleccionado.** `ring-2 ring-curve-500` + `bg-curve-50`
+  — o chip da categoria actual aparece pré-seleccionado ao abrir.
+- **Hover/active.** `hover:bg-{color}/20 active:scale-[0.97]`
+  consistente com o resto dos botões do design system (§5.3 do
+  UIX_DESIGN).
+
+Layout `grid grid-cols-4 gap-2`. Se o user tiver >12 categorias,
+aparece scroll vertical interno (`max-h-64 overflow-y-auto`) —
+raro em prática (§5.5 assume ≤ 30 categorias globais).
+
+### 12.4 Default: afectar só esta despesa
+
+Fluxo "inofensivo" (checkbox **desligado**, estado inicial):
+
+1. User clica `Guardar` com uma categoria diferente seleccionada.
+2. Frontend chama `PUT /api/expenses/:id/category` com
+   `{ category_id }`.
+3. Backend valida: `user_id === req.userId`, `category_id`
+   existe no catálogo global, e emite um `reassignCategoryBulk(
+   { _id, user_id }, category_id)` — a mesma função autorizada
+   do §4.4, mas com filtro de uma única despesa.
+4. Response `200 { data: Expense }` com o documento actualizado.
+5. Frontend faz optimistic update (chip muda instantaneamente)
+   com rollback em caso de erro. Toast de sucesso
+   `slide-in-right` "Categoria actualizada".
+
+**Garantias:**
+
+- Nenhum override é criado. As próximas despesas com a mesma
+  entidade continuam a seguir as regras actuais (catálogo global
+  ou override pessoal, se já existir).
+- A despesa fica com `updated_at` actualizado (§4.4) — audit
+  trail natural.
+- Qualquer edição posterior pelo mesmo ou outro path (ex.: novo
+  apply-to-all global) pode reescrever esse `category_id`. Não
+  há "pin" do user para "eu já editei isto, não mexam". Isto é
+  intencional: o user que quiser persistência cria um override
+  pessoal via §9 ou activa o checkbox do §12.5.
+
+### 12.5 Opt-in: aplicar entity-wide
+
+Fluxo destrutivo (checkbox **ligado**). A label do checkbox
+mostra a entidade exacta da despesa em contexto:
+
+> ☐ Aplicar a todas as despesas de **"Lidl"**
+
+Isto elimina ambiguidade: o user vê exactamente qual a string
+que vai ser usada como pattern. Nenhum match fuzzy, nenhuma
+surpresa.
+
+**Fluxo:**
+
+1. User marca o checkbox e clica `Guardar`.
+2. Frontend abre um **segundo modal** de confirmação (não um
+   simples `confirm()`) com:
+
+```
+┌─ Confirmar alteração em massa ─────────────┐
+│                                             │
+│  Vais alterar a categoria de todas as      │
+│  despesas passadas e futuras com entidade  │
+│  "Lidl" de Groceries para Coffee.          │
+│                                             │
+│  → 42 despesas vão ser re-catalogadas      │
+│  → Novas despesas futuras com "Lidl"       │
+│     serão automaticamente Coffee            │
+│                                             │
+│  Esta acção é reversível manualmente,      │
+│  criando outra regra ou editando este      │
+│  override em /categories.                   │
+│                                             │
+│    [ Voltar atrás ]    [ Sim, aplicar ]    │
+└─────────────────────────────────────────────┘
+```
+
+3. O preview (`42 despesas`) vem de uma chamada prévia a `POST
+   /api/category-overrides/preview` com `{ pattern: entity,
+   match_type: 'exact', category_id }`, ou então a criação do
+   override com `dry_run: true` no apply-to-all. O número aparece
+   antes do user confirmar, para não comprometer a regra sem
+   visibilidade de impacto.
+4. Se o user confirmar, o frontend faz **duas chamadas
+   sequenciais**:
+   a) `POST /api/category-overrides` upsert com `{ pattern:
+      entity, match_type: 'exact', category_id }`. Se já existe
+      override para essa entidade (§4.3 índice único), faz
+      `PUT` em vez de `POST`.
+   b) `POST /api/category-overrides/:id/apply-to-all` com
+      `{ scope: 'affected', dry_run: false }`.
+5. Response final re-puxa a página actual (`GET /api/expenses`)
+   para reflectir os 42 `category_id` novos.
+6. Toast de sucesso `"42 despesas re-catalogadas"`.
+
+**Porquê duas chamadas em vez de um endpoint combinado.** A API
+do §8 já expõe tudo o que é preciso; criar um endpoint
+`/expenses/:id/category-apply-all` duplica lógica. O custo de
+dois round-trips (< 300 ms no total) é invisível por trás do
+spinner do modal. Se no futuro ficar lento (improvável), o
+endpoint combinado é um refactor pequeno.
+
+### 12.6 Integração com a hierarquia (§3, §5)
+
+O entity-wide cria sempre um **override pessoal** (tabela
+`curve_category_overrides`), nunca mexe no catálogo global. Isto
+é coerente com o §7.3:
+
+- User não-admin escolhe `Lidl = Coffee` apenas para si.
+- Admin que use o quick-edit também cria um **override pessoal
+  para si** — editar o catálogo global requer ir ao ecrã
+  `/categories` em modo admin (§9.9). Garantia importante:
+  editar uma despesa no dashboard nunca afecta outros users por
+  engano, mesmo como admin.
+
+Se o user já tinha um override para essa entidade a apontar para
+outra categoria, o upsert do §12.5(4a) **sobrescreve** o destino.
+Os outros campos (`match_type`, `priority`) mantêm-se. O modal
+de confirmação do §12.5 tem de detectar este caso e ajustar a
+cópia:
+
+> "Já tens uma regra: **Lidl → Home Improvement**.
+> Vais alterá-la para **Lidl → Coffee** e re-catalogar as 42
+> despesas afectadas."
+
+### 12.7 API (delta ao §8)
+
+Um endpoint novo, dedicado ao single-expense path:
+
+`PUT /api/expenses/:id/category` — actualiza apenas o
+`category_id` da despesa `:id`, enforcando `user_id: req.userId`
+no filtro. Body `{ category_id: ObjectId | null }`.
+
+- `200` → `{ data: Expense }` (expense actualizado)
+- `400 invalid_category_id` — `category_id` não é um ObjectId válido
+- `404 expense_not_found` — inclui o caso cross-user (§7.5, 404
+  em vez de 403)
+- `404 category_not_found` — `category_id` não existe no catálogo
+  global. `null` é aceite (remove associação).
+
+**Não precisa de `requireAdmin`** — qualquer user autenticado
+pode editar as suas próprias despesas (§7.3 permissions matrix
+ganha uma linha adicional para esta rota).
+
+Os restantes endpoints (create/upsert override + apply-to-all)
+reutilizam exactamente o shape do §8.4 e §8.5 sem delta.
+
+### 12.8 UIX — motion & feedback
+
+Consistente com o §9.8 e com `UIX_DESIGN.md §4`:
+
+- **Abertura do popover.** `fade-in` 200 ms + `translateY(-8px)`
+  → 0. Curto, subtil, não distrai a tabela por baixo.
+- **Grid de chips.** Stagger `animationDelay: i * 30ms` (mais
+  rápido que o stagger da lista do §9.3 — o popover é pequeno
+  e não deve demorar).
+- **Chip seleccionado.** `ring-2 ring-curve-500` aparece
+  instantâneo, sem animação — é feedback, não decoração.
+- **Botão Guardar em loading.** Spinner `animate-spin` +
+  texto `"A guardar..."` (consistência com §10 do UIX_DESIGN).
+- **Optimistic update no chip da tabela.** O chip muda
+  imediatamente na célula da tabela mal o popover feche, antes
+  da response confirmar. Em caso de erro 4xx/5xx, `fade-out` +
+  rollback + toast de erro `bg-red-50 text-curve-700`.
+- **Confirmação entity-wide.** Modal central com `fade-in` +
+  `scale-95 → scale-100` em 250 ms. Backdrop `bg-sand-950/40`.
+  Idêntico ao modal de apply-to-all do §9.7 — mesmo componente
+  reutilizável, `<ConfirmDialog>`.
+
+### 12.9 Empty states e edge cases
+
+- **Despesa sem categoria (`category_id = null`).** O chip
+  aparece como `—` cinzento (`text-sand-300`). Click no `—`
+  abre o popover na mesma — é o caminho natural para atribuir
+  manualmente uma despesa "uncategorised" (§10.5).
+- **User sem categorias criadas.** Grid mostra empty state
+  `"Sem categorias — pede ao admin para criar."`. Não permite
+  guardar. Raro após seed inicial (§11.3 Fase 7).
+- **Mesma categoria seleccionada + `Guardar`.** Botão fica
+  disabled enquanto `selection === exp.category_id` e o
+  checkbox está desligado. Evita chamadas no-op ao backend.
+- **Race com sync automático.** Se um sync correr entre o open
+  e o save do popover e a despesa for re-catalogada, o save do
+  user ganha (é mais recente) — `updated_at` reflecte o último
+  write. Aceitável: o user escolheu explicitamente.
+- **Despesa apagada do outro lado.** Cenário impossível hoje
+  (Curve Sync nunca apaga, §4.4). Se Embers vier a apagar, o
+  `PUT` devolve `404 expense_not_found` e a linha desaparece no
+  próximo refresh da tabela.
+
+### 12.10 Posição no roadmap
+
+Encaixa na **Fase 6** do §11.3 (apply-to-all + relaxação do
+§4.4) como sub-entregável:
+
+- **6a.** `reassignCategoryBulk` + endpoints de apply-to-all
+  (§8.5) — já previsto.
+- **6b.** `PUT /api/expenses/:id/category` (§12.7) — adição
+  pequena, reutiliza o mesmo helper.
+- **6c.** Componente `<CategoryPickerPopover>` + integração nas
+  tabelas `/expenses` e `/` — frontend isolado, flag friendly.
+
+A Fase 6 continua reversível como está descrito em §11.5: desligar
+o popover do frontend é um rollback de uma linha (remover o
+`onClick` do chip). O endpoint novo pode ser desligado em
+`server/src/index.js` sem efeitos colaterais.
+
+### 12.11 Testes a acrescentar
+
+- **Unit.** `PUT /api/expenses/:id/category` com user_id válido
+  (200), user_id cross (404), category_id inválido (404), null
+  (200 com `category_id = null`).
+- **Integration.** Quick-edit single-expense numa despesa, abrir
+  outra página, confirmar que só uma linha mudou e as restantes
+  Lidl continuam em Groceries.
+- **Integration.** Quick-edit com checkbox ligado cria override,
+  corre apply-to-all, confirma contadores e verifica que as
+  despesas de *outros* users não são tocadas (§12.6).
+- **Visual.** Snapshot do popover com 4 categorias e com 20
+  categorias (scroll interno), com e sem category actual
+  seleccionada.
+- **A11y.** Navegação por teclado completa (Tab/Enter/Escape)
+  no popover e no modal de confirmação, focus trap ao abrir,
+  focus restore ao fechar (volta ao chip clicado).
