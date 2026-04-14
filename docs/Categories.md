@@ -558,20 +558,276 @@ têm de se manter verdadeiras em qualquer ponto no tempo:
 
 ## 4. Modelo de dados
 
-_Placeholder._ Define exactamente o que muda no MongoDB:
+O capítulo 3 desenhou o sistema ao nível do modelo mental: dois
+níveis, overrides pessoais, apply-to-all opcional. Este capítulo
+traduz esse modelo em MongoDB. As decisões-chave, antes dos detalhes:
 
-- `categories` (existente, partilhado com Embers): continua com o
-  schema canónico (`name`, `entities[]`, `icon`, timestamps). Curve Sync
-  passa a ter CRUD mas não pode adicionar campos novos — extensões vão
-  para colecções próprias.
-- **Nova colecção** `curve_category_overrides` (owned por Curve Sync):
-  `{ user_id, pattern, match_type, category_id, created_at, updated_at }`
-  com índice composto único por `(user_id, pattern_normalized)`.
-- **Ajuste** a `expenses`: passa a permitir UPDATE apenas do campo
-  `category_id` para suportar "apply to all". Todos os outros campos
-  continuam imutáveis (entity, amount, date, card, digest, user_id).
-- Notas sobre compatibilidade com Mongoid (snake_case timestamps,
-  collection name explícito, ObjectId em vez de String).
+- O **catálogo global** continua numa colecção partilhada com Embers
+  (`categories`) e o seu schema não muda nem um bit.
+- A **camada pessoal** vive numa **colecção nova**
+  (`curve_category_overrides`), 100% pertencente a Curve Sync, que o
+  Embers não precisa de ler nem de escrever.
+- A colecção `expenses` **relaxa** uma das suas regras de acesso para
+  permitir UPDATE do campo `category_id`, e só desse campo. É a única
+  mexida necessária para suportar apply-to-all.
+
+Tudo o resto — totais por categoria, trend mensal, contadores de
+entidades — é derivado à leitura e nunca persistido.
+
+### 4.1 Vista geral das três camadas
+
+```
+┌────────────────────────────┐        ┌─────────────────────────┐
+│  categories (partilhado)   │        │  users (partilhado)     │
+│  ─ name                    │        │  ─ email                │
+│  ─ entities[]  (admin)     │◄──┐    │  ─ role (user|admin)    │
+│  ─ icon                    │   │    └─────────┬───────────────┘
+│  ─ timestamps              │   │              │
+└──────────┬─────────────────┘   │              │ user_id
+           │                     │              │
+           │ category_id         │              │
+           │                     │              ▼
+           │   ┌─────────────────┴────────────────────────────┐
+           │   │  curve_category_overrides (Curve Sync)       │
+           │   │  ─ user_id         (ref User)                │
+           │   │  ─ category_id     (ref Category)            │
+           │   │  ─ pattern         (raw, como o user escreve)│
+           │   │  ─ pattern_norm    (derivado, indexável)     │
+           │   │  ─ match_type      (exact|starts_with|contains)
+           │   │  ─ priority        (desempate, default 0)    │
+           │   │  ─ timestamps                                │
+           │   └──────────────────────────────────────────────┘
+           │
+           ▼
+┌────────────────────────────┐
+│  expenses (partilhado)     │
+│  ─ entity                  │
+│  ─ amount / date / card    │
+│  ─ digest (unique)         │
+│  ─ user_id                 │
+│  ─ category_id   ◄── agora UPDATÁVEL (ver §4.4)
+│  ─ timestamps              │
+└────────────────────────────┘
+```
+
+### 4.2 `categories` — schema partilhado, sem alterações
+
+O schema canónico (`docs/embers-reference/models/category.rb`,
+`server/src/models/Category.js`) mantém-se exactamente como hoje:
+
+```javascript
+// server/src/models/Category.js — sem diffs no schema
+const categorySchema = new mongoose.Schema(
+  {
+    name:     { type: String, required: true, unique: true },
+    entities: [{ type: String }],
+  },
+  {
+    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+    collection: 'categories',
+  },
+);
+```
+
+**O que muda** não é o schema mas sim as **regras de acesso**: o
+CLAUDE.md actual diz "READ-ONLY (owned by Embers)"; passa a dizer
+"FULL CRUD, reservado a admin" (ver capítulo 7 para o middleware e
+capítulo 11 para a mudança na regra em CLAUDE.md). O que continua
+proibido:
+
+- Adicionar campos novos. `match_type`, `priority`, `color`,
+  `global_vs_user_flag`, `regex_pattern` — nada disso entra aqui. A
+  riqueza de metadados vive em `curve_category_overrides` (§4.3).
+- Alterar índices existentes.
+- Tocar nos campos `icon_*` que o Paperclip do Embers gere.
+
+**Como o catálogo global é interpretado pelo matcher.** Cada entry
+do array `entities[]` é tratado pelo Curve Sync como um padrão
+`contains`, aplicado depois de normalização (capítulo 5). Isto é o
+comportamento actual já implementado em `assignCategoryFromList`,
+formalizado como contrato: não há `match_type` por entry no catálogo
+global, porque não há onde o guardar sem mexer no schema. Se um
+admin quiser precisão extra — por exemplo, "Lidl" como prefix em vez
+de contains — pode sempre escrever entradas mais específicas (`Lidl
+Cascais`, `Lidl Lisboa`) e deixar o longest-match-wins desempatar.
+
+### 4.3 `curve_category_overrides` — colecção nova, pertence a Curve Sync
+
+É aqui que vive toda a camada pessoal. Schema proposto:
+
+```javascript
+// server/src/models/CategoryOverride.js (novo)
+const categoryOverrideSchema = new mongoose.Schema(
+  {
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+    },
+    category_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Category',
+      required: true,
+    },
+    // O padrão tal como o user o escreveu (preservado para mostrar
+    // na UI sem surpresas tipo "escrevi 'Lidl' e agora aparece 'lidl'").
+    pattern: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    // Forma normalizada (lowercase, sem diacríticos, espaços
+    // colapsados, sufixos residuais removidos). É esta que o matcher
+    // usa E é esta que entra no índice único — garante que "Lidl",
+    // " lidl " e "LIDL" são considerados o mesmo padrão para efeitos
+    // de duplicados. A regra exacta de normalização vive no cap. 5.
+    pattern_normalized: {
+      type: String,
+      required: true,
+    },
+    match_type: {
+      type: String,
+      enum: ['exact', 'starts_with', 'contains'],
+      default: 'contains',
+      required: true,
+    },
+    // Desempate manual quando várias regras do MESMO user casam a
+    // mesma despesa. Não é o mecanismo principal — longest-match-wins
+    // cobre a maior parte dos empates. Fica como válvula de escape
+    // para power-users.
+    priority: {
+      type: Number,
+      default: 0,
+    },
+  },
+  {
+    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+    collection: 'curve_category_overrides',
+  },
+);
+
+// Dois overrides do mesmo user com o mesmo padrão normalizado são
+// proibidos — senão não há forma de decidir qual vence sem recorrer a
+// ordem de insert, que é frágil. Se o user quiser mudar a categoria
+// de "Lidl", edita o override existente em vez de criar outro.
+categoryOverrideSchema.index(
+  { user_id: 1, pattern_normalized: 1 },
+  { unique: true },
+);
+
+// Query quente: o sync orchestrator carrega TODOS os overrides do
+// user dono do config no arranque de cada run. Este índice cobre a
+// leitura por user_id puro. Ver §4.5.
+categoryOverrideSchema.index({ user_id: 1 });
+```
+
+**Porquê uma colecção nova em vez de embutir nos documentos do
+`Category`.** Três razões, por ordem de peso:
+
+1. A regra inviolável de não mexer no schema partilhado com Embers.
+2. Overrides são **por user**; guardá-los dentro de `Category`
+   obrigaria a um sub-documento-por-user que explodiria o tamanho
+   médio dos docs da categoria e misturaria dados globais com dados
+   pessoais.
+3. A query quente do sync orchestrator é "carrega todos os overrides
+   do user _X_", não "carrega todas as regras da categoria _Y_". Uma
+   colecção dedicada com índice `{ user_id: 1 }` serve exactamente
+   essa query em O(log n).
+
+**Porquê `pattern` + `pattern_normalized` em vez de só um dos
+dois.** `pattern` é o que o user vê e edita; `pattern_normalized` é
+o que o matcher compara e o que tem unicidade. Manter os dois
+separados evita ter de re-normalizar em cada leitura, torna o
+índice determinístico e permite mostrar o original na UI mesmo que
+a normalização mude no futuro (migração: recalcular
+`pattern_normalized` em massa, `pattern` fica intocado).
+
+### 4.4 `expenses` — relaxação mínima para apply-to-all
+
+O CLAUDE.md actual diz explicitamente:
+
+> - **`expenses`** — READ + INSERT only (never UPDATE/DELETE existing
+>   records)
+
+Esta regra trava o apply-to-all: reescrever `category_id` de despesas
+passadas é, por definição, um UPDATE. A regra passa a ter uma
+excepção única, explícita e enforced na camada de serviço:
+
+> - **`expenses`** — READ + INSERT + UPDATE (**apenas do campo
+>   `category_id`**). Todos os outros campos permanecem imutáveis;
+>   DELETE continua proibido.
+
+**Enforcement.** O schema Mongoose não tem forma nativa de proibir
+UPDATEs granulares. A disciplina é garantida em **duas camadas**:
+
+1. **Serviço dedicado.** Todas as reescritas retroactivas passam por
+   uma única função utilitária (provisoriamente
+   `services/expense.js :: reassignCategoryBulk(filter, category_id)`)
+   que só emite `Expense.updateMany(filter, { $set: { category_id
+   } })`. Nenhuma outra função no codebase tem licença para chamar
+   `Expense.update*` com campos que não sejam `category_id`.
+2. **Code review.** A regra fica documentada no CLAUDE.md (capítulo
+   11) e em jsdoc acima da função, como banner visível.
+
+**O que continua proibido, por design:**
+
+- UPDATE de `entity`, `amount`, `date`, `card`, `digest`, `user_id` —
+  reescrever qualquer um destes partiria o mecanismo de dedup
+  (`digest`) ou o isolamento por user, e ultrapassaria o contrato
+  com Embers.
+- DELETE de despesas. Só o Embers tem a lógica de "undo" para
+  expenses; Curve Sync nunca apaga.
+
+**Nota sobre `updated_at`.** A opção `timestamps: { updatedAt:
+'updated_at' }` do Mongoose actualiza automaticamente o campo a
+cada `updateMany`/`updateOne` com top-level `$set`, o que é o
+comportamento desejado: uma despesa re-catalogada fica com
+`updated_at` a apontar para o momento do apply-to-all, o que ajuda
+auditoria e debugging sem mexer noutro lado.
+
+### 4.5 Índices e queries quentes
+
+| Query | Onde | Índice que serve |
+|-------|------|------------------|
+| "Dá-me as categorias ordenadas por nome" (listar categorias) | `GET /api/categories` | `{ name: 1 }` (já existe por ser `unique`) |
+| "Dá-me todos os overrides do user X" (sync orchestrator, carregamento inicial) | `CategoryOverride.find({ user_id })` | `{ user_id: 1 }` (novo) |
+| "Existe um override do user X com este padrão normalizado?" (criar override) | insert check | `{ user_id: 1, pattern_normalized: 1 }` unique (novo) |
+| "Dá-me o total do mês em despesas do user X por `category_id`" (ecrã /categories) | aggregate `expenses` | `{ user_id: 1, date: 1 }` existe via `{ digest: 1, user_id: 1 }`? **não** — é um índice composto diferente. Esta query vai usar um scan filtrado por `user_id` + `date`. Se a telemetria mostrar latência relevante, adicionamos `{ user_id: 1, date: 1 }` como índice dedicado. |
+| "Quantas despesas do user X têm entity que case com este padrão?" (pré-visualização do apply-to-all) | `Expense.countDocuments({ user_id, entity: regex })` | scan por `user_id`; o filtro de entity é regex, não beneficia de índice. É aceitável: operação cold, disparada por clique humano, não por loop. |
+
+Nenhuma destas queries é nova para o Curve Sync em termos de custo —
+as despesas já são lidas por user no dashboard e na `/expenses`, e
+as categorias já são carregadas no arranque do sync. O único índice
+verdadeiramente novo é o `{ user_id, pattern_normalized }` unique
+em `curve_category_overrides`, que é pequeno (cabe inteiro em RAM
+mesmo com centenas de overrides por user).
+
+### 4.6 Compatibilidade Mongoose ↔ Mongoid
+
+A checklist que já governa as outras colecções Curve-Sync-owned
+continua a aplicar-se à colecção nova:
+
+- `timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }`.
+  Snake_case obrigatório — é o que o Mongoid espera e o que torna
+  `curve_category_overrides` legível por qualquer ferramenta que
+  inspeccione a base partilhada.
+- `collection: 'curve_category_overrides'` explícito. Sem isto o
+  Mongoose pluraliza (ou deixa singular, depende da versão) e
+  partiria os scripts de inspecção.
+- Referências sempre como `mongoose.Schema.Types.ObjectId`, nunca
+  como `String`. `user_id` tem de ser um ObjectId genuíno para
+  `populate` e aggregate cross-collection funcionarem.
+- Não usar `strict: false` nesta colecção — é 100% propriedade do
+  Curve Sync, o schema é o source of truth, campos fantasma são
+  bugs.
+- Nada de `_type` discriminator, nada de STI — uma classe, uma
+  colecção, uma intenção.
+
+Com isto, o modelo de dados fica especificado sem nenhuma ambiguidade:
+`categories` é partilhado e inalterado; `curve_category_overrides` é
+novo e bem indexado; `expenses` cede exactamente uma excepção,
+enforced no serviço. O capítulo 5 começa a descrever como é que a
+função de matching usa estas três camadas em conjunto.
 
 ## 5. Algoritmo de matching
 
