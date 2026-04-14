@@ -4,13 +4,34 @@ import { MagnifyingGlassIcon } from '../layout/Icons';
 /**
  * <CategoryPickerPopover>
  *
- * Single-expense quick-edit popover (docs/Categories.md §12.2-§12.4).
+ * Single-expense quick-edit popover (docs/Categories.md §12.2-§12.4)
+ * AND bulk-move popover (docs/Categories.md §12.x — batch-move) for
+ * the /expenses multi-select flow.
  *
- * Trigger: click on a category chip in the /expenses or / table.
- * Action:  reassigns a single expense to a different category via
- *          PUT /api/expenses/:id/category. No entity-wide checkbox
- *          in this PR — the opt-in path of §12.5 lands with the
- *          override/apply-to-all phase.
+ * Trigger (single): click on a category chip in the /expenses or /
+ *   table.
+ * Trigger (bulk):   click on "Mover para…" in the sticky action bar
+ *   that appears when ≥1 row is selected on /expenses.
+ *
+ * Action (single): reassigns one expense via
+ *   PUT /api/expenses/:id/category.
+ * Action (bulk):   reassigns up to 500 expenses via
+ *   PUT /api/expenses/bulk-category.
+ *
+ * The popover itself doesn't know which endpoint will be hit — it
+ * just calls `onSelect(categoryId | null)` and the parent does the
+ * right request. The only thing that changes between the two modes
+ * is the header label and the "current" highlight:
+ *
+ *   - Single mode (`expense` prop present): title reads "Alterar
+ *     categoria" and the current category is highlighted. Clicking
+ *     it is a no-op.
+ *   - Bulk mode (`context={ kind: 'bulk', count: N }`): title reads
+ *     "Mover N despesas para…" and no tile is highlighted because the
+ *     selection is typically a mix of categories. Every click fires
+ *     a write — including clicking a category that some of the
+ *     selected rows already have (the server's `skipped` field keeps
+ *     the toast honest).
  *
  * Interaction model — click-to-save:
  *   A single click on any category tile (or the "Sem categoria" row)
@@ -25,21 +46,25 @@ import { MagnifyingGlassIcon } from '../layout/Icons';
  * Focus + dismissal:
  *   - Mount focuses the search input.
  *   - `Escape` or click outside calls `onCancel`.
- *   - Clicking the current category is a no-op (no wasted round-trip).
+ *   - In single mode, clicking the current category is a no-op.
  *
  * Props:
- *   @param {Object} expense
- *     The expense whose chip was clicked. Needs `_id`, `entity`, and
- *     optionally `category_id` + `category_name` for the current
- *     highlight.
+ *   @param {Object} [expense]
+ *     Single mode only. The expense whose chip was clicked. Needs
+ *     `_id`, `entity`, and optionally `category_id` + `category_name`
+ *     for the current highlight.
+ *   @param {Object} [context]
+ *     Bulk mode only. `{ kind: 'bulk', count: Number }`. When set,
+ *     `expense` is ignored (and typically omitted by the caller).
  *   @param {Array}  categories
  *     Pre-loaded category catalogue. The parent page calls
  *     `api.getCategories()` once on mount and passes the list in —
  *     avoids a round-trip per click.
  *   @param {Function} onSelect(categoryId | null)
  *     Called immediately when the user clicks any tile other than the
- *     currently-selected one. The parent handles the PUT, optimistic
- *     update and rollback.
+ *     currently-selected one (single mode) or any tile at all (bulk
+ *     mode). The parent handles the PUT, optimistic update and
+ *     rollback.
  *   @param {Function} onCancel()
  *     Called on Escape, click-outside, or the × button.
  *   @param {boolean} [saving]
@@ -48,6 +73,7 @@ import { MagnifyingGlassIcon } from '../layout/Icons';
  */
 export default function CategoryPickerPopover({
   expense,
+  context,
   categories,
   onSelect,
   onCancel,
@@ -57,7 +83,18 @@ export default function CategoryPickerPopover({
   const searchRef = useRef(null);
   const [query, setQuery] = useState('');
 
-  const currentId = expense?.category_id ? String(expense.category_id) : null;
+  const isBulk = context?.kind === 'bulk';
+  // Bulk selection spans multiple expenses, typically with mixed
+  // categories — a single-category highlight would be misleading, so
+  // we simply don't highlight anything in bulk mode.
+  const currentId = isBulk
+    ? null
+    : expense?.category_id
+      ? String(expense.category_id)
+      : null;
+  const title = isBulk
+    ? `Mover ${context.count} ${context.count === 1 ? 'despesa' : 'despesas'} para…`
+    : 'Alterar categoria';
 
   // Focus the search box on mount — users landing in the popover via a
   // click expect to type-to-filter immediately. Restore focus to the
@@ -103,11 +140,14 @@ export default function CategoryPickerPopover({
 
   // Click-to-save entry point used by every tile + the "Sem categoria"
   // row. Guards against: (a) parent-declared busy state while a PUT is
-  // in flight, and (b) clicking the current selection, which would
-  // fire a pointless no-op write.
+  // in flight, and (b) clicking the current selection in single mode
+  // (a pointless no-op write). In bulk mode the current-click guard
+  // is dropped because there is no single "current" — the server will
+  // honestly report `skipped` for any selected rows that were already
+  // in the target category.
   const handlePick = (id) => {
     if (saving) return;
-    if (id === currentId) return;
+    if (!isBulk && id === currentId) return;
     onSelect?.(id);
   };
 
@@ -124,7 +164,7 @@ export default function CategoryPickerPopover({
     >
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-sand-900">
-          Alterar categoria
+          {title}
         </h3>
         <button
           type="button"

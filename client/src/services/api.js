@@ -70,6 +70,33 @@ export const updateExpenseCategory = (id, category_id) =>
     body: JSON.stringify({ category_id }),
   });
 
+// Compact id-only fetch of every expense that matches the given
+// filter (same params as getExpenses). The server enforces a hard
+// ceiling of 500 rows — the client must check `total <= 500` on a
+// previous paginated response before calling this, because a 400
+// `bulk_too_large` comes back otherwise. Used by the /expenses
+// "Seleccionar todas as N" multi-select flow (docs/Categories.md
+// §12.x — batch-move).
+export const getExpenseIds = (params) =>
+  request(
+    `/expenses?${new URLSearchParams({ ...(params ?? {}), fields: '_id' })}`,
+  );
+
+// Bulk-reassign `category_id` across up to 500 expenses owned by the
+// caller. `category_id` accepts an ObjectId hex string or `null` to
+// clear. Server rejects anything over 500 with a 400 `invalid_body`.
+// Returns `{ moved, skipped, target_category_name }` where `skipped`
+// covers rows that were already in the target category, ids the user
+// doesn't own, or duplicates in the request payload.
+export const bulkMoveExpenses = (ids, category_id) =>
+  request('/expenses/bulk-category', {
+    method: 'PUT',
+    body: JSON.stringify({ ids, category_id }),
+    // Worst case is 500 writes server-side. Generous timeout so the
+    // UI doesn't surface a spurious "pedido expirou" on slow links.
+    timeoutMs: 30_000,
+  });
+
 // Categories (read-only for users; admin-only entity DELETE below)
 export const getCategories = () => request('/categories');
 

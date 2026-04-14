@@ -142,7 +142,7 @@ export default function CurveLogsPage() {
 // ---------- Row components ----------
 
 function SingleRow({ log }) {
-  const { type, title } = describeLog(log);
+  const { type, title, hideDetail } = describeLog(log);
   const isExpense = type === 'despesa' && log.entity;
   return (
     <tr className="border-b border-sand-50 transition-colors hover:bg-sand-50/60">
@@ -164,7 +164,7 @@ function SingleRow({ log }) {
             )}
           </div>
         )}
-        {!isExpense && log.error_detail && !title.includes(log.error_detail) && (
+        {!isExpense && !hideDetail && log.error_detail && !title.includes(log.error_detail) && (
           <div className="mt-0.5 break-all font-mono text-xs text-sand-400">{log.error_detail}</div>
         )}
       </td>

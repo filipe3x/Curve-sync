@@ -27,7 +27,10 @@ export function describeLog(log) {
     // `despesa` for the single-expense recat row so the badge colour is
     // consistent with the chip it originated from on /expenses and /.
     // Source: docs/Categories.md §13.5.
-    const despesaActions = ['expense_category_changed'];
+    const despesaActions = [
+      'expense_category_changed',
+      'expense_category_changed_bulk',
+    ];
     // Dedicated `catalogo` bucket for rows that mutate the category
     // catalogue / personal overrides — create/update/delete of a rule,
     // and the bulk apply-to-all pass it triggers. Keeps them from
@@ -76,6 +79,41 @@ export function describeLog(log) {
         return { type, title: `Autorização falhou${log.error_detail ? `: ${log.error_detail}` : ''}` };
       case 'oauth_token_refreshed':  return { type, title: 'Token Microsoft renovado automaticamente' };
       case 'first_sync_completed':   return { type, title: 'Primeira sincronização concluída' };
+      case 'expense_category_changed_bulk': {
+        // docs/Categories.md §13.2 — batch-move slice. The server
+        // writes ONE audit row per bulk call with
+        //   `error_detail = "target=<name> count=<N> from_mixed=<bool>"`
+        // and leaves `entity` null (the selection is typically a
+        // mix of entities). `count` is the server-side modifiedCount
+        // — it already excludes rows that were already in the
+        // target, so "N despesas movidas para X" is accurate for
+        // every renderable row.
+        //
+        // `hideDetail: true` tells CurveLogsPage.SingleRow to skip
+        // its generic error_detail fallback — the title already
+        // summarises the three k=v pairs, dumping them below in mono
+        // would be double noise.
+        const targetMatch = log.error_detail?.match(/target=(.+?) count=/);
+        const countMatch = log.error_detail?.match(/count=(\d+)/);
+        const mixedMatch = log.error_detail?.match(/from_mixed=(true|false)/);
+        const target = targetMatch ? targetMatch[1] : null;
+        const count = countMatch ? Number(countMatch[1]) : null;
+        const mixed = mixedMatch ? mixedMatch[1] === 'true' : null;
+        const noun = count === 1 ? 'despesa movida' : 'despesas movidas';
+        if (count !== null && target) {
+          const suffix = mixed ? ' (origem mista)' : '';
+          return {
+            type,
+            title: `${count} ${noun} para ${target}${suffix}`,
+            hideDetail: true,
+          };
+        }
+        return {
+          type,
+          title: 'Movimento em massa de despesas',
+          hideDetail: true,
+        };
+      }
       case 'expense_category_changed': {
         // docs/Categories.md §13.2 #34 — canonical pt-PT:
         // Title: "<from> → <to>"

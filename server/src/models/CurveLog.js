@@ -72,6 +72,16 @@ const curveLogSchema = new mongoose.Schema(
       //     `status: 'error'` from the audit helper heuristic
       //     (`includes('failed')`).
       'expense_category_changed',
+      // Bulk multi-select move from the /expenses table
+      // (docs/Categories.md §13.2 — batch-move slice). Fired by
+      // PUT /api/expenses/bulk-category once per call, regardless of
+      // how many rows moved (one audit row scales better than N
+      // near-identical rows flooding `curve_logs`). Carries
+      // `error_detail = "target=<name> count=<N> from_mixed=true|false"`.
+      // `entity` is left null because the selection is typically a
+      // mix of entities — the per-row provenance lives in the
+      // optimistic update on the client, not in the audit row.
+      'expense_category_changed_bulk',
       'override_created', 'override_updated', 'override_deleted',
       'apply_to_all', 'apply_to_all_failed',
       // Admin-only catalogue surgery on the shared `categories`
