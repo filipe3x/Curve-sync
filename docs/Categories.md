@@ -1215,19 +1215,139 @@ escopo do MVP).
 
 ## 7. Autorização e papéis
 
-_Placeholder._ Mapeia capacidades por endpoint:
+O modelo de dois níveis do capítulo 3 assenta num sistema de
+permissões trivial mas obrigatório: algumas rotas são exclusivas
+de admins, outras são para qualquer user autenticado, e a distinção
+tem de ser enforced no backend — nunca só no frontend.
 
-| Acção | User | Admin |
-|-------|------|-------|
-| Ler categorias | ✓ | ✓ |
-| Criar / editar / apagar categoria | ✗ | ✓ |
-| Editar `Category.entities[]` (global) | ✗ | ✓ |
-| Criar / editar / apagar override pessoal | ✓ (só os seus) | ✓ (só os seus) |
-| "Apply to all" no catálogo global | ✗ | ✓ |
-| "Apply to all" num override pessoal | ✓ (só nas suas despesas) | ✓ (só nas suas despesas) |
+### 7.1 Fonte da verdade do papel
 
-Explica o middleware `requireAdmin` que será adicionado (lê `role` da
-colecção `users` — já existe a enum admin/user).
+O campo já existe no schema partilhado com Embers:
+
+```javascript
+// server/src/models/User.js
+email:              String,
+role:               String,   // 'user' | 'admin'
+encrypted_password: String,
+salt:               String,
+```
+
+Regras herdadas do CLAUDE.md (§MongoDB Collection Access Rules):
+
+- `role` é validado à inserção via `hashPassword` helper e fixo em
+  `'user'` para novos registos criados em Curve Sync.
+- **Curve Sync nunca promove nem despromove** — a atribuição de
+  `admin` continua exclusiva de Embers, que tem a "last admin"
+  guard própria.
+- O papel é **lido em runtime** a cada request, não guardado na
+  `Session`. Se um admin for despromovido em Embers, a próxima
+  chamada a uma rota admin-only falha com 403 sem precisar de
+  logout forçado.
+
+### 7.2 Middleware `requireAdmin`
+
+Corre **sempre depois** de `authenticate` (que já valida o bearer
+token e injecta `req.userId`).
+
+```javascript
+// server/src/middleware/requireAdmin.js (novo)
+export async function requireAdmin(req, res, next) {
+  const user = await User.findById(req.userId).select('role').lean();
+  if (!user) return res.status(401).json({ error: 'Sessão inválida.' });
+  if (user.role !== 'admin') {
+    audit({
+      action: 'admin_denied',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `${req.method} ${req.path}`,
+    });
+    return res.status(403).json({ error: 'Acesso reservado a administradores.' });
+  }
+  req.userRole = 'admin';
+  next();
+}
+```
+
+Duas leituras ao `users` por request admin (`authenticate` faz uma
+implícita via `sessions`, `requireAdmin` faz outra explícita). Para
+mitigar, pode-se cachear `role` em memória por `userId` com TTL
+curto (ex.: 30 s) — optimização opcional, não bloqueante para o
+MVP.
+
+### 7.3 Matriz de permissões
+
+| Rota | Público | User | Admin |
+|------|---------|------|-------|
+| `GET /api/categories` | — | ✓ | ✓ |
+| `POST /api/categories` | — | — | ✓ |
+| `PUT /api/categories/:id` | — | — | ✓ |
+| `DELETE /api/categories/:id` | — | — | ✓ |
+| `POST /api/categories/:id/entities` | — | — | ✓ |
+| `DELETE /api/categories/:id/entities/:entity` | — | — | ✓ |
+| `POST /api/categories/:id/apply-to-all` | — | — | ✓ |
+| `GET /api/category-overrides` | — | ✓ (só os próprios) | ✓ (só os próprios) |
+| `POST /api/category-overrides` | — | ✓ | ✓ |
+| `PUT /api/category-overrides/:id` | — | ✓ (só os próprios) | ✓ (só os próprios) |
+| `DELETE /api/category-overrides/:id` | — | ✓ (só os próprios) | ✓ (só os próprios) |
+| `POST /api/category-overrides/:id/apply-to-all` | — | ✓ | ✓ |
+| `GET /api/categories/stats` | — | ✓ | ✓ |
+
+"Só os próprios" é enforced dentro do handler: qualquer `find` /
+`findOne` / `updateOne` / `deleteOne` em `curve_category_overrides`
+adiciona `user_id: req.userId` ao filtro. Um admin não pode ler nem
+mexer nos overrides de outro user, mesmo com o papel `'admin'` —
+isto materializa o isolamento pessoal do §3.6.
+
+### 7.4 Duplo papel do admin
+
+Ser admin **adiciona** capacidades globais; não substitui nada do
+lado pessoal. Em particular:
+
+- O admin tem os seus próprios overrides pessoais, geridos
+  exactamente como um user comum.
+- Um apply-to-all feito pelo admin num override **pessoal dele** só
+  toca despesas do próprio admin — é indistinguível de um user
+  normal a fazer o mesmo.
+- Só as rotas sobre `categories` (catálogo global) e o apply-to-all
+  de regras globais é que consomem o bit de admin.
+
+Esta separação é o que permite que o admin use a app para gerir as
+suas finanças sem efeitos colaterais no catálogo global.
+
+### 7.5 Códigos HTTP e mensagens
+
+- **401** (`Sessão inválida.`) — token em falta, expirado ou
+  revogado. Tratado pelo `authenticate`.
+- **403** (`Acesso reservado a administradores.`) — token válido,
+  user autenticado, mas sem `role: 'admin'` para uma rota
+  admin-only. Tratado pelo `requireAdmin`.
+- **404** em vez de 403 para recursos de outros users — se um user
+  tenta `GET /api/category-overrides/:id` de um override que
+  pertence a outro, devolvemos 404 (não vaza a existência do
+  recurso). O filtro `user_id: req.userId` no handler garante que o
+  `findOne` devolve `null` e o handler responde `404 Override não
+  encontrado.` sem leak.
+
+Cada 403 gera um log `admin_denied` em `curve_logs` com método e
+rota. 401 já tem audit trail via `authenticate`.
+
+### 7.6 Casos-limite
+
+- **Despromoção a meio de sessão.** Admin perde o papel em Embers;
+  a próxima chamada admin falha 403, as restantes continuam a
+  funcionar como user normal. Sem logout forçado.
+- **Promoção a meio de sessão.** User torna-se admin em Embers; a
+  próxima chamada a rota admin passa 200 sem precisar de re-login.
+- **Admin sem categorias criadas.** `GET /api/categories` devolve
+  `{ data: [] }` e o ecrã de gestão mostra empty state "Ainda não
+  há categorias — cria a primeira."
+- **Último admin apaga-se a si próprio.** Fora do escopo — o
+  `destroy path` de `users` pertence a Embers e tem a "last admin"
+  guard própria (CLAUDE.md §MongoDB Collection Access Rules). Curve
+  Sync nunca apaga users.
+- **Race** entre `POST /api/categories` e `DELETE
+  /api/categories/:id`. Resolvido pelo `unique: true` do `name` e
+  por 404 no handler do DELETE se o doc já não existir.
 
 ## 8. API
 
