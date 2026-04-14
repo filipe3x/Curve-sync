@@ -529,6 +529,57 @@ function DeleteOverrideDialog({ target, onCancel, onConfirm, busy }) {
   );
 }
 
+// Admin-only confirmation for removing a single entity from a global
+// category's `entities` array. Matches the visual language of
+// DeleteOverrideDialog above — same backdrop, same `card` panel, same
+// btn-secondary/btn-primary footer — so the admin surgery slice stays
+// consistent with the rest of the /categories screen instead of the
+// ugly native `window.confirm` modal this replaced.
+function DeleteGlobalEntityDialog({ target, onCancel, onConfirm, busy }) {
+  if (!target) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-sand-950/30 p-4 animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="card w-full max-w-md">
+        <h2 className="text-lg font-semibold text-sand-900">
+          Remover "{target.entity}" do catálogo global?
+        </h2>
+        <p className="mt-2 text-sm text-sand-600">
+          A entidade será apagada de{' '}
+          <strong className="text-sand-800">{target.categoryName}</strong>.
+          Próximas sincronizações deixam de a associar automaticamente a
+          esta categoria.
+        </p>
+        <p className="mt-3 text-xs text-sand-500">
+          As despesas passadas que já usavam esta entidade mantêm a
+          categoria actual — a remoção não é retroactiva.
+        </p>
+        <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onCancel}
+            disabled={busy}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? 'A remover…' : 'Remover entidade'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApplyConfirmDialog({ preview, onCancel, onConfirm, busy }) {
   if (!preview) return null;
   return (
@@ -608,6 +659,11 @@ export default function CategoriesPage() {
   // `null` when no dialog is shown; the full override object while the
   // user picks between keep-past-expenses and cascade-re-resolve.
   const [deleteTarget, setDeleteTarget] = useState(null);
+  // Global-entity pending an admin delete confirmation. `null` when no
+  // dialog is shown; `{ categoryId, categoryName, entity }` while the
+  // admin is deciding. Separate from `deleteTarget` because the two
+  // flows have different consequences and can coexist.
+  const [deleteEntityTarget, setDeleteEntityTarget] = useState(null);
 
   const refreshAll = async () => {
     setLoading(true);
@@ -805,21 +861,28 @@ export default function CategoriesPage() {
   };
 
   // Admin-only: remove a single entity from the global catalogue.
-  // Confirms via `window.confirm` — the whole admin slice is minimal
-  // and a full modal would bloat the PR. Optimistically mutates the
-  // local `categories` state so the row disappears immediately, then
-  // rolls back on server error. Re-categorisation of past expenses
-  // that referenced this entity is deliberately NOT triggered here —
-  // existing expenses keep their `category_id` because resolveCategory
-  // is only consulted on new sync, never retroactively by DELETE.
-  // If the user wants retroactive cleanup they can still apply the
-  // resolver via an override + apply-to-all.
-  const handleDeleteGlobalEntity = async (categoryId, entity) => {
+  //
+  // Two-step flow: the row's Apagar button calls
+  // `handleRequestDeleteGlobalEntity`, which opens the
+  // DeleteGlobalEntityDialog. The dialog's Confirmar button then
+  // calls `handleDeleteGlobalEntityConfirm` below, which does the
+  // actual DELETE + optimistic update + rollback. This replaces the
+  // ugly native `window.confirm` prompt that ignored the site design.
+  //
+  // Re-categorisation of past expenses that referenced this entity is
+  // deliberately NOT triggered here — existing expenses keep their
+  // `category_id` because resolveCategory is only consulted on new
+  // sync, never retroactively by DELETE. If the user wants retroactive
+  // cleanup they can still apply the resolver via an override +
+  // apply-to-all.
+  const handleRequestDeleteGlobalEntity = (categoryId, categoryName, entity) => {
     if (!isAdmin) return;
-    const ok = window.confirm(
-      `Remover "${entity}" do catálogo global?\n\nAs despesas existentes que usam esta entidade mantêm a categoria actual — apenas novas sincronizações deixam de a associar automaticamente.`,
-    );
-    if (!ok) return;
+    setDeleteEntityTarget({ categoryId, categoryName, entity });
+  };
+
+  const handleDeleteGlobalEntityConfirm = async () => {
+    if (!deleteEntityTarget) return;
+    const { categoryId, entity } = deleteEntityTarget;
 
     setGlobalEntityBusy(true);
     // Snapshot for rollback on failure.
@@ -834,6 +897,7 @@ export default function CategoriesPage() {
     try {
       await api.deleteCategoryEntity(categoryId, entity);
       setToast({ type: 'ok', text: `Entidade "${entity}" removida.` });
+      setDeleteEntityTarget(null);
     } catch (err) {
       // Restore on failure. The server's 403/404/500 all land here.
       setCategories(snapshot);
@@ -1096,7 +1160,11 @@ export default function CategoriesPage() {
                         isAdmin={isAdmin}
                         busy={globalEntityBusy}
                         onDelete={(entity) =>
-                          handleDeleteGlobalEntity(selectedRow.category_id, entity)
+                          handleRequestDeleteGlobalEntity(
+                            selectedRow.category_id,
+                            selectedRow.category_name,
+                            entity,
+                          )
                         }
                       />
                     </section>
@@ -1127,6 +1195,16 @@ export default function CategoriesPage() {
         onCancel={() => setDeleteTarget(null)}
         onConfirm={handleDeleteOverrideConfirm}
         busy={overrideBusy}
+      />
+
+      <DeleteGlobalEntityDialog
+        target={deleteEntityTarget}
+        onCancel={() => {
+          if (globalEntityBusy) return;
+          setDeleteEntityTarget(null);
+        }}
+        onConfirm={handleDeleteGlobalEntityConfirm}
+        busy={globalEntityBusy}
       />
     </div>
   );
