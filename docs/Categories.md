@@ -1911,16 +1911,159 @@ hex hardcoded nos componentes.
 
 ## 10. Integração com o sync orchestrator
 
-_Placeholder._ Como o novo sistema encaixa no pipeline existente:
+Este capítulo mostra onde o pipeline actual (`syncOrchestrator.js`)
+tem de mexer para consumir o sistema dos capítulos 3–5. É uma
+mudança cirúrgica: duas linhas no arranque do sync, uma linha no
+loop por email, zero na estrutura. Nenhuma nova passagem no IMAP,
+nenhum write novo obrigatório.
 
-- Carregar overrides do user (actual `user_id` do config) no arranque
-  do sync, à semelhança do `categoriesCache` já existente.
-- Nova função `resolveCategory(entity, { overrides, globalCategories })`
-  substitui `assignCategoryFromList`.
-- Impacto em performance: duas `find()` por sync em vez de uma (ainda
-  O(1) por sync, não N+1).
-- Compatibilidade: se não houver overrides, comporta-se exactamente
-  como hoje.
+### 10.1 Ponto de entrada actual
+
+Hoje o orchestrator faz, por `run`, um único carregamento das
+categorias globais (`syncOrchestrator.js:252-262`) e chama
+`assignCategoryFromList(entity, categoriesCache)` no loop por
+email (`:334`). É um `O(1)` por sync (load uma vez) + `O(N·M)`
+por email (substring scan sobre as entidades de cada categoria)
+— a baseline que o capítulo 5 já caracterizou.
+
+### 10.2 O que muda
+
+Duas alterações, ambas dentro de `syncOrchestrator.js`:
+
+**1. Arranque do run — carregar overrides a par das categorias.**
+
+```javascript
+// Categories are loaded ONCE per run and reused for every email.
+let categoriesCache = [];
+let overridesCache = [];
+try {
+  [categoriesCache, overridesCache] = await Promise.all([
+    Category.find().lean(),
+    CategoryOverride.find({ user_id: config.user_id }).lean(),
+  ]);
+} catch (e) {
+  console.warn(`syncEmails: could not load categories/overrides: ${e.message}`);
+  // Proceed with empty caches — every expense ends up with
+  // category_id = null instead of an auto-assigned category.
+}
+```
+
+- **Uma única query adicional por run**, paralelizada com a que
+  já existe. Mantém o `O(1)` actual — não vira N+1.
+- **Filtro por `user_id`.** O orchestrator corre sempre no
+  contexto de um `CurveConfig`, que já tem `user_id`. Carregar
+  os overrides de outro user seria um leak (§3.6, §7.3).
+- **Fallback gracioso.** Se a `find` de overrides falhar, o run
+  continua com `overridesCache = []` e o resolver comporta-se
+  como se o user não tivesse regras pessoais — degrada para o
+  comportamento pré-overrides, não quebra.
+
+**2. Loop por email — chamar `resolveCategory`.**
+
+```javascript
+// ---- 2. Categorise ----
+const category_id = resolveCategory(parsed.entity, {
+  globalCategories: categoriesCache,
+  overrides: overridesCache,
+});
+```
+
+- Substituição directa de `assignCategoryFromList(parsed.entity,
+  categoriesCache)` na linha 334.
+- `resolveCategory` é a função implementada no §5.3 — recebe
+  entity raw, normaliza, corre o matching cache-aware e devolve
+  `category_id` (ObjectId) ou `null`.
+- **Prioridade dos overrides é enforced pelo resolver**, não
+  pelo orchestrator. O orchestrator não sabe nem precisa de
+  saber que a hierarquia existe.
+
+### 10.3 Precedência e "personal is sacred"
+
+A invariante do §6.2 ("personal is sacred") materializa-se aqui
+por construção:
+
+- Quando o sync corre para o user A, só os overrides de A estão
+  no `overridesCache`. O resolver só considera esses.
+- Se A tem `override(lidl → Coffee)` e B não tem, o run do A
+  atribui `Coffee`, o run do B atribui `Groceries` (catálogo
+  global). Nenhum dos dois runs cruza o outro.
+- Isto é **inerentemente** paralelizável por user — o orchestrator
+  já corre um run por `CurveConfig` de cada vez
+  (§EmailScheduler), e cada run vê apenas o seu próprio
+  `overridesCache`.
+
+### 10.4 Impacto em performance
+
+Medição aproximada (os números do §5.5 já são baseline):
+
+| Métrica | Antes | Depois | Delta |
+|---------|-------|--------|-------|
+| Queries por run (carga inicial) | 1 (`Category.find`) | 2 (+`CategoryOverride.find`) | +1, paralelizada |
+| Matching por email | O(N·M) substring | O(O + N·M) resolver | +O — tipicamente ≤ 20 |
+| Memória do cache por run | ~N cats | ~N cats + ~O overrides | +O |
+| Writes novos | — | — | — |
+
+`N` = nº de categorias globais (≤ 30 em prática), `M` = média
+de entidades por categoria, `O` = nº de overrides do user (≤
+algumas dezenas). Nenhum destes números tem escala suficiente
+para mudar a ordem de grandeza do run.
+
+Não há aumento no número de round-trips IMAP, nem no número de
+writes ao Mongo — os únicos writes continuam a ser `Expense.create`
+no success path e `CurveLog.create` via `writeLog()`.
+
+### 10.5 Auditoria e logs
+
+O `writeLog({ status: 'ok', ... })` do path de sucesso não muda.
+O `category_id` resolvido fica no documento `Expense` e é
+linkado pelo `CurveLogsPage` através do expense, não de um
+campo novo no log. Não é preciso inventar `status: 'categorised'`
+— a informação já está acessível pela cadeia
+`curve_logs → expense → category`.
+
+Dois casos onde faz sentido adicionar detail ao log:
+
+- **Match por override (ciclo normal).** `detail: "override →
+  <category_name>"` num log `ok` facilita debug de "porque é
+  que esta despesa caiu em Coffee?". Campo opcional,
+  truncado a 120 chars pelo `truncateDetail` existente.
+- **No match (fallback `null`).** Hoje uma despesa sem match
+  fica com `category_id = null` silenciosamente. Propõe-se
+  acrescentar um flag `uncategorised: true` ao log `ok`
+  correspondente, para o `/curve/logs` conseguir filtrar e
+  mostrar "N despesas sem categoria este ciclo — adiciona uma
+  regra".
+
+Ambos são *opcionais* para o rollout inicial — o pipeline
+funciona sem eles.
+
+### 10.6 Backwards-compat e shape idêntico
+
+Se o user **não tem overrides** e o catálogo global não foi
+alterado, o comportamento é **bit-a-bit idêntico** ao actual.
+Isto é garantido pela regra do §5.3: quando `overridesCache`
+está vazio, o resolver salta directamente para o matching global
+com a mesma semântica do `assignCategoryFromList` de hoje (com
+a única diferença "correcta" de ser agora normalised — ver
+§5.2). Para o user típico do MVP, o upgrade é invisível até ele
+criar a primeira regra.
+
+A função `assignCategoryFromList` pode permanecer exportada
+durante a fase 1 do rollout (§11) como shim que chama
+`resolveCategory` com `overrides: []` — remove-se na fase 2.
+
+### 10.7 Testes a acrescentar
+
+- **Unit.** `resolveCategory` já tem bateria própria (§5.6). Aqui
+  basta um teste de integração que monta um `CurveConfig` fake +
+  1 override + 1 email fixture e verifica que a `Expense` criada
+  aponta para a categoria do override, não para a global.
+- **Regressão.** Correr a suite de fixtures existente sem
+  overrides e garantir que os `category_id` resultantes são
+  idênticos aos do baseline actual (snapshot).
+- **Fallback.** Forçar a `find` de overrides a falhar (mock
+  throw) e confirmar que o run termina com sucesso, categorias
+  globais a funcionar, e 1 linha de warning no console.
 
 ## 11. Compatibilidade com Embers e plano de faseamento
 
