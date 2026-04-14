@@ -157,7 +157,14 @@ export default function ExpensesPage() {
       ) : expenses.length === 0 ? (
         <EmptyState title="Sem resultados" description="Tenta ajustar a pesquisa." />
       ) : (
-        <div className="animate-fade-in overflow-hidden rounded-2xl border border-sand-200 bg-white">
+        <div
+          /* `overflow-hidden` clips the CategoryPickerPopover that
+             escapes the last column. Toggle it off while the picker
+             is open so the popover can render over the row below. */
+          className={`animate-fade-in rounded-2xl border border-sand-200 bg-white ${
+            pickerExpenseId ? '' : 'overflow-hidden'
+          }`}
+        >
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-sand-100 text-left text-xs font-medium uppercase tracking-wide text-sand-400">

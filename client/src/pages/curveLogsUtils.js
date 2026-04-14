@@ -78,21 +78,28 @@ export function describeLog(log) {
       case 'first_sync_completed':   return { type, title: 'Primeira sincronização concluída' };
       case 'expense_category_changed': {
         // docs/Categories.md §13.2 #34 — canonical pt-PT:
-        // "Despesa recategorizada: <entity> → <to>"
+        // Title: "<from> → <to>"
+        // Subtitle: the entity (rendered by the row component's
+        // `isExpense` branch, which shows `log.entity` on a second
+        // line in smaller text).
         //
-        // `error_detail` follows the k=v convention ("from=X to=Y").
-        // We display the `to` side because that's what the user is
-        // going to look for when scanning history; the `from` is
-        // useful context but would bloat the row.
-        const toMatch = log.error_detail?.match(/to=([^\s]+)/);
-        const to = toMatch ? toMatch[1] : null;
+        // `error_detail` follows the convention
+        //   "from=<name> to=<name>"
+        // written by routes/expenses.js. Category names may contain
+        // spaces ("Casa e Jardim"), so we parse with a single regex
+        // that captures both halves: `from=` up to the literal " to="
+        // separator, and `to=` to end of string.
+        //
+        // Fallback: if the detail is missing or malformed, fall back
+        // to the entity alone so the row is never empty.
+        const detailMatch = log.error_detail?.match(/from=(.+?) to=(.+)$/);
+        const from = detailMatch ? detailMatch[1] : null;
+        const to = detailMatch ? detailMatch[2] : null;
+        if (from && to) {
+          return { type, title: `${from} → ${to}` };
+        }
         const entity = log.entity ?? '—';
-        return {
-          type,
-          title: to
-            ? `Despesa recategorizada: ${entity} → ${to}`
-            : `Despesa recategorizada: ${entity}`,
-        };
+        return { type, title: `Despesa recategorizada: ${entity}` };
       }
       case 'apply_to_all': {
         // docs/Categories.md §13.2 #32 — canonical pt-PT:

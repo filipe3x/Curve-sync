@@ -305,7 +305,18 @@ export default function DashboardPage() {
             description="As despesas aparecerão aqui após a primeira sincronização."
           />
         ) : (
-          <div className="overflow-hidden rounded-2xl border border-sand-200 bg-white">
+          <div
+            /* `overflow-hidden` normally clips the table rows to the
+               wrapper's rounded corners, but it also clips the
+               CategoryPickerPopover that opens out of the last column.
+               Toggle it off only while a picker is open so the popover
+               can escape; the brief loss of corner masking is
+               invisible because no row hover is in play during the
+               edit. */
+            className={`rounded-2xl border border-sand-200 bg-white ${
+              pickerExpenseId ? '' : 'overflow-hidden'
+            }`}
+          >
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-sand-100 text-left text-xs font-medium uppercase tracking-wide text-sand-400">
