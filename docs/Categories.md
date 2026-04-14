@@ -2067,20 +2067,242 @@ durante a fase 1 do rollout (§11) como shim que chama
 
 ## 11. Compatibilidade com Embers e plano de faseamento
 
-_Placeholder._ Garantias e ordem de rollout:
+Todas as decisões dos capítulos 3–10 foram tomadas sob a
+restrição "o Embers continua a funcionar unchanged". Este
+capítulo consolida as garantias dessa compatibilidade, lista as
+mudanças que o `CLAUDE.md` tem de reflectir, e propõe uma ordem
+de rollout fase-a-fase com pontos de reversão explícitos.
 
-- **Embers continua a funcionar:** `Category.entities[]` não muda de
-  schema; overrides ficam numa colecção à parte que o Embers ignora.
-- **Expenses:** a relaxação do UPDATE cobre só `category_id`; o
-  `before_create :assign_category` do Embers continua a correr para
-  novas despesas criadas do lado Embers.
-- **Faseamento sugerido:**
-  1. Backend — schema dos overrides + CRUD admin + matching novo.
-  2. Sync orchestrator — consumir overrides.
-  3. Frontend — ecrã master-detail (modo user primeiro, admin depois).
-  4. "Apply to all" — endpoint + modal de confirmação.
-  5. Migração de dados — nenhuma obrigatória; opcionalmente seed de
-     entidades comuns no catálogo global.
-- **Riscos e mitigação:** race-conditions entre admin add + user
-  override, atomicidade do bulk update, auditoria em `curve_logs`,
-  rollback plan.
+### 11.1 Garantias de compatibilidade com Embers
+
+**Schemas partilhados — zero alterações.**
+
+- `categories` mantém exactamente os campos do
+  `docs/embers-reference/models/category.rb`: `name`, `entities`,
+  `icon`, `created_at`, `updated_at`. Os capítulos 4–8 só tocam
+  estes campos — o `entities[]` é manipulado pelos endpoints
+  granulares do §8.3 mas continua a ser um array simples de
+  strings que o Mongoid consegue ler.
+- `expenses` mantém schema literal. A **única** relaxação é
+  operacional (§4.4): Curve Sync passa a poder UPDATE o campo
+  `category_id`, e só esse campo, via o helper
+  `reassignCategoryBulk`. O `before_create :assign_category` do
+  Embers (`docs/embers-reference/models/expense.rb:23`) continua
+  a correr para despesas criadas do lado Embers, usando o
+  `Category.where(:entities.in => [entity]).first` original.
+- `users` continua com as regras de `CLAUDE.md §MongoDB Collection
+  Access Rules`: Curve Sync nunca promove/despromove `role`, o
+  "last admin" guard é exclusivo de Embers.
+
+**Nova colecção — invisível ao Embers.**
+
+- `curve_category_overrides` vive no mesmo DB mas tem prefixo
+  `curve_*` (consistente com `curve_configs` e `curve_logs`). O
+  Embers não tem Mongoid model para este nome, portanto nunca a
+  lê nem escreve. Se alguém abrir a Rails console, a colecção
+  aparece no `show collections` mas não quebra nada.
+- A colecção só tem refs para `users` e `categories` — não cria
+  dependências cíclicas.
+
+**Leituras do Embers — resultado imutável.**
+
+- Se um user abrir o Embers e listar as suas despesas, a lista
+  continua idêntica. O `category_id` pode ter mudado (porque o
+  Curve Sync fez apply-to-all), mas o Embers só consome
+  `category_id → category.name`, que continua válido. Não há
+  campos novos, não há valores fora dos enums existentes.
+- O `category.total_spent` do Embers
+  (`docs/embers-reference/models/category.rb:19`) continua a
+  somar todas as expenses com aquele `category_id`, indiferente
+  a se a atribuição veio de um override ou do catálogo global.
+
+**Escritas do Embers — não afectadas.**
+
+- Se o user criar uma `Expense` pelo Embers admin UI, o
+  `before_create` dele corre como hoje. Os overrides pessoais
+  do Curve Sync **não se aplicam** a essa escrita — o Embers não
+  os conhece. Isto é aceitável: o caminho primário de criação é
+  o sync automático, que passa sempre pelo `syncOrchestrator` do
+  Curve Sync e portanto pelo resolver novo (§10).
+- Se um admin adicionar uma categoria global pelo Embers, o
+  Curve Sync apanha-a no próximo run (o `Category.find()` do
+  §10.2 é sempre fresh).
+
+### 11.2 Mudanças no `CLAUDE.md`
+
+Três blocos a actualizar no `CLAUDE.md` (a fazer em commit
+separado, ver §11.4):
+
+**1. §MongoDB Collection Access Rules.** Reformular `categories`
+e `expenses`, adicionar `curve_category_overrides`:
+
+```
+- `categories` — READ + UPDATE (scoped to admin CRUD flows). Owned
+  by Curve Sync from the category-management screen forward;
+  Embers keeps read-compat. Never rename/remove fields.
+- `expenses` — READ + INSERT + UPDATE of `category_id` ONLY.
+  Other fields remain INSERT-only. UPDATEs go through the
+  `reassignCategoryBulk` helper, never raw `Expense.updateOne`
+  from route handlers.
+- `curve_category_overrides` — Full CRUD (owned by Curve Sync,
+  per-user category matching rules).
+```
+
+**2. §Architecture.** Uma linha curta a referenciar
+`docs/Categories.md` como fonte canónica: "Category management,
+matching, and overrides: see `docs/Categories.md` (single source
+of truth for the two-tier model)."
+
+**3. §Project Structure.** Listar os novos ficheiros esperados:
+`server/src/models/CategoryOverride.js`, `server/src/routes/
+categoryOverrides.js`, `server/src/middleware/requireAdmin.js`,
+`server/src/services/categoryResolver.js`,
+`client/src/pages/CategoriesPage.jsx`, `client/src/hooks/
+useCountUp.js`.
+
+### 11.3 Faseamento (roadmap)
+
+Sete fases, cada uma entregável e reversível em isolamento. A
+ordem é optimizada para **minimizar risco no Embers**: primeiro
+mexe-se só em colecções exclusivas de Curve Sync, só depois se
+toca na relaxação de `expenses`.
+
+**Fase 0 — Preparação (docs + schema).**
+- Este documento (já escrito).
+- Actualizar `CLAUDE.md` (§11.2).
+- Criar o model `CategoryOverride` (§4.3) com os índices, sem
+  ainda usar.
+- PR pequeno, merge rápido. **Reversível:** `git revert`.
+
+**Fase 1 — Backend do resolver + CRUD de overrides.**
+- Implementar `services/categoryResolver.js` (§5) com unit tests.
+- Implementar `routes/categoryOverrides.js` (§8.4) com os 4
+  CRUD endpoints + autocomplete tests.
+- **Não integrar ainda no orchestrator.** O código novo vive em
+  paralelo mas ninguém o chama.
+- **Reversível:** as rotas novas podem ser desligadas no
+  `server/src/index.js` sem tocar no orchestrator.
+
+**Fase 2 — Integração no sync orchestrator.**
+- Alterar `syncOrchestrator.js` nas duas linhas do §10.2.
+- Manter `assignCategoryFromList` como shim que chama
+  `resolveCategory(entity, { overrides: [], globalCategories })`
+  — garantia de backwards-compat bit-a-bit para users sem
+  overrides (§10.6).
+- Correr a suite de fixtures para confirmar snapshots
+  idênticos.
+- **Reversível:** reverter o commit volta ao comportamento antigo.
+
+**Fase 3 — CRUD admin de categorias globais.**
+- Implementar `routes/categories.js` completo (§8.2, §8.3) com
+  `requireAdmin` middleware (§7.2).
+- Aqui começa o write path sobre `categories` — é a primeira
+  fase com impacto no schema partilhado. A mitigação é que as
+  escritas continuam a ser `{ name, entities, icon }`, sem
+  campos novos.
+- **Reversível:** desligar rotas, fica com o `GET /` actual.
+
+**Fase 4 — Ecrã de gestão (modo user primeiro).**
+- `CategoriesPage.jsx` (§9) em modo user: visualização, CRUD de
+  overrides pessoais, sem mexer no catálogo global. Inclui toda
+  a camada motion & grafismo do §9.8.
+- **Reversível:** remover a rota do `App.jsx` e o link da
+  sidebar.
+
+**Fase 5 — Ecrã de gestão (modo admin).**
+- Adicionar ao mesmo componente o modo admin (§9.9): botão `+
+  Categoria`, edição directa de nome/ícone, CRUD de entidades
+  globais.
+- Lançar apenas para o admin único do MVP antes de considerar
+  multi-admin.
+- **Reversível:** flag `enableAdminCategoryEditing` no frontend
+  ou hide do botão, sem remover código.
+
+**Fase 6 — Apply-to-all (endpoint + UX).**
+- Primeira fase que **requer** a relaxação do §4.4 (UPDATE de
+  `category_id` em `expenses`). Implementar `reassignCategoryBulk`
+  em `services/expense.js`, os dois endpoints do §8.5, e o modal
+  de confirmação do §9.7.
+- Testar exaustivamente com `dry_run: true` antes de ligar o
+  flag escrita.
+- **Reversível, mas com asterisco:** um apply-to-all já
+  executado é reversível só via novo apply-to-all (não há
+  undo no MVP — ver §6.5). Um `git revert` para o código,
+  sim, trivial.
+
+**Fase 7 — Polimento e observabilidade.**
+- Campo `detail: "override → <name>"` nos logs `ok` (§10.5).
+- Flag `uncategorised: true` nos logs para o filtro do
+  `/curve/logs`.
+- Métricas no dashboard: "N overrides activos" como stat card
+  opcional.
+- Seed script (opcional) de entidades comuns portuguesas
+  (Continente, Lidl, Pingo Doce, Auchan, Mercadona, Galp, BP,
+  Repsol, MBWay, Via Verde) no catálogo global — acelera a
+  experiência de onboarding sem obrigar o admin a escrever
+  tudo à mão.
+
+### 11.4 Riscos e mitigação
+
+| Risco | Impacto | Mitigação |
+|-------|---------|-----------|
+| Race entre admin `POST /categories` e user `POST /category-overrides` com o mesmo pattern | Override aponta para categoria eliminada | Índices únicos (§4.3) + handlers fazem re-read do `category_id` antes de aceitar. `404 category_not_found` no handler do override se a categoria já não existir. |
+| Apply-to-all parcialmente aplicado (falha a meio) | Despesas de um user com `category_id` inconsistente | Operação é `updateMany` único no Mongo — atómica ao nível do documento. Se falhar, falha globalmente e a transacção é audit-logged (§6.4). Mongo 4.4+ single-collection writes são idempotentes para este shape. |
+| Admin elimina uma categoria com overrides pendentes | Overrides órfãos | `DELETE /api/categories/:id` bloqueia com `409 category_in_use` e devolve contadores (§8.2). Admin tem de resolver antes. |
+| Matching com um dataset grande degrada | Sync lento para users com muitos overrides | Caps práticos: ≤ 30 categorias globais, ≤ dezenas de overrides/user. §5.5 já cobre a análise. Se alguém exceder, o resolver ainda é linear — 600 comparações em memória são microssegundos. |
+| Frontend quebra num cliente que já abriu a app antes do backend ter migrado | Telefone aberto no dashboard antes da Fase 4 | Não se aplica — o ecrã de categorias é *novo*, não substitui nenhum existente. `GET /api/categories` (leitura, já existe) mantém-se compat. |
+| Admin cria override para si próprio por engano no ecrã admin | Confusão cognitiva | O modo admin e o CRUD de overrides pessoais vivem em zonas visualmente distintas (§9.9). Ambos requerem confirmação em acções destrutivas. |
+| Embers cria uma categoria nova enquanto o Curve Sync corre um sync | Cache stale durante um run | Aceitável — o próximo run apanha. Cache é refrescado a cada run (§10.2). |
+| `prefers-reduced-motion` não respeitado num browser antigo | UX degradada, não quebra | Fallback CSS é defensivo (`animation: none !important`). O count-up hook tem detecção runtime via `matchMedia`. |
+
+### 11.5 Rollback plan
+
+Três níveis de rollback, do mais granular para o mais drástico:
+
+1. **Feature flag no frontend.** Esconder o link de `/categories`
+   na sidebar. Os endpoints novos continuam a existir mas
+   ninguém os chama da UI. Zero-risk rollback visual.
+2. **Desligar rotas no backend.** Comentar `app.use('/api/
+   category-overrides', ...)` e `app.use('/api/categories',
+   categoriesAdminRouter)` em `server/src/index.js`. Mantém a
+   rota de leitura original. Overrides no DB ficam intactos.
+3. **Reverter o sync orchestrator.** `git revert` do commit da
+   Fase 2. O resolver volta a ser `assignCategoryFromList`. Os
+   overrides existentes em DB passam a ser ignorados (sem
+   perda — permanecem guardados; basta re-aplicar o commit).
+
+Nenhum destes rollbacks requer migração de dados, escrita ao
+Mongo, ou coordenação com o Embers. O design é propositadamente
+aditivo: todas as estruturas novas vivem em colecções exclusivas
+ou em campos já existentes, e a única operação destrutiva
+(apply-to-all) tem um audit trail em `curve_logs` que permite
+reconstruir o estado anterior manualmente se for preciso.
+
+### 11.6 Critérios de "done"
+
+O projecto considera-se entregue quando:
+
+- [ ] Embers continua a ler/escrever `categories` e `expenses`
+      exactamente como antes (smoke test manual com a Rails
+      console).
+- [ ] Um user sem overrides tem o sync com resultados
+      idênticos ao baseline (snapshot test).
+- [ ] Um user com override pessoal vê a despesa cair na sua
+      categoria escolhida, enquanto outro user na mesma
+      instalação vê a sua cair no catálogo global (integration
+      test).
+- [ ] Apply-to-all com `dry_run: true` é idempotente e observável
+      no `/curve/logs`.
+- [ ] O ecrã `/categories` carrega em < 500 ms para ~20
+      categorias e ~100 entidades (perf budget).
+- [ ] `prefers-reduced-motion: reduce` remove **todas** as
+      animações (manual QA).
+- [ ] `CLAUDE.md` reflecte as mudanças do §11.2 e aponta para
+      este documento como canonical.
+
+Com estas caixinhas todas marcadas, o sistema de categorização
+redesenhado substitui em pleno o `assign_category` original do
+Embers sem exigir nenhuma alteração ao lado Embers — e abre a
+porta às melhorias opcionais (detalhe nos logs, métricas no
+dashboard, undo de apply-to-all) que ficaram conscientemente
+fora do MVP.
