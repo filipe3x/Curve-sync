@@ -314,6 +314,27 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/category-overrides/:id
 //
 // 204 on success, 404 for missing or cross-user IDs.
+//
+// Optional `cascade=true` (query or body) triggers a post-delete
+// re-resolve pass over every expense owned by the caller: the rule is
+// dropped first, then `resolveCategory` runs with the fresh context,
+// and any expense whose verdict now differs gets written through
+// `reassignCategoryBulk`. This closes the gap where deleting a rule
+// that had previously been apply-to-all'd would leave those expenses
+// "stuck" on the old category (the resolver never re-runs on delete,
+// so the `category_id` column stays frozen until another write
+// touches it). See docs/Categories.md §6 for the broader re-resolve
+// contract — the cascade is semantically identical to apply-to-all,
+// just triggered by a delete instead of an explicit click.
+//
+// Cascade failure posture: the rule is deleted BEFORE the cascade
+// starts, so a mid-cascade throw leaves the rule gone with some
+// expenses already re-catalogued. The partial state is idempotent —
+// re-running apply-to-all on any remaining rule is a no-op for the
+// rows that already landed. A dedicated `apply_to_all_failed` audit
+// row captures the reason for forensics; the existing `override_deleted`
+// row is written BEFORE the cascade so the delete is always traceable,
+// whether the cascade succeeded or not.
 // ─────────────────────────────────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
@@ -341,7 +362,10 @@ router.delete('/:id', async (req, res) => {
       .select('name')
       .lean();
 
-    // §13.2 #31 — "Regra pessoal apagada: <pattern>"
+    // §13.2 #31 — "Regra pessoal apagada: <pattern>". Written BEFORE
+    // the optional cascade so the delete itself is always captured
+    // in the audit trail, regardless of whether the follow-up
+    // re-resolve pass succeeds.
     audit({
       action: 'override_deleted',
       userId: req.userId,
@@ -350,7 +374,76 @@ router.delete('/:id', async (req, res) => {
       entity: existing.pattern,
     });
 
-    res.status(204).end();
+    // Cascade flag — accepts body or query (same shape as apply-to-all).
+    const cascade =
+      req.body?.cascade === true ||
+      req.query?.cascade === 'true' ||
+      req.query?.cascade === '1';
+
+    if (!cascade) {
+      return res.status(204).end();
+    }
+
+    // Post-delete re-resolve. Mirrors the apply-to-all code path but
+    // with an empty-ish target: expenses fan out into whatever the
+    // resolver now says, which may be several different global
+    // catalogue categories or `null` (uncategorised). Personal rules
+    // that still match keep winning — the resolver's own tie-break
+    // preserves the "Personal is sacred" invariant for free.
+    try {
+      const ctx = await loadContext(req.userId);
+      const candidates = await Expense.find({ user_id: req.userId })
+        .select('_id entity category_id')
+        .lean();
+
+      const NULL_KEY = '__null__';
+      const grouped = new Map();
+      for (const e of candidates) {
+        const newCatId = resolveCategory(e.entity, ctx);
+        const cur = e.category_id ? e.category_id.toString() : null;
+        const nxt = newCatId ? newCatId.toString() : null;
+        if (cur === nxt) continue;
+        const key = nxt ?? NULL_KEY;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(e._id);
+      }
+
+      let updated = 0;
+      for (const [key, ids] of grouped) {
+        const target = key === NULL_KEY ? null : key;
+        const result = await reassignCategoryBulk(
+          { _id: { $in: ids }, user_id: req.userId },
+          target,
+        );
+        updated += result.modified ?? 0;
+      }
+
+      // §13.2 #32 variant: `target=delete_cascade` flags this as a
+      // cascade pass triggered by the delete above, not an
+      // explicit user-clicked apply. `category=` is omitted because
+      // there is no single target — expenses fan out. The
+      // curveLogsUtils parser special-cases this target.
+      audit({
+        action: 'apply_to_all',
+        userId: req.userId,
+        ip: clientIp(req),
+        detail:
+          `scope=personal target=delete_cascade affected=${updated} ` +
+          `skipped_personal=0`,
+        entity: existing.pattern,
+      });
+
+      return res.status(204).end();
+    } catch (err) {
+      audit({
+        action: 'apply_to_all_failed',
+        userId: req.userId,
+        ip: clientIp(req),
+        detail: `reason=${err.message} target=delete_cascade pattern=${existing.pattern}`,
+        entity: existing.pattern,
+      });
+      return res.status(500).json({ error: err.message });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -123,8 +123,27 @@ export const updateCategoryOverride = (id, data) =>
     body: JSON.stringify(data),
   });
 
-export const deleteCategoryOverride = (id) =>
-  request(`/category-overrides/${id}`, { method: 'DELETE' });
+// `cascade=true` triggers a post-delete re-resolve pass on the
+// server: every expense owned by the caller is re-run through
+// `resolveCategory` with the fresh (post-delete) context, and any
+// whose verdict now differs is rewritten. This undoes the "stuck on
+// the old category" effect that happens when a user apply-to-all's a
+// rule and later deletes it. See routes/categoryOverrides.js for the
+// full semantics — the cascade is equivalent to running apply-to-all
+// on the rule that would have replaced this one (if any), and on
+// failure leaves the rule deleted with partial cascade state that
+// can be re-run safely.
+export const deleteCategoryOverride = (id, { cascade = false } = {}) =>
+  request(
+    `/category-overrides/${id}${cascade ? '?cascade=true' : ''}`,
+    {
+      method: 'DELETE',
+      // Cascade path scans every user expense — give it the same
+      // 30s slack as apply-to-all so a large MVP-scale dataset
+      // doesn't trip the default fetch timeout.
+      timeoutMs: cascade ? 30_000 : undefined,
+    },
+  );
 
 // Apply-to-all: retroactively re-run the resolver against every
 // expense owned by the caller and rewrite `category_id` wherever the

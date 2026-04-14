@@ -104,15 +104,32 @@ export function describeLog(log) {
         // `entity`. `affected=` is the number of rows actually
         // rewritten; `category=` is at the tail so it may contain
         // spaces — the regex stops at end-of-string to capture it.
+        //
+        // Variant: `target=delete_cascade` flags a cascade pass
+        // triggered by `DELETE /api/category-overrides/:id?cascade=true`.
+        // The rule is already gone by the time the log lands, and
+        // expenses may have fanned out into several different
+        // categories (or `null`), so there is no single target to
+        // show. The message focuses on the trigger instead.
         const pattern = log.entity ?? '—';
         const affectedMatch = log.error_detail?.match(/affected=(\d+)/);
+        const targetMatch = log.error_detail?.match(/target=(\w+)/);
         const catMatch = log.error_detail?.match(/category=(.+)$/);
         const affected = affectedMatch ? Number(affectedMatch[1]) : null;
+        const target = targetMatch ? targetMatch[1] : null;
         const category = catMatch ? catMatch[1] : null;
         // "1 despesa" vs "N despesas" — the singular form matters
         // for the dry-run preview that shows "1 despesa" after
         // surgical edits. Portuguese pluralisation is regular here.
         const noun = affected === 1 ? 'despesa' : 'despesas';
+        if (target === 'delete_cascade') {
+          return {
+            type,
+            title: affected !== null
+              ? `${affected} ${noun} re-catalogadas após apagar regra: ${pattern}`
+              : `Re-catalogação após apagar regra: ${pattern}`,
+          };
+        }
         if (affected !== null && category) {
           return {
             type,

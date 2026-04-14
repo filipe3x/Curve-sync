@@ -453,6 +453,82 @@ function RecentExpenses({ categoryId }) {
   );
 }
 
+// Three-way dialog for the delete-override flow. The user lands here
+// after clicking Apagar on a personal rule and must choose between:
+//   - Cancelar                    → no-op, rule stays
+//   - Apagar (manter despesas)    → delete rule, leave `category_id`
+//                                   on past expenses untouched
+//   - Apagar e re-catalogar       → delete rule AND trigger a
+//                                   post-delete re-resolve pass on
+//                                   the server (cascade=true), so
+//                                   any expense that was stuck on
+//                                   the old category gets re-
+//                                   catalogued by the remaining
+//                                   resolver context
+//
+// The third option is important because without it a user who
+// apply-to-all's a rule and later deletes it ends up with expenses
+// frozen on the old category — the symptom that motivated this dialog.
+function DeleteOverrideDialog({ target, onCancel, onConfirm, busy }) {
+  if (!target) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-sand-950/30 p-4 animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="card w-full max-w-md">
+        <h2 className="text-lg font-semibold text-sand-900">
+          Apagar regra "{target.pattern}"?
+        </h2>
+        <p className="mt-2 text-sm text-sand-600">
+          A regra será removida. Escolhe o que fazer com as despesas
+          passadas que tinham sido catalogadas por esta regra.
+        </p>
+        <ul className="mt-4 space-y-2 text-xs text-sand-600">
+          <li>
+            <strong className="text-sand-800">Manter despesas:</strong>{' '}
+            as despesas passadas mantêm a categoria actual. Próximas
+            sincronizações deixam de usar esta regra.
+          </li>
+          <li>
+            <strong className="text-sand-800">Re-catalogar:</strong>{' '}
+            as despesas passadas voltam a ser avaliadas pelas restantes
+            regras — catálogo global, outras regras pessoais — ou
+            ficam sem categoria.
+          </li>
+        </ul>
+        <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onCancel}
+            disabled={busy}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => onConfirm(false)}
+            disabled={busy}
+          >
+            Apagar (manter despesas)
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => onConfirm(true)}
+            disabled={busy}
+          >
+            {busy ? 'A aplicar…' : 'Apagar e re-catalogar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApplyConfirmDialog({ preview, onCancel, onConfirm, busy }) {
   if (!preview) return null;
   return (
@@ -528,6 +604,10 @@ export default function CategoriesPage() {
   // lives in GlobalEntitiesList alongside the personal-override list,
   // but the two paths are independent and shouldn't share a lock.
   const [globalEntityBusy, setGlobalEntityBusy] = useState(false);
+  // Override pending a delete decision (opens DeleteOverrideDialog).
+  // `null` when no dialog is shown; the full override object while the
+  // user picks between keep-past-expenses and cascade-re-resolve.
+  const [deleteTarget, setDeleteTarget] = useState(null);
 
   const refreshAll = async () => {
     setLoading(true);
@@ -635,8 +715,40 @@ export default function CategoriesPage() {
         match_type: 'contains',
       });
       setOverrides((prev) => [...prev, res.data]);
-      setPendingOverrideId(res.data.id);
-      setToast({ type: 'ok', text: 'Regra pessoal criada.' });
+
+      // Peek at the apply-to-all impact immediately so the banner
+      // only appears when there's actually something to apply. The
+      // zero-match case is common when a user re-creates a rule
+      // that used to exist (stuck `category_id` from a prior
+      // apply-to-all) — in that state the banner + modal were
+      // offering a no-op Confirmar button, which is the symptom
+      // the user reported.
+      try {
+        const preview = await api.applyCategoryOverride(res.data.id, {
+          dryRun: true,
+        });
+        const matched = preview.data?.matched ?? 0;
+        if (matched > 0) {
+          setPendingOverrideId(res.data.id);
+          setToast({
+            type: 'ok',
+            text: `Regra criada. ${matched} ${matched === 1 ? 'despesa pode' : 'despesas podem'} ser re-catalogadas.`,
+          });
+        } else {
+          setToast({
+            type: 'ok',
+            text: 'Regra pessoal criada. Nenhuma despesa passada é afectada.',
+          });
+        }
+      } catch {
+        // Preview fetch failing should not block rule creation.
+        // Fall back to the pre-fix behaviour (banner appears, user
+        // decides whether to click it) so the apply path is still
+        // reachable — the alternative of silently hiding the banner
+        // would be worse if the preview route is temporarily down.
+        setPendingOverrideId(res.data.id);
+        setToast({ type: 'ok', text: 'Regra pessoal criada.' });
+      }
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro a criar regra.' });
     } finally {
@@ -644,13 +756,47 @@ export default function CategoriesPage() {
     }
   };
 
-  const handleDeleteOverride = async (id) => {
+  // Open the delete dialog. The actual API call lives in
+  // `handleDeleteOverrideConfirm` — we split so the dialog can
+  // surface the three-way choice (cancel / keep / cascade) that
+  // the user reported needing.
+  //
+  // Why the cascade exists: a user who apply-to-all's a rule
+  // "lidl" → Groceries writes Groceries onto every Lidl expense.
+  // Deleting the rule afterwards does NOT unwind those writes —
+  // the `category_id` column stays frozen until another write
+  // touches it. Without the cascade, re-creating the same rule
+  // later shows "0 despesas" in the apply preview, which is
+  // confusing and the symptom the user reported.
+  const handleRequestDeleteOverride = (id) => {
+    const override = overrides.find((o) => o.id === id);
+    if (override) setDeleteTarget(override);
+  };
+
+  // Invoked from the dialog. `cascade` is `true` when the user picks
+  // "Apagar e re-catalogar", `false` when they pick "Apagar (manter)".
+  // Cancel dismisses via `setDeleteTarget(null)` without ever calling
+  // this.
+  const handleDeleteOverrideConfirm = async (cascade) => {
+    if (!deleteTarget) return;
+    const id = deleteTarget.id;
     setOverrideBusy(true);
     try {
-      await api.deleteCategoryOverride(id);
+      await api.deleteCategoryOverride(id, { cascade });
       setOverrides((prev) => prev.filter((o) => o.id !== id));
       if (pendingOverrideId === id) setPendingOverrideId(null);
-      setToast({ type: 'ok', text: 'Regra pessoal apagada.' });
+      setToast({
+        type: 'ok',
+        text: cascade
+          ? 'Regra apagada. Despesas passadas re-catalogadas.'
+          : 'Regra pessoal apagada.',
+      });
+      setDeleteTarget(null);
+      // Cascade rewrites category_id on arbitrary expenses, so the
+      // totals and distribution bar must reload. The non-cascade path
+      // only drops the row from the overrides list and needs no
+      // server re-fetch.
+      if (cascade) await refreshAll();
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro a apagar regra.' });
     } finally {
@@ -933,7 +1079,7 @@ export default function CategoriesPage() {
                         categoryId={selectedRow.category_id}
                         categoryName={selectedRow.category_name}
                         onCreate={handleCreateOverride}
-                        onDelete={handleDeleteOverride}
+                        onDelete={handleRequestDeleteOverride}
                         busy={overrideBusy}
                       />
                     </section>
@@ -974,6 +1120,13 @@ export default function CategoriesPage() {
         onCancel={() => setApplyPreview(null)}
         onConfirm={handleApplyConfirm}
         busy={applyBusy}
+      />
+
+      <DeleteOverrideDialog
+        target={deleteTarget}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteOverrideConfirm}
+        busy={overrideBusy}
       />
     </div>
   );
