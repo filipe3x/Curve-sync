@@ -1592,30 +1592,322 @@ dos middlewares, não dos handlers.
 
 ## 9. UIX — ecrã único de gestão de categorias
 
-_Placeholder._ Desenho da nova rota `/categories` (ou similar). Pontos-
-chave a cobrir:
+Este capítulo desenha a rota nova `/categories` — um único ecrã que
+serve CRUD, auditoria de gastos e gestão de overrides, sem modal
+para operações básicas. O objectivo é transformar "gerir categorias"
+num momento de *avaliação* (como estão os gastos este ciclo,
+comparados com o histórico) e não num formulário administrativo.
+Tudo assenta nos tokens de `docs/UIX_DESIGN.md` e nos dados de
+`GET /api/categories/stats` (§8.6).
 
-- **Layout master-detail** (lista à esquerda, detalhe à direita) para
-  caber CRUD + total por categoria + catálogo de entidades.
-- **Coluna esquerda:** lista de categorias com swatch de cor, nome,
-  total mensal (€), contadores de entidades/despesas, ordenável.
-- **Coluna direita:** header editável, strip de KPIs (total mês,
-  nº despesas, nº entidades), tabs internas para Entidades, Despesas
-  recentes e (opcional) Tendência mensal.
-- **Catálogo de entidades:** input inline para adicionar, lista
-  pesquisável (alguns catálogos vão ser grandes — virtualização ou
-  paginação simples), badge global vs override, bulk-select para mover
-  entre categorias.
-- **Botão "Apply to all":** aparece após edição, com modal de
-  confirmação que mostra quantas despesas vão ser afectadas.
-- **Modo admin vs modo user:** o mesmo ecrã adapta-se ao `role` —
-  admins editam o catálogo global, users só adicionam/removem
-  overrides pessoais (a lista global aparece read-only com badge).
-- **Responsividade:** colapsar para uma coluna com back nav em mobile
-  (consistente com o roadmap da sidebar em UIX_DESIGN.md §12).
-- **Paleta e componentes:** reutilizar tokens sand/curve, `card`,
-  `input`, `btn-primary/secondary`, badges conforme §2-5 do
-  UIX_DESIGN.md.
+### 9.1 Rota, shell e layout master-detail
+
+- Novo link na `Sidebar.jsx` com `FolderIcon`: `{ to: '/categories',
+  label: 'Categorias' }`. Fica entre *Despesas* e *Configuração*.
+- `PageHeader` reutilizado (título "Categorias", subtítulo com o
+  range do ciclo actual: "22 mar – 21 abr").
+- Grid principal:
+
+```
+┌────────── Distribution bar (h-2 stacked) ──────────┐
+│  [█████ Food ████][███ Transport ███][██ …]        │
+└─────────────────────────────────────────────────────┘
+┌──────────────┬──────────────────────────────────────┐
+│              │  Header editável · KPI strip         │
+│  Lista de    │  Spark chart (6 ciclos)              │
+│  categorias  │                                      │
+│  (scroll)    │  Tabs: Entidades · Despesas          │
+│              │                                      │
+└──────────────┴──────────────────────────────────────┘
+     320px                   1fr
+```
+
+Tailwind: `grid lg:grid-cols-[320px_1fr] gap-6`, com colapso para
+uma coluna abaixo de `lg` (§9.9).
+
+### 9.2 Distribution bar (vista macro)
+
+Barra horizontal `h-2 rounded-full bg-sand-100 overflow-hidden`
+com N segmentos coloridos — um por categoria. Width de cada
+segmento = `category.total / grand_total`. Mount animation: cada
+segmento anima de `0%` → target em 500 ms com `animationDelay`
+sequencial (cascata esquerda→direita, 60 ms entre segmentos).
+
+- **Interacção:** click selecciona a categoria no detail pane;
+  hover clareia os restantes segmentos para `opacity-40` com
+  `transition-opacity duration-200`.
+- **Legenda implícita:** `title` com `"<nome> · €<total> · <pct>%"`
+  — evita ocupar vertical space com uma legenda explícita.
+- **Empty state do ciclo:** se `grand_total === 0`, a barra
+  colapsa num `div` sand com texto centrado "Ainda sem despesas
+  neste ciclo".
+
+### 9.3 Lista de categorias (coluna esquerda)
+
+Container: `rounded-2xl border border-sand-200 bg-white
+overflow-hidden`. Header fino com ordenação (default: `total
+desc`). Cada linha:
+
+```
+┌────────────────────────────────────────────────┐
+│ ● Groceries                         €312,47    │
+│   6 entidades · 18 despesas    ↑ +4%   ⚪→     │
+└────────────────────────────────────────────────┘
+```
+
+- **Swatch** (`● h-2.5 w-2.5 rounded-full`) com a cor da categoria.
+- **Nome** em `text-sm font-medium text-sand-900`.
+- **Total EUR** à direita em `text-curve-700 font-semibold` (token
+  de montante do §3 do UIX_DESIGN).
+- **Linha secundária:** `text-xs text-sand-400` com contadores.
+- **Delta badge:** `+4%` amber (attention), `−12%` emerald (win),
+  `±0%` sand-400 — vs média das últimas 3 cycles da mesma categoria.
+- **Mini ring chart (32×32)** no canto direito — detalhe no §9.8.
+- **Estado activo:** `bg-curve-50 border-l-2 border-curve-700`
+  (mesmo pattern dos nav links da sidebar).
+- Stagger de entrada: `fade-in-up` com `animationDelay: i * 60ms`
+  (mesmo pattern das tabelas existentes).
+
+### 9.4 Painel de detalhe (coluna direita)
+
+Dividido em três zonas empilhadas:
+
+**Header editável.** Avatar/ícone (click abre file picker),
+`<input>` inline com o nome (blur → `PUT /api/categories/:id`),
+botões `btn-secondary` "Apply to all" (só aparece após edição
+que afecte matching — ver §9.7) e `btn-icon` delete.
+
+**KPI strip.** `grid grid-cols-4 gap-4` de stat cards mini:
+
+| Label | Valor |
+|-------|-------|
+| Total do ciclo | €312,47 |
+| Despesas | 18 |
+| Entidades | 6 |
+| Média por despesa | €17,36 |
+
+Todos os valores numéricos usam `useCountUp(value, 800)` (§9.8) —
+ao trocar de categoria, os números re-animam 0→target em paralelo,
+dando a sensação de refresh fluido.
+
+**Spark area chart (6 ciclos).** SVG `~280×64` com `<path>` de 6
+pontos (últimos 6 ciclos do dia 22 para esta categoria), fill
+`curve-700/10` + stroke `curve-700/60`. Ponto do ciclo actual
+destacado com `<circle r=3>`. Hover nos pontos mostra tooltip
+inline (`date + valor`). Entrada animada em §9.8.
+
+**Tabs internas.** `Entidades` (default) · `Despesas recentes`.
+Tabs reutilizam o pattern `rounded-xl px-3 py-1.5` do design
+system, com estado activo `bg-sand-100 text-sand-900`.
+
+### 9.5 Catálogo de entidades (tab interna)
+
+```
+┌─ Adicionar entidade ───────────────────── [+] ┐
+│  > Procurar entidades...                       │
+├────────────────────────────────────────────────┤
+│ ☐ lidl            [global]   42 despesas      │
+│ ☐ continente      [global]   31 despesas      │
+│ ☐ pingo doce      [pessoal]   9 despesas      │
+│ ...                                            │
+└────────────────────────────────────────────────┘
+[ Seleccionar todas ]   [ Mover para... ] [ Remover ]
+```
+
+- **Input inline** no topo (`<form onSubmit>`), submete → `POST
+  /api/categories/:id/entities` (admin) ou cria override (user).
+- **Lista virtualizada** só acima de 100 entradas (`react-window`
+  opt-in; abaixo disso, lista normal sem dep externa). Isto
+  resolve a preocupação de "catálogos muito extensos" — `Groceries`
+  pode ter centenas de nomes sem travar render.
+- **Search local** (filtro client-side, `useMemo`) sobre o catálogo
+  carregado — debounce desnecessário (tudo em memória).
+- **Bulk select + move:** checkbox em cada linha + barra de acções
+  que aparece quando `selection.size > 0`. Modal de confirmação
+  a listar conflitos (`409 entity_conflict` do §8.3).
+- **Badges** `global`/`pessoal` reutilizam o token `Neutral` do
+  §5.5 do UIX_DESIGN. `pessoal` ganha tint `curve-50` para
+  diferenciar visualmente.
+
+### 9.6 Painel de despesas recentes (tab alternativa)
+
+Tabela compacta com as últimas 10 despesas da categoria
+seleccionada, reutiliza o componente existente da `ExpensesPage`
+mas com `card`, `category`, `digest` escondidos (são redundantes
+no contexto). Link no fundo "Ver todas →" abre
+`/expenses?category=:name`.
+
+### 9.7 Apply-to-all flow (UIX)
+
+Qualquer edição que afecte matching (criar override, mover
+entidade, alterar `match_type`) activa um banner inline na zona
+do header do detail pane:
+
+```
+┌──────────────────────────────────────────────────┐
+│ ℹ  Regra alterada. Aplicar a despesas passadas? │
+│                          [ Ignorar ] [ Aplicar ] │
+└──────────────────────────────────────────────────┘
+```
+
+`Aplicar` abre modal com preview (via `dry_run: true` do §8.5):
+
+```
+Vão ser re-catalogadas 47 despesas.
+  ─ 42 pertencem a ti
+  ─  5 são de outros users (protegidas por overrides pessoais)
+Cancelar              Confirmar aplicação
+```
+
+Loading state no botão primário (`A aplicar...` + spinner,
+conforme §10 do UIX_DESIGN). Sucesso → toast `slide-in-right`
+(`"47 despesas re-catalogadas"`) + refresh dos totais no ecrã
+(chamada silenciosa a `/api/categories/stats`).
+
+### 9.8 Motion & grafismo
+
+A peça central do capítulo. Tudo SVG inline + Tailwind + 1 hook
+micro — nenhuma dependência externa (sem recharts, sem d3). Todas
+as animações têm fallback para `prefers-reduced-motion: reduce`.
+
+**1. Mini ring chart por linha.** 32×32 SVG com dois `<circle>`:
+track `sand-200`, arco `curve-700` com `stroke-dasharray` animado
+via `stroke-dashoffset` (600 ms `ease-out`). Mostra `spend /
+avg` dessa categoria (cap a 150%). *Warm shift* da cor do arco:
+
+| Ratio | Stroke |
+|-------|--------|
+| `< 80%` | `sand-500` (frio, relaxado) |
+| `80–100%` | `curve-500` (atenção) |
+| `> 100%` | `curve-700` + heat pulse |
+
+**2. Heat pulse (over-budget).** Categorias com `spend > avg × 1.2`
+ganham um halo subtil no swatch: `box-shadow: 0 0 0 4px
+rgba(192,78,48,0.2)` pulsante em 2 s. Limitado a 3 iterações no
+mount (não é loop infinito — respeita §4 do UIX_DESIGN "sem
+loop"). Depois fica estático.
+
+**3. Count-up nas KPIs.** Hook custom:
+
+```javascript
+// client/src/hooks/useCountUp.js (novo)
+export function useCountUp(value, duration = 800) {
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    const start = performance.now();
+    const from = 0;
+    let raf;
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      setDisplay(from + (value - from) * eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration]);
+  return display;
+}
+```
+
+Ao trocar de categoria, as 4 KPIs re-animam 0→target em paralelo.
+Custo: 4 rAFs por troca — negligível.
+
+**4. Spark chart draw-in.** `<path>` ganha `stroke-dasharray:
+<length>` + `stroke-dashoffset: <length>` no mount, animados para
+`0` em 700 ms `ease-out` — efeito "drawing" da esquerda para a
+direita. O fill aparece em `fade-in` paralelo (300 ms com 400 ms
+de delay, para entrar *depois* do traço ter sido desenhado).
+
+**5. Distribution bar width grow.** Cada segmento arranca com
+`transform: scaleX(0); transform-origin: left` e anima para
+`scaleX(1)` em 500 ms, com `animationDelay: i * 60ms`. Mesma
+curva que a cascata da lista de categorias — os dois elementos
+"respiram" em sincronia.
+
+**6. Stagger da lista.** Linhas entram com `fade-in-up`
+(`animationDelay: i * 60ms`) — herdado do pattern existente nas
+tabelas de despesas recentes do Dashboard.
+
+**7. Cross-fade ao trocar de categoria.** O detail pane usa
+`key={categoryId}` no React para forçar remount, e entra com
+`fade-in` (400 ms). Em paralelo, os count-ups arrancam. O
+conjunto soa a "troca fluida" e não a refresh.
+
+**8. Delta badges semânticos.** Reutilizam os badges do §5.5 do
+UIX_DESIGN:
+
+| Delta | Classe |
+|-------|--------|
+| `> +5%` | `bg-amber-50 text-amber-700` (attention) |
+| `< −5%` | `bg-emerald-50 text-emerald-700` (win) |
+| `±5%` | `bg-sand-100 text-sand-500` (neutral) |
+
+**9. `prefers-reduced-motion: reduce`.** Bloco único no
+`index.css`:
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  .animate-draw,
+  .animate-grow,
+  .animate-pulse-warm,
+  .animate-fade-in,
+  .animate-fade-in-up { animation: none !important; }
+  [data-count-up] { /* render valor final directo */ }
+}
+```
+
+O hook `useCountUp` também detecta `matchMedia('(prefers-reduced-
+motion: reduce)')` e devolve `value` sem tween.
+
+### 9.9 Modo admin vs modo user
+
+O mesmo ecrã, `role`-adaptive. Diferenças resumidas:
+
+| Zona | Admin | User |
+|------|-------|------|
+| Botão topo | `+ Categoria` (novo card) | — |
+| Header editável (nome/ícone) | Editável | Read-only |
+| Catálogo global | CRUD directo (`POST/DELETE .../entities`) | Read-only (badge `global`) |
+| Overrides pessoais | CRUD dos próprios | CRUD dos próprios |
+| Tab "Entidades" | Uma única lista mista | Duas secções: "Globais" (ro) + "As minhas regras" (crud) |
+| Apply-to-all | Globais + pessoais | Apenas pessoais |
+
+Gráficos (distribution bar, ring, spark, KPIs) são **sempre
+pessoais** — os totais vêm das despesas do `req.userId`, tal como
+no dashboard. Um admin não vê os gastos dos outros users no ecrã
+de categorias.
+
+### 9.10 Empty states e responsividade
+
+**Empty states.**
+
+- **Sem categorias no sistema.** Admin: empty state central
+  "Cria a primeira categoria" + CTA primário. User: "Ainda não
+  há categorias — contacta o admin." (Estes cenários são raros
+  após o seed inicial — ver §11.)
+- **User sem despesas no ciclo.** Lista aparece normalmente mas
+  com ring charts a 0 e distribution bar colapsada. Detail pane
+  mostra KPIs a `€0,00` + spark chart vazio + CTA "Sincronizar
+  agora →" que liga ao dashboard.
+- **Categoria sem entidades.** Tab *Entidades* com empty state
+  `border-dashed` (§5.8 do UIX_DESIGN) e CTA "Adicionar primeira
+  entidade".
+
+**Responsividade.** Breakpoints consistentes com §12 do
+UIX_DESIGN.
+
+- `< lg` (1024 px): colapsa para uma única coluna. A lista vira
+  um `<select>` nativo ou um drawer overlay (decisão deferida
+  para o PR de implementação — ambos servem). Distribution bar
+  mantém-se no topo com altura `h-3` em mobile (mais fácil de
+  tocar).
+- `lg+`: grid 320 px + 1fr como descrito em §9.1.
+- `max-w-6xl` mantido (consistência com o resto dos ecrãs).
+
+A preparação para o **dark mode** (§14 do UIX_DESIGN) está
+garantida por construção: todas as cores vêm de tokens, nenhuma
+hex hardcoded nos componentes.
 
 ## 10. Integração com o sync orchestrator
 
