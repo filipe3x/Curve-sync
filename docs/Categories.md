@@ -831,18 +831,194 @@ função de matching usa estas três camadas em conjunto.
 
 ## 5. Algoritmo de matching
 
-_Placeholder._ Descreve o novo pipeline de auto-categorização:
+Uma despesa entra com uma string de entidade bruta; tem de sair com
+um `category_id` (ou `null`). Este capítulo define o algoritmo que
+faz essa tradução, os seus custos, e as estruturas que o suportam.
+Existe **uma única função** de resolução, partilhada pelos três
+consumidores — `POST /api/expenses`, sync orchestrator e apply-to-all
+(capítulo 6).
 
-- **Normalização** do texto da entidade (lowercase, strip diacríticos,
-  colapsar espaços, remover sufixos de localização tipo "LISBOA PT",
-  descartar asteriscos/dígitos residuais dos POS).
-- **Resolução em camadas:** overrides do user primeiro, catálogo global
-  depois.
-- **Desempate por especificidade:** longest-match-wins + tie-break por
-  prioridade do `match_type` (`exact` > `starts_with` > `contains`).
-- **Tipos de match suportados** (só em overrides; o catálogo global
-  mantém-se substring para compatibilidade com Embers).
-- Pseudo-código e exemplos concretos (Lidl, McDonalds, MB WAY, etc.).
+### 5.1 Pipeline
+
+```
+raw entity  →  normalize  →  resolveCategory(norm, ctx)  →  category_id | null
+```
+
+`ctx = { userRules, globalRules }` — o contexto é carregado à boca
+do pipeline e reutilizado enquanto o chamador quiser. Quem chama
+decide: o sync orchestrator carrega-o uma vez por run; o route
+handler carrega-o por request; o apply-to-all carrega-o por
+execução.
+
+### 5.2 Normalização
+
+Seis passos, por esta ordem, determinísticos e idempotentes
+(`normalize(normalize(x)) === normalize(x)`):
+
+1. Unicode NFD (decompor acentos do char base).
+2. Strip dos combining marks (`\p{M}`) — tira os diacríticos.
+3. `toLowerCase()`.
+4. Substituir qualquer char não-alfanumérico por espaço.
+5. Colapsar whitespace consecutivo num único espaço.
+6. `trim()`.
+
+Exemplos:
+
+| Input bruto | Output normalizado |
+|-------------|--------------------|
+| `LIDL CASCAIS PT` | `lidl cascais pt` |
+| `Café` | `cafe` |
+| `McDONALDS*PICOAS` | `mcdonalds picoas` |
+| `MB WAY - BAKERY 123` | `mb way bakery 123` |
+
+Custo: `O(L_e)` onde `L_e` é o comprimento da string. Executado uma
+vez por despesa, nunca por cada regra comparada.
+
+### 5.3 Tipos de match
+
+Aplicados sempre sobre strings **já normalizadas**:
+
+- **`exact`** — `norm === pattern`
+- **`starts_with`** — `norm === pattern || norm.startsWith(pattern + ' ')` (o espaço à direita é um word-boundary barato que impede "lidl" de casar "lidlmart")
+- **`contains`** — `norm.includes(pattern)`
+
+O catálogo global (capítulo 4.2) só suporta `contains` implícito — é
+o que cabe no `entities[]` partilhado com Embers. Os overrides
+(`curve_category_overrides`) podem escolher qualquer um dos três.
+
+### 5.4 Resolução e tie-breaking
+
+```
+resolveCategory(raw, ctx):
+  if !raw: return null
+  norm = normalize(raw)
+  best = null
+
+  for r in ctx.userRules:
+    if matches(norm, r): best = pickBetter(best, r)
+  if best: return best.category_id          // short-circuit: user vence sempre
+
+  for r in ctx.globalRules:
+    if matches(norm, r): best = pickBetter(best, r)
+  return best?.category_id ?? null
+```
+
+Dentro de cada tier **não há early return na regra** — o loop
+colecciona todos os matches e deixa o `pickBetter` escolher. Só a
+fronteira entre tiers faz short-circuit (cap. 3.4: override pessoal
+substitui o global, não se acumula).
+
+**Ordem estrita de `pickBetter`:**
+
+1. `priority` (maior vence) — válvula de escape manual.
+2. Comprimento de `pattern_normalized` (maior vence) — longest-match.
+3. Especificidade do `match_type` (`exact > starts_with > contains`).
+4. `created_at` ascendente — desempate final, determinístico.
+
+A ordem é arbitrária mas estável: dois runs com os mesmos inputs
+devolvem o mesmo output, sempre.
+
+### 5.5 Estruturas de dados e caching
+
+- **Overrides** vêm da DB já com `pattern_normalized` pré-computado
+  (cap. 4.3). Não há normalização em tempo de matching.
+- **Globais** são plain strings no `Category.entities[]`; o cache
+  build pré-normaliza-os uma única vez por `loadContext()`. Cada
+  entry passa a `{ category_id, pattern_normalized, match_type:
+  'contains' }`.
+- Estrutura final em memória: dois arrays planos, `userRules` e
+  `globalRules`. **Sem trie, sem Aho-Corasick** — linear scan é
+  barato à escala esperada (ver §5.6).
+
+Consumo de memória típico: ~120 regras × ~40 bytes cada ≈ 5 KB. O
+cache cabe trivialmente ao lado do `categoriesCache` que o
+orchestrator já mantém.
+
+### 5.6 Análise de complexidade
+
+Notação:
+
+- `G` — número de regras globais (soma de `|entities[]|` em todas as
+  categorias).
+- `U` — número de overrides do user activo.
+- `N` — despesas processadas num run.
+- `L_e` — comprimento médio da entidade (~30 chars).
+- `L_p` — comprimento médio do padrão (~10 chars).
+
+**Por despesa:**
+
+```
+normalize:    O(L_e)
+match loop:   O((G + U) × L_e)       -- cada teste é um substring scan
+-----------------------------------
+total:        O((G + U) × L_e)
+```
+
+**Por sync run:**
+
+```
+cache build:  O(G × L_p + U)         -- só globais precisam de normalizar
+N despesas:   O(N × (G + U) × L_e)
+-----------------------------------
+total:        O(G × L_p + N × (G + U) × L_e)
+```
+
+**Números concretos** a escala esperada do MVP (`G=100`, `U=20`,
+`N=1000`, `L_e=30`):
+
+- Por despesa: `(100 + 20) × 30 = 3,600` comparações de char
+- Por sync: `3,600 × 1000 ≈ 3.6M` comparações de char
+- Tempo wall-clock num Raspberry Pi: **single-digit milissegundos**
+  para o sync inteiro
+
+**Comparação com o custo dominante** de um sync:
+
+| Fase | Tempo típico por email |
+|------|-----------------------|
+| IMAP fetch + decrypt | 100-500 ms |
+| Parse cheerio | 1-5 ms |
+| **Matching (esta camada)** | **~3 μs** |
+| `Expense.create` | 5-20 ms |
+
+O matching é cinco ordens de grandeza mais barato do que o fetch.
+Qualquer optimização estrutural (trie, Aho-Corasick, índice
+invertido) é desperdício — o tempo gasto a implementar e manter não
+é recuperado em nenhum cenário realista.
+
+**Quando revisitar:** se a telemetria mostrar `G × U × N > 10⁸` — na
+prática, plataforma com 100+ users, catálogo global com 1000+
+regras, e 10k+ despesas por sync. Fora do horizonte do MVP.
+
+### 5.7 Dois pontos de consumo (custo de DB)
+
+| Consumidor | Queries ao carregar ctx | Reutilização |
+|------------|------------------------|--------------|
+| `POST /api/expenses` | 2 (globais + overrides do user autenticado) | não, request único |
+| Sync orchestrator | 2 (no run start) | sim, para os N emails do run |
+| Apply-to-all (cap. 6) | 2 (no handler) | sim, para todos os candidatos |
+
+Os três reutilizam a mesma função `loadContext(user_id)`.
+
+### 5.8 Casos-limite
+
+- **`raw` vazia ou `null`** → devolve `null` imediatamente.
+- **`pattern_normalized` vazio** depois de normalizar — rejeitado à
+  escrita do override (validação no serviço, não no matcher).
+- **Sem match algum** → `category_id = null`. Não há fallback
+  "General" à maneira do Embers; uma despesa sem categoria
+  aparece marcada como tal na UI e fica à espera de uma regra ou
+  de classificação manual.
+- **Unicode / emoji** → passam por normalize, viram espaço no passo
+  4, e deixam de casar qualquer regra. Comportamento aceitável.
+- **Padrão patológico** (ex.: `"a"` com `contains`) — longest-match
+  neutraliza-o se houver qualquer regra mais específica. Para
+  travar a montante, a UI avisa à escrita sempre que
+  `pattern_normalized.length < 3`.
+- **Empate absoluto** (mesma prioridade, mesmo comprimento, mesmo
+  match_type, mesmo `created_at`) — na prática, impossível dentro da
+  mesma colecção por causa do índice único
+  `{ user_id, pattern_normalized }`. Entre global e user, o
+  short-circuit já resolveu antes de chegar aqui.
 
 ## 6. Re-catalogação retroactiva ("apply to all")
 
