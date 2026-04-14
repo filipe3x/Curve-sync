@@ -1022,19 +1022,196 @@ Os três reutilizam a mesma função `loadContext(user_id)`.
 
 ## 6. Re-catalogação retroactiva ("apply to all")
 
-_Placeholder._ Define a semântica e o fluxo do botão:
+Qualquer edição de regras (global ou pessoal) afecta por omissão só
+despesas futuras. Este capítulo define o mecanismo explícito para
+reescrever também as despesas já importadas, dentro das invariantes
+do capítulo 3.6 e sem duplicar lógica do capítulo 5.
 
-- **Quando aparece:** ao editar entidades de uma categoria (admin) ou
-  ao criar/editar um override (user).
-- **Escopo:**
-  - admin → todas as despesas de todos os users que ainda não têm
-    override pessoal para aquela entidade;
-  - user → todas as próprias despesas que casem com o override.
-- **Implementação:** query bulk `Expense.updateMany({...}, { $set:
-  { category_id } })` com logging em `curve_logs`.
-- **Auditoria:** cada reassign gera uma entrada para rastreabilidade.
-- **Consistência:** a flag precisa de ser opcional — o user pode querer
-  a mudança só para despesas futuras.
+### 6.1 Princípios
+
+- **Opt-in explícito.** Nunca automático. Cada execução é disparada
+  por um clique humano, nunca como efeito colateral de um save.
+- **Reutiliza o resolver do cap. 5.** Zero lógica de matching
+  duplicada. Apply-to-all é "re-correr o resolver sobre um subset de
+  despesas" — nada mais.
+- **Escopo segue as invariantes do cap. 3.6.** Override pessoal
+  afecta só o dono; apply-to-all global nunca sobrepõe overrides
+  pessoais existentes.
+- **Reversível por auditoria.** Cada execução fica registada com
+  contexto suficiente para investigação ou undo futuro.
+
+### 6.2 Eventos que activam o botão
+
+| Evento | Activa apply-to-all? |
+|--------|----------------------|
+| Add entity no catálogo global (admin) | sim |
+| Remove entity do catálogo global (admin) | sim |
+| Create override pessoal (user) | sim |
+| Edit override pessoal — pattern, match_type, target category | sim |
+| Delete override pessoal | sim |
+| Renomear categoria | **não** (nome não afecta matching) |
+| Alterar ícone da categoria | **não** |
+
+### 6.3 Superfície de trigger
+
+- **UI:** imediatamente após um save com sucesso, aparece um toast
+  ou banner com CTA `"Aplicar a N despesas passadas"`. Se o user
+  fecha o ecrã ou clica noutro sítio, a edição vale só a partir dali.
+- **API:** dois endpoints dedicados (detalhe no cap. 8):
+  - `POST /api/categories/:id/apply-to-all` — para edições no
+    catálogo global.
+  - `POST /api/category-overrides/:id/apply-to-all` — para
+    overrides pessoais.
+- **Nunca como side effect** de um PUT/POST normal. Manter writes
+  previsíveis é o que torna o sistema reversível.
+
+### 6.4 Preview (dry run)
+
+Antes de commit, o user vê o impacto. O mesmo endpoint aceita
+`?dry_run=true` (ou o frontend chama primeiro um GET equivalente) e
+devolve:
+
+```json
+{
+  "count": 42,
+  "samples": [
+    { "_id": "...", "entity": "Lidl Cascais", "date": "2025-11-12", "current_category": "Supermercado", "new_category": "Café" },
+    ...até 10 exemplos
+  ]
+}
+```
+
+Preview é barato: `countDocuments` + `find().limit(10)`. Se `count ==
+0`, o botão desaparece sem round trip de commit.
+
+### 6.5 Cálculo do escopo
+
+**Override pessoal (user `U`, pattern `P`, target `C`):**
+
+1. Candidate set: despesas com `user_id = U` e `entity` que case `P`
+   após normalizar.
+2. **Re-validação** por despesa: correr `resolveCategory(entity,
+   ctx_U)` com o contexto **actualizado** do mesmo user.
+3. Actualizar só onde `resolveCategory(...) !== expense.category_id`.
+
+A re-validação é crítica: o user pode ter outro override mais
+específico (ex.: `"lidl lisboa"`) que já esteja a vencer sobre o
+novo (`"lidl"`). Sem re-validação, apply-to-all reescreveria
+incorrectamente.
+
+**Catálogo global (admin adiciona `"Lidl"` a Supermercado):**
+
+1. Candidate set: despesas — de todos os users — com `entity` que
+   case `"lidl"` após normalizar.
+2. Re-validação por despesa: correr `resolveCategory(entity,
+   ctx_ownerDaDespesa)`, construído com os overrides pessoais
+   **desse** user.
+3. Actualizar só onde o resultado difere.
+
+A invariante "personal é sagrado" (§3.6) **emerge do algoritmo**:
+se o owner tiver um override vencedor, `resolveCategory` devolve a
+categoria pessoal, o `if` guarda a despesa como está, e apply-to-all
+não toca. Nenhum special-case — é consequência natural de reutilizar
+o resolver do cap. 5.
+
+### 6.6 Execução
+
+```
+applyOverride(user_id, override):
+  ctx = await loadContext(user_id)          // cap. 5.5
+  candidates = await Expense.find({
+    user_id,
+    entity: coarseRegex(override.pattern_normalized)
+  }).lean()
+
+  toUpdate = Map<category_id, [expense_id]>()
+  for e in candidates:
+    new_cat = resolveCategory(e.entity, ctx)
+    if new_cat !== String(e.category_id):
+      toUpdate.get(new_cat).push(e._id)
+
+  for [cat, ids] in toUpdate:
+    await reassignCategoryBulk({ _id: { $in: ids } }, cat)   // §4.4
+    await writeApplyToAllLog(...)                            // §6.8
+
+  return { affected, skipped, duration_ms }
+```
+
+- **Pré-filtro Mongo** com regex coarse sobre `entity` é só para
+  reduzir o candidate set. A fonte de verdade é a re-validação
+  app-side — o regex pode ser tolerante (falsos positivos são OK, o
+  loop filtra-os).
+- **`reassignCategoryBulk`** é o único sítio no codebase autorizado a
+  chamar `Expense.updateMany` com `{ $set: { category_id } }` (cap.
+  4.4). Apply-to-all não invoca `updateMany` directamente.
+
+### 6.7 Complexidade
+
+Seja `k` o número de candidatos após pré-filtro, `G+U` o tamanho do
+contexto, `L_e` o comprimento médio da entidade.
+
+- Fetch: `O(M_u)` para o escopo pessoal (scan por `user_id` +
+  regex), `O(M)` para o global (scan cross-user).
+- Re-validação: `O(k × (G+U) × L_e)`.
+- Bulk updates: `O(k / batch_size)` round trips, tipicamente 1-2.
+
+Números concretos:
+
+| Cenário | `M` | `k` | Tempo wall-clock |
+|---------|-----|-----|------------------|
+| Override pessoal, user com 10k despesas | 10k | ~50 | < 100 ms |
+| Global, plataforma 10 users × 10k despesas | 100k | ~500 | < 1 s |
+
+Corre **síncrono dentro do handler** enquanto `M < ~10⁶`. Acima
+disso, a operação tem de passar para background job (fora do
+escopo do MVP).
+
+### 6.8 Atomicidade, auditoria e idempotência
+
+- **Sem transações multi-doc.** `updateMany` batched é idempotente
+  por construção — re-correr após crash salta rows já correctas, e
+  a linha de guarda `new_cat !== current` garante isso.
+- **Audit trail obrigatório.** Uma entrada em `curve_logs` por
+  execução:
+  ```json
+  {
+    "action": "apply_to_all",
+    "actor_id": "<user ou admin que clicou>",
+    "target_type": "override | global_entity",
+    "target_id": "<_id da regra editada>",
+    "scope": "personal | platform",
+    "affected_count": 42,
+    "before": { "<old_category_id>": 30, "<other_old>": 12 }
+  }
+  ```
+  O campo `before` é o snapshot `{ category_id → count }` que permite
+  undo numa fase futura.
+- **Idempotência por design.** Dois cliques seguidos no mesmo botão
+  produzem o mesmo estado; o segundo run é no-op porque
+  `resolveCategory` já devolve a categoria que lá está.
+
+### 6.9 Casos-limite
+
+- **Delete de override + apply-to-all** → re-resolver sem o override
+  apagado; as despesas caem na regra que vencer a seguir (tipicamente
+  a regra global, ou `null`).
+- **Delete de categoria** → bloqueado pelo backend se existirem
+  `expenses.category_id` a referenciar (cap. 7). O user tem de
+  reassignar primeiro, a partir do ecrã. A UI força a ordem.
+- **Renomear categoria** → não activa o botão (matching não muda).
+- **`affected_count == 0`** → o botão não aparece; o preview devolve
+  vazio e a UI esconde o CTA.
+- **User sem despesas históricas** → idem, `affected == 0`, sem
+  round trip desperdiçado.
+
+### 6.10 Fora de escopo (fases futuras)
+
+- **Undo** com base no snapshot `before` em `curve_logs`.
+- **Execução async / background** com progress streaming para
+  escopos acima de ~10⁶ despesas.
+- **Apply-to-all inter-user fora de contexto admin** — nunca. Um
+  user nunca mexe nas despesas de outro user, mesmo que o admin o
+  autorize.
 
 ## 7. Autorização e papéis
 
