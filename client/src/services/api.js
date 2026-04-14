@@ -35,6 +35,12 @@ async function request(path, options = {}) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Request failed: ${res.status}`);
   }
+  // 204 No Content has an empty body — calling `.json()` on it
+  // throws "Unexpected end of JSON input" in the browser. Several
+  // handlers use 204 for successful mutations with nothing to return
+  // (DELETE /api/category-overrides/:id is the canonical one), so
+  // short-circuit here instead of making every caller special-case.
+  if (res.status === 204) return null;
   return res.json();
 }
 

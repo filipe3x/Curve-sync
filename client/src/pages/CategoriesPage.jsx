@@ -215,11 +215,20 @@ function OverridesList({
   busy,
 }) {
   const [pattern, setPattern] = useState('');
+  // Inline validation error for the "Adicionar" button. The button is
+  // NOT disabled on empty input anymore — a silently disabled button
+  // looked like a dead click to users. Now clicking (or hitting Enter)
+  // with an empty field surfaces the message below the form.
+  const [error, setError] = useState(null);
   const mine = overrides.filter((o) => o.category_id === categoryId);
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!pattern.trim()) return;
+    if (!pattern.trim()) {
+      setError('Preenche o nome da entidade primeiro.');
+      return;
+    }
+    setError(null);
     await onCreate({ pattern: pattern.trim() });
     setPattern('');
   };
@@ -230,7 +239,10 @@ function OverridesList({
         <input
           type="text"
           value={pattern}
-          onChange={(e) => setPattern(e.target.value)}
+          onChange={(e) => {
+            setPattern(e.target.value);
+            if (error) setError(null);
+          }}
           placeholder={`Nova regra pessoal para ${categoryName ?? 'esta categoria'}…`}
           className="input flex-1"
           disabled={busy}
@@ -238,12 +250,17 @@ function OverridesList({
         <button
           type="submit"
           className="btn-primary"
-          disabled={busy || !pattern.trim()}
+          disabled={busy}
         >
           <PlusIcon className="h-4 w-4" />
           Adicionar
         </button>
       </form>
+      {error && (
+        <p className="-mt-2 text-xs text-curve-700" role="alert">
+          {error}
+        </p>
+      )}
 
       {mine.length === 0 ? (
         <div className="rounded-2xl border-2 border-dashed border-sand-200 py-8 text-center">
