@@ -270,7 +270,7 @@ function OverridesList({
           </p>
           <p className="mt-1 text-xs text-sand-400">
             Adiciona um padrão (e.g. <span className="font-mono">lidl</span>)
-            para reescrever a categorização futura.
+            para fazer categorização futura dessas despesas.
           </p>
         </div>
       ) : (
@@ -335,29 +335,29 @@ function GlobalEntitiesList({ entities, isAdmin = false, busy = false, onDelete 
           className="input pl-10"
         />
       </div>
-      <ul className="max-h-72 overflow-y-auto divide-y divide-sand-100 rounded-2xl border border-sand-200 bg-white">
+      <ul className="max-h-96 overflow-y-auto divide-y divide-sand-100 rounded-2xl border border-sand-200 bg-white">
         {filtered.map((entity) => (
           <li
             key={entity}
-            className="flex items-center justify-between gap-3 px-4 py-2.5"
+            className="flex items-center justify-between px-4 py-3"
           >
-            <span className="truncate text-sm text-sand-800">{entity}</span>
-            <div className="flex flex-shrink-0 items-center gap-2">
-              <span className="inline-flex items-center rounded-lg bg-sand-100 px-2 py-0.5 text-[11px] font-medium text-sand-500">
-                global
-              </span>
-              {isAdmin && (
-                <button
-                  type="button"
-                  onClick={() => onDelete?.(entity)}
-                  disabled={busy}
-                  title="Remover esta entidade do catálogo global"
-                  className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 transition-colors hover:bg-sand-100 hover:text-curve-700 disabled:opacity-40"
-                >
-                  Apagar
-                </button>
-              )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-sand-900">
+                {entity}
+              </p>
+              <p className="text-xs text-sand-400">global</p>
             </div>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => onDelete?.(entity)}
+                disabled={busy}
+                title="Remover esta entidade do catálogo global"
+                className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
+              >
+                Apagar
+              </button>
+            )}
           </li>
         ))}
         {!filtered.length && (
