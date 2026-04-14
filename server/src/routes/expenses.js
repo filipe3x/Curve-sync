@@ -3,10 +3,10 @@ import mongoose from 'mongoose';
 import Expense from '../models/Expense.js';
 import Category from '../models/Category.js';
 import {
-  assignCategory,
   computeDigest,
   reassignCategoryBulk,
 } from '../services/expense.js';
+import { loadContext, resolveCategory } from '../services/categoryResolver.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
@@ -49,11 +49,19 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/expenses
+//
+// Manual expense creation goes through the same two-tier resolver as
+// the sync orchestrator (docs/Categories.md §5) so personal overrides
+// are honoured on the one-off write path too. `loadContext(req.userId)`
+// is a two-query cost per request — fine for a rare manual create;
+// callers that need to create many expenses in a loop should use the
+// sync path instead.
 router.post('/', async (req, res) => {
   try {
     const { entity, amount, date, card } = req.body;
     const digest = computeDigest({ entity, amount, date, card });
-    const category_id = await assignCategory(entity);
+    const resolverContext = await loadContext(req.userId);
+    const category_id = resolveCategory(entity, resolverContext);
 
     const expense = await Expense.create({
       entity,
