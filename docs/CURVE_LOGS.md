@@ -128,6 +128,29 @@ status: action.includes('failed') || action === 'session_expired' ? 'error' : 'o
 | 21 | `oauth_token_refreshed` | `services/oauthManager.js:191` | `ok` | **no** | `"provider=… accountId=… email=…"` | `"Token Microsoft renovado automaticamente"` |
 | 22 | `first_sync_completed` | `services/syncOrchestrator.js:542` | `ok` | **no** | counts | `"Primeira sincronização concluída"` |
 
+> **Category management events (#23-35) live in [`docs/Categories.md §13.2`](./Categories.md#132-audit-trail-catálogo--regras--despesas).** That document is
+> the single source of truth for every catalogue / overrides / quick-edit
+> / bulk-move / admin-gate audit row — including source files, canonical
+> pt-PT messages, and the k=v shape of `error_detail` for each action.
+> The actions covered there extend the `CurveLog.action` enum in
+> `server/src/models/CurveLog.js` (see §4.3 below) and are rendered by
+> the same `describeLog` switch in
+> `client/src/pages/curveLogsUtils.js`:
+>
+> - `expense_category_changed` (§13.2 #34) — single quick-edit on `/expenses`
+> - `expense_category_changed_bulk` — multi-select batch move
+> - `override_created` / `override_updated` / `override_deleted` (§13.2 #29-31)
+> - `apply_to_all` / `apply_to_all_failed` (§13.2 #32-33) — covers both
+>   the personal `target=override` variant and the admin `target=category`
+>   cross-user variant
+> - `category_created` / `category_updated` / `category_deleted` (§13.2 #23-25)
+> - `category_entity_added` / `category_entity_removed` / `category_entity_moved` (§13.2 #26-28)
+> - `admin_access_failed` (§13.2 #35) — `requireAdmin` middleware gate
+>
+> Duplicating the table here would rot the moment §13.2 grows — keep
+> Categories.md authoritative and come back to this file only for the
+> shape contract (§2, §4.2, §4.3) that all audit actions share.
+
 ### 4.1 Why two events have no `ip`
 
 Events #21 and #22 are written from inside the sync pipeline, NOT from
