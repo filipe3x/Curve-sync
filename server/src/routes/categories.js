@@ -912,4 +912,324 @@ router.post('/:id/entities', requireAdmin, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/categories/:id/apply-to-all   (admin only)
+//
+// Retroactive cross-user recategorisation for a global catalogue
+// category. Mirror of `POST /api/category-overrides/:id/apply-to-all`
+// but operates over EVERY user's expenses — this is the admin's
+// counterpart, spec'd in docs/Categories.md §6.5 (global case) and
+// §8.5 (API contract). The exact semantics are identical to the
+// personal variant; the only difference is the scope of the scan.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id — category _id (validated as ObjectId, 404 otherwise)
+//
+// Body / query:
+//   { dry_run?: boolean, scope?: 'affected' | 'missing' }
+//   - `dry_run: true`   — no writes, no audit row; response carries
+//                         the preview counts so the frontend modal
+//                         can render "would update N despesas" before
+//                         the admin commits.
+//   - `scope: 'affected'` (default) — every expense whose entity
+//                         matches AT LEAST ONE of this category's
+//                         patterns (via the real `matches()` verdict).
+//   - `scope: 'missing'` — only expenses with `category_id: null`.
+//                         First-run / backfill case (§8.5).
+//   Both flags accept the query-string form (`?dry_run=true`) for
+//   curl probing — same convention as the personal variant.
+//
+// Invariants (§6.5, §6.8, "personal is sacred"):
+//   - Re-runs the FULL resolver (§5) with each owner's context, so
+//     a pre-existing personal override naturally beats the admin's
+//     new global rule and the expense is left untouched.
+//   - Idempotent: two consecutive runs produce the same state because
+//     the second run finds `current === verdict` on every candidate.
+//   - `reassignCategoryBulk` (§4.4) is the ONLY write surface —
+//     `Expense.updateMany` is never called directly from this
+//     handler, matching the discipline of the personal variant.
+//
+// Candidate set: full scan of `expenses` (optionally pre-filtered by
+// `category_id: null` for `scope: 'missing'`), then a post-filter in
+// memory against every entity in this category's `entities[]` using
+// the real `matches()`. No coarse regex pre-filter — §6.7 and
+// routes/categoryOverrides.js explain why: a naive regex over
+// `entity` produces false NEGATIVES on the `normalize()` pipeline
+// (accent-fold + punctuation-to-space + lowercase), and at MVP
+// scale (<10k expenses × ~100 users, §6.7) a full scan + in-memory
+// match is both simpler and provably correct.
+//
+// Per-user grouping: the scan is cross-user, but the resolver needs
+// the OWNING user's overrides to make the right decision for each
+// row (§6.5). We group candidates by `user_id` and call
+// `loadContext(userId)` once per owner, then run `resolveCategory`
+// per candidate with the right context. Buckets:
+//
+//   verdict === category._id  && current !== verdict  → update
+//   verdict === category._id  && current === verdict  → no-op
+//   verdict !== category._id                          → skipped_personal
+//
+// The third bucket captures both cases where a personal override
+// redirects the expense away from the admin's target AND cases where
+// another global rule with a longer pattern already claims it. From
+// the admin's viewpoint, both are "the new rule didn't win", which
+// is exactly the metric `skipped_personal` is measuring.
+//
+// Writes: one `reassignCategoryBulk({ _id: { $in: ids }, user_id },
+// targetId)` per `(user, target)` bucket. The per-user `user_id`
+// filter is a safety belt — the candidate set already guarantees
+// ownership — matching the defence-in-depth pattern used in
+// routes/expenses.js and the personal apply-to-all variant.
+//
+// Response (§8.5):
+//   200 { data: { dry_run, scope, matched, updated, skipped_personal } }
+//     - `matched`          — rows whose verdict differs from current
+//                            (i.e. rows we would write in a real run)
+//     - `updated`          — rows actually rewritten (0 on dry_run;
+//                            equals `matched` on a clean real run)
+//     - `skipped_personal` — rows where the resolver verdict is NOT
+//                            this category (personal or longer-match
+//                            interception, "personal is sacred")
+//   400 invalid_scope
+//   404 category_not_found
+//   500 — partial-failure path: any already-applied bucket stays
+//         applied (idempotent on retry), plus an `apply_to_all_failed`
+//         audit row captures the reason for forensics.
+//
+// Rate limiting (§8.5 → `429 apply_to_all_rate_limited`) is NOT
+// implemented in the MVP — no rate-limit scaffolding exists yet and
+// apply-to-all is a human-initiated single click. Same posture as
+// the personal variant. Add when scaffolding lands.
+//
+// Audit (§13.2 #32):
+//   action: 'apply_to_all'
+//   detail: `scope=global target=category affected=<n> skipped_personal=<n> category=<name>`
+//   Canonical pt-PT (curveLogsUtils): "Aplicado a <n> despesas: <pattern> → <category>"
+//
+// Failure path (§13.2 #33):
+//   action: 'apply_to_all_failed'
+//   detail: `reason=<msg> target=category category=<name>`
+// ─────────────────────────────────────────────────────────────────────
+router.post('/:id/apply-to-all', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const category = await Category.findById(id)
+      .select('_id name entities')
+      .lean();
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const dryRun =
+      req.body?.dry_run === true ||
+      req.query?.dry_run === 'true' ||
+      req.query?.dry_run === '1';
+    const scope = req.body?.scope ?? req.query?.scope ?? 'affected';
+    if (scope !== 'affected' && scope !== 'missing') {
+      return res.status(400).json({ error: 'invalid_scope' });
+    }
+
+    // Pre-normalise every entity in this category once. These form
+    // the rule set that drives the candidate post-filter below. The
+    // shape mirrors `loadContext`'s global rules (contains-type,
+    // priority 0) so the same `matches()` verdict applies.
+    const categoryPatterns = (category.entities ?? [])
+      .map((e) => normalize(e))
+      .filter(Boolean)
+      .map((p) => ({ pattern_normalized: p, match_type: 'contains' }));
+
+    // No entities → nothing to match → short-circuit with a no-op
+    // response. Still honours the dry_run / scope flags so the
+    // frontend modal can render consistent "0 afectadas" feedback.
+    if (categoryPatterns.length === 0) {
+      return res.json({
+        data: {
+          dry_run: dryRun,
+          scope,
+          matched: 0,
+          updated: 0,
+          skipped_personal: 0,
+        },
+      });
+    }
+
+    // Cross-user candidate scan. `scope: missing` adds the
+    // `category_id: null` pre-filter so the backfill case doesn't
+    // walk the whole expense table when most of it is already
+    // categorised. `select` keeps the payload to the four fields
+    // the resolver needs.
+    const baseFilter = scope === 'missing' ? { category_id: null } : {};
+    const candidates = await Expense.find(baseFilter)
+      .select('_id entity category_id user_id')
+      .lean();
+
+    // Post-filter with the real matcher. A candidate enters the
+    // reconciliation pass only if its normalised entity matches AT
+    // LEAST ONE of the category's patterns — the same verdict the
+    // resolver would apply, so we can't accidentally drop anything
+    // `resolveCategory` would have claimed.
+    const targetCategoryId = category._id.toString();
+    const matchedCandidates = [];
+    for (const e of candidates) {
+      const norm = normalize(e.entity);
+      if (!norm) continue;
+      if (categoryPatterns.some((rule) => matches(norm, rule))) {
+        matchedCandidates.push(e);
+      }
+    }
+
+    // Group by owner so `loadContext` is called once per user. At
+    // MVP scale (tens of users × tens of candidates each) the extra
+    // allocation is trivial, and the per-user context reuse means
+    // the reconciliation loop stays O(candidates × (G + U) × L_e)
+    // from §5.6, not O(candidates × loadContext_round_trip).
+    const byUser = new Map();
+    for (const e of matchedCandidates) {
+      const key = e.user_id.toString();
+      if (!byUser.has(key)) byUser.set(key, []);
+      byUser.get(key).push(e);
+    }
+
+    // Reconciliation pass. Three buckets per candidate — update,
+    // no-op, or `skipped_personal`. Updates are keyed
+    // `userKey → targetKey → [expenseIds]` so each bulk write stays
+    // scoped to a single user + single target category (safety belt
+    // against cross-user writes, and one round trip per bucket).
+    //
+    // `NULL_KEY` is the sentinel for "target is null" — shouldn't
+    // happen in practice on this endpoint because the admin's
+    // category always resolves to a non-null id, but we keep the
+    // sentinel for parity with the personal variant so the write
+    // loop has one code path.
+    const NULL_KEY = '__null__';
+    const updatesByUser = new Map();
+    let matched = 0;
+    let skippedPersonal = 0;
+
+    for (const [userKey, userCandidates] of byUser) {
+      // One loadContext per owner, reused for every one of their
+      // candidates. Mirrors §5.7's "2 queries at caller start,
+      // reused for N expenses" contract.
+      // eslint-disable-next-line no-await-in-loop
+      const ctx = await loadContext(userKey);
+
+      for (const e of userCandidates) {
+        const verdict = resolveCategory(e.entity, ctx);
+        const verdictStr = verdict ? verdict.toString() : null;
+        const currentStr = e.category_id ? e.category_id.toString() : null;
+
+        if (verdictStr !== targetCategoryId) {
+          // The admin's new rule doesn't win for this row — a
+          // personal override or a longer-matching global rule
+          // already claims the entity. "Personal is sacred"
+          // emerges naturally from reusing the resolver, and this
+          // counter surfaces the exclusion to the admin so the
+          // modal can say "5 rows untouched due to personal
+          // rules".
+          skippedPersonal += 1;
+          continue;
+        }
+        if (currentStr === verdictStr) {
+          // Already in the right place — no write, no counter bump.
+          continue;
+        }
+
+        matched += 1;
+        if (!updatesByUser.has(userKey)) {
+          updatesByUser.set(userKey, new Map());
+        }
+        const bucket = updatesByUser.get(userKey);
+        const tkey = verdictStr ?? NULL_KEY;
+        if (!bucket.has(tkey)) bucket.set(tkey, []);
+        bucket.get(tkey).push(e._id);
+      }
+    }
+
+    if (dryRun) {
+      // Preview path. No writes, no audit row (§13.4). The caller
+      // gets the same shape as the real-run response so the modal
+      // can reuse the same renderer.
+      return res.json({
+        data: {
+          dry_run: true,
+          scope,
+          matched,
+          updated: 0,
+          skipped_personal: skippedPersonal,
+        },
+      });
+    }
+
+    // Real run. One `reassignCategoryBulk` per `(user, target)`
+    // bucket — typically one bucket per user because the admin's
+    // target is almost always the same category across all
+    // candidates, but the nested map supports the fan-out case
+    // cleanly (e.g. a user has a longer-match override that wins
+    // and the admin's pass touches their non-override rows
+    // separately).
+    let updated = 0;
+    try {
+      for (const [userKey, byTarget] of updatesByUser) {
+        for (const [tkey, ids] of byTarget) {
+          const target = tkey === NULL_KEY ? null : tkey;
+          // eslint-disable-next-line no-await-in-loop
+          const result = await reassignCategoryBulk(
+            {
+              _id: { $in: ids },
+              user_id: new mongoose.Types.ObjectId(userKey),
+            },
+            target,
+          );
+          updated += result.modified ?? 0;
+        }
+      }
+    } catch (err) {
+      // Partial failure: any bucket that already landed stays
+      // applied (idempotent on retry — the next run finds
+      // `current === verdict` for those rows). Emit the failure
+      // row with enough context to correlate against the category
+      // + the calling admin.
+      audit({
+        action: 'apply_to_all_failed',
+        userId: req.userId,
+        ip: clientIp(req),
+        detail: `reason=${err.message} target=category category=${category.name}`,
+      });
+      return res.status(500).json({ error: err.message });
+    }
+
+    // Success audit. `scope=global` distinguishes this from the
+    // personal variant's `scope=personal`; `target=category` mirrors
+    // the personal path's `target=override`. The curveLogsUtils
+    // parser case splits on these two keys to render the right
+    // pt-PT message.
+    audit({
+      action: 'apply_to_all',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail:
+        `scope=global target=category affected=${updated} ` +
+        `skipped_personal=${skippedPersonal} category=${category.name}`,
+    });
+
+    res.json({
+      data: {
+        dry_run: false,
+        scope,
+        matched,
+        updated,
+        skipped_personal: skippedPersonal,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
