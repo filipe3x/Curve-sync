@@ -24,7 +24,39 @@ export function describeLog(log) {
   // ---- Audit events (action != null) ----
   if (log.action) {
     const auth = ['login', 'login_failed', 'logout', 'session_expired', 'password_changed'];
-    const type = auth.includes(log.action) ? 'auth' : 'sistema';
+    // `despesa` for the single-expense recat row so the badge colour is
+    // consistent with the chip it originated from on /expenses and /.
+    // Source: docs/Categories.md §13.5.
+    const despesaActions = [
+      'expense_category_changed',
+      'expense_category_changed_bulk',
+    ];
+    // Dedicated `catalogo` bucket for rows that mutate the category
+    // catalogue / personal overrides — create/update/delete of a rule,
+    // and the bulk apply-to-all pass it triggers. Keeps them from
+    // drowning in the generic "Sistema" bucket so users can scan their
+    // own override history at a glance. `expense_category_changed`
+    // stays as `despesa` on purpose (it's a per-expense mutation, not a
+    // rule mutation).
+    const catalogActions = [
+      'override_created',
+      'override_updated',
+      'override_deleted',
+      'apply_to_all',
+      'apply_to_all_failed',
+      // Admin surgery on the global catalogue (docs/Categories.md §13.2
+      // #27). Shares the Catálogo badge with personal-override rows
+      // because from the user's point of view it's still "something
+      // happened to the category system".
+      'category_entity_removed',
+    ];
+    const type = auth.includes(log.action)
+      ? 'auth'
+      : despesaActions.includes(log.action)
+        ? 'despesa'
+        : catalogActions.includes(log.action)
+          ? 'catalogo'
+          : 'sistema';
 
     switch (log.action) {
       case 'login':            return { type, title: 'Login efectuado' };
@@ -47,6 +79,201 @@ export function describeLog(log) {
         return { type, title: `Autorização falhou${log.error_detail ? `: ${log.error_detail}` : ''}` };
       case 'oauth_token_refreshed':  return { type, title: 'Token Microsoft renovado automaticamente' };
       case 'first_sync_completed':   return { type, title: 'Primeira sincronização concluída' };
+      case 'expense_category_changed_bulk': {
+        // docs/Categories.md §13.2 — batch-move slice. The server
+        // writes ONE audit row per bulk call with
+        //   `error_detail = "target=<name> count=<N> from_mixed=<bool>"`
+        // and leaves `entity` null (the selection is typically a
+        // mix of entities). `count` is the server-side modifiedCount
+        // — it already excludes rows that were already in the
+        // target, so "N despesas movidas para X" is accurate for
+        // every renderable row.
+        //
+        // `hideDetail: true` tells CurveLogsPage.SingleRow to skip
+        // its generic error_detail fallback — the title already
+        // summarises the three k=v pairs, dumping them below in mono
+        // would be double noise.
+        const targetMatch = log.error_detail?.match(/target=(.+?) count=/);
+        const countMatch = log.error_detail?.match(/count=(\d+)/);
+        const mixedMatch = log.error_detail?.match(/from_mixed=(true|false)/);
+        const target = targetMatch ? targetMatch[1] : null;
+        const count = countMatch ? Number(countMatch[1]) : null;
+        const mixed = mixedMatch ? mixedMatch[1] === 'true' : null;
+        const noun = count === 1 ? 'despesa movida' : 'despesas movidas';
+        if (count !== null && target) {
+          const suffix = mixed ? ' (origem mista)' : '';
+          return {
+            type,
+            title: `${count} ${noun} para ${target}${suffix}`,
+            hideDetail: true,
+          };
+        }
+        return {
+          type,
+          title: 'Movimento em massa de despesas',
+          hideDetail: true,
+        };
+      }
+      case 'expense_category_changed': {
+        // docs/Categories.md §13.2 #34 — canonical pt-PT:
+        // Title: "<from> → <to>"
+        // Subtitle: the entity (rendered by the row component's
+        // `isExpense` branch, which shows `log.entity` on a second
+        // line in smaller text).
+        //
+        // `error_detail` follows the convention
+        //   "from=<name> to=<name>"
+        // written by routes/expenses.js. Category names may contain
+        // spaces ("Casa e Jardim"), so we parse with a single regex
+        // that captures both halves: `from=` up to the literal " to="
+        // separator, and `to=` to end of string.
+        //
+        // Fallback: if the detail is missing or malformed, fall back
+        // to the entity alone so the row is never empty.
+        const detailMatch = log.error_detail?.match(/from=(.+?) to=(.+)$/);
+        const from = detailMatch ? detailMatch[1] : null;
+        const to = detailMatch ? detailMatch[2] : null;
+        if (from && to) {
+          return { type, title: `${from} → ${to}` };
+        }
+        const entity = log.entity ?? '—';
+        return { type, title: `Despesa recategorizada: ${entity}` };
+      }
+      case 'apply_to_all': {
+        // docs/Categories.md §13.2 #32 — canonical pt-PT:
+        // "Aplicado a <n> despesas: <pattern> → <category>"
+        //
+        // The server writes `error_detail = "scope=personal
+        // target=override affected=<n> skipped_personal=0
+        // category=<name>"` and mirrors the raw pattern into
+        // `entity`. `affected=` is the number of rows actually
+        // rewritten; `category=` is at the tail so it may contain
+        // spaces — the regex stops at end-of-string to capture it.
+        //
+        // Variant: `target=delete_cascade` flags a cascade pass
+        // triggered by `DELETE /api/category-overrides/:id?cascade=true`.
+        // The rule is already gone by the time the log lands, and
+        // expenses may have fanned out into several different
+        // categories (or `null`), so there is no single target to
+        // show. The message focuses on the trigger instead.
+        const pattern = log.entity ?? '—';
+        const affectedMatch = log.error_detail?.match(/affected=(\d+)/);
+        const targetMatch = log.error_detail?.match(/target=(\w+)/);
+        const catMatch = log.error_detail?.match(/category=(.+)$/);
+        const affected = affectedMatch ? Number(affectedMatch[1]) : null;
+        const target = targetMatch ? targetMatch[1] : null;
+        const category = catMatch ? catMatch[1] : null;
+        // "1 despesa" vs "N despesas" — the singular form matters
+        // for the dry-run preview that shows "1 despesa" after
+        // surgical edits. Portuguese pluralisation is regular here.
+        const noun = affected === 1 ? 'despesa' : 'despesas';
+        if (target === 'delete_cascade') {
+          return {
+            type,
+            title: affected !== null
+              ? `${affected} ${noun} re-catalogadas após apagar regra: ${pattern}`
+              : `Re-catalogação após apagar regra: ${pattern}`,
+          };
+        }
+        if (affected !== null && category) {
+          return {
+            type,
+            title: `Aplicado a ${affected} ${noun}: ${pattern} → ${category}`,
+          };
+        }
+        return { type, title: `Aplicado a ${pattern}` };
+      }
+      case 'apply_to_all_failed': {
+        // docs/Categories.md §13.2 #33 — canonical pt-PT:
+        // "Aplicação em massa falhou: <reason>"
+        //
+        // `error_detail` starts with `reason=<msg>` and may carry
+        // `pattern=` / `category=` tail for correlation; we surface
+        // only the reason in the title. `audit.js` sets
+        // `status: 'error'` on any action that `includes('failed')`,
+        // so the badge colour is already "error" at the renderer.
+        const reasonMatch = log.error_detail?.match(/reason=([^]*?)(?: pattern=|$)/);
+        const reason = reasonMatch ? reasonMatch[1] : null;
+        return {
+          type,
+          title: reason
+            ? `Aplicação em massa falhou: ${reason}`
+            : 'Aplicação em massa falhou',
+        };
+      }
+      case 'category_entity_removed': {
+        // docs/Categories.md §13.2 #27 — canonical pt-PT:
+        // "Entidade removida de <name>: <value>"
+        //
+        // The server writes `entity = <removed value>` and
+        // `error_detail = "category=<name> entity=<value>"`, so the
+        // category name is the interesting bit to pull out (entity
+        // itself is mirrored at the top level). The regex is
+        // non-greedy and stops at the next k=v separator — there is
+        // only one today (`entity=`), but keeping the pattern
+        // forward-compatible costs nothing.
+        const removed = log.entity ?? '—';
+        const catMatch = log.error_detail?.match(/category=(.+?)(?: entity=|$)/);
+        const category = catMatch ? catMatch[1] : null;
+        return {
+          type,
+          title: category
+            ? `Entidade removida de ${category}: ${removed}`
+            : `Entidade removida: ${removed}`,
+        };
+      }
+      case 'admin_access_failed': {
+        // docs/Categories.md §13.2 #35 — canonical pt-PT:
+        // "Acesso admin recusado: <method> <path>"
+        //
+        // `error_detail` is written verbatim by requireAdmin as
+        // `method=<METHOD> path=<path>`. Surface the method + path
+        // together so an admin scanning the audit trail can spot
+        // probes at a glance.
+        const methodMatch = log.error_detail?.match(/method=(\S+)/);
+        const pathMatch = log.error_detail?.match(/path=(.+?)$/);
+        const method = methodMatch ? methodMatch[1] : null;
+        const p = pathMatch ? pathMatch[1] : null;
+        // `type` is already `sistema` via the outer ternary (this
+        // action is not in auth / despesa / catalogActions). It's a
+        // security event, not a catalogue edit, so the Sistema badge
+        // is the right bucket.
+        return {
+          type,
+          title: method && p
+            ? `Acesso admin recusado: ${method} ${p}`
+            : 'Acesso admin recusado',
+        };
+      }
+      case 'override_created':
+      case 'override_updated':
+      case 'override_deleted': {
+        // docs/Categories.md §13.2 #29-31 — canonical pt-PT:
+        //   #29 "Regra pessoal criada: <pattern> → <category>"
+        //   #30 "Regra pessoal actualizada: <pattern> → <category>"
+        //   #31 "Regra pessoal apagada: <pattern>"
+        //
+        // The route handlers in server/src/routes/categoryOverrides.js
+        // write `entity: <raw pattern>` so we never have to parse
+        // `pattern=` out of error_detail — the server already gave us
+        // a structured copy. `error_detail` still carries `category=`
+        // for the created/updated variants; we pull it with a
+        // non-greedy match that stops at the next k=v key (for update,
+        // `changed=` comes after) or end of string (for create).
+        const pattern = log.entity ?? '—';
+        if (log.action === 'override_deleted') {
+          return { type, title: `Regra pessoal apagada: ${pattern}` };
+        }
+        const catMatch = log.error_detail?.match(/category=(.+?)(?: changed=|$)/);
+        const category = catMatch ? catMatch[1] : null;
+        const verb = log.action === 'override_created' ? 'criada' : 'actualizada';
+        return {
+          type,
+          title: category
+            ? `Regra pessoal ${verb}: ${pattern} → ${category}`
+            : `Regra pessoal ${verb}: ${pattern}`,
+        };
+      }
       default:                       return { type, title: log.action };
     }
   }
@@ -86,6 +313,15 @@ export function describeLog(log) {
 
 // Groups consecutive expense rows (action == null && entity != null)
 // that landed within BATCH_WINDOW_MS into a single batch entry.
+//
+// `expense_category_changed` rows (docs/Categories.md §13.2 #34) have
+// `action != null` so they fall through to `{ kind: 'single' }` by
+// design — each manual recategorisation surfaces as its own line for
+// now. §13.5 proposes clustering adjacent recat rows into
+// "N despesas recategorizadas manualmente" but that needs the batch
+// renderer in CurveLogsPage.jsx to understand two batch flavours
+// (sync vs recat), which is out of scope for PR #1. Revisit once
+// users start complaining about flood.
 //
 // Input  : logs sorted newest-first by created_at (the API contract).
 // Output : array of { kind: 'single', log } | { kind: 'batch', logs, summary, key }

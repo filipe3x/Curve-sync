@@ -1492,12 +1492,30 @@ alheios.
       "pattern_normalized": "lidl",
       "match_type": "exact",
       "priority": 0,
+      "matched_count": 15,
       "created_at": "…",
       "updated_at": "…"
     }
   ]
 }
 ```
+
+**`matched_count`** é o número de despesas do user que a regra
+casa *agora*, independentemente de quem vence o tie-break do
+resolver — é "quão larga é a rede desta regra", não "quantas
+despesas mudam se aplicares apply-to-all" (essa conta é a do
+§8.5, que já exclui os rows cuja categoria actual é a target).
+Duas regras sobrepostas (`lidl` e `lidl cascais`) podem ambas
+reportar `>0` mesmo que só uma ganhe a classificação final.
+
+O count é calculado no GET, POST e PUT com uma agregação única
+`{ entity → count }` por user + uma passagem in-memory que reutiliza
+`categoryResolver.matches()`. Complexidade
+`O(rules × distinct_entities)`; à escala MVP (~10k despesas, <50
+entidades distintas) é uma operação de milissegundos, sem
+round-trip extra — o `serialize()` já embrulha o número na
+resposta, e o `/categories` usa-o para escrever `contains ·
+prioridade 0 · 15 despesas` no subtítulo de cada regra.
 
 `POST /api/category-overrides` — cria override pessoal. Body:
 
@@ -1592,8 +1610,11 @@ Query params: `?cycle=current` (default) | `?cycle=previous` |
 
 ### 8.7 Quick-edit inline (delta do capítulo 12)
 
-O capítulo 12 adiciona uma única rota nova à API, dedicada ao
-caminho single-expense do popover de edição:
+O capítulo 12 adiciona duas rotas novas à API, dedicadas ao
+caminho single-expense e ao caminho multi-select da tabela de
+despesas.
+
+**Single-expense (§12.7):**
 
 `PUT /api/expenses/:id/category` — actualiza apenas o
 `category_id` de uma despesa. Body `{ category_id: ObjectId |
@@ -1612,6 +1633,50 @@ abrir nenhuma nova superfície de escrita. O modo entity-wide do
 popover (checkbox) reutiliza os endpoints de overrides do §8.4 e
 de apply-to-all do §8.5 — nenhum delta adicional.
 
+**Bulk multi-select (§12.12):**
+
+`PUT /api/expenses/bulk-category` — reassigna até 500 despesas
+numa única chamada. Body `{ ids: ObjectId[], category_id:
+ObjectId | null }`. Enforced `user_id: req.userId` no filtro
+(ids cross-user caem silenciosamente em `skipped`, sem 404 para
+não revelar existência por §7.5).
+
+- `200` → `{ data: { moved, skipped, target_category_name } }`
+- `400 invalid_body` — `ids` vazio, não-array, >500, ou com
+  ObjectIds inválidos
+- `400 invalid_category_id` — `category_id` não é ObjectId nem `null`
+- `404 category_not_found` — `category_id` não existe no catálogo
+
+`skipped` cobre: rows cuja categoria actual já é a target, ids
+duplicados no payload, e ids que o user não possui. A resposta
+é agregada (um único número) — o handler não diz *quais* rows
+fizeram skip para não vazar existência cross-user.
+
+`reassignCategoryBulk` é chamado com filtro
+`{ _id: { $in: ids }, user_id: req.userId }`, reutilizando o
+helper autorizado do §4.4. Uma única linha de auditoria
+`expense_category_changed_bulk` é escrita no final (§13.2 #36).
+
+**Compact id-only read:**
+
+`GET /api/expenses?fields=_id` — modo compacto do read path
+existente (§2.4), usado pelo frontend para implementar o
+"Seleccionar todas as N" do Gmail-style batch-move (§12.12).
+Devolve `{ ids: string[], total: number }` em vez de
+`{ data: Expense[], meta }`, aplicando o mesmo filtro do GET
+normal mas só projectando `_id`.
+
+- `200` → `{ ids: string[], total: number }`
+- `400 bulk_too_large` — quando o filtro devolve mais de 500
+  rows. Protege o servidor de payloads enormes e espelha o cap
+  duro do `bulk-category`.
+
+O cliente **tem de** verificar `total <= 500` na página corrente
+antes de chamar — o `bulk_too_large` é o guardrail final, não a
+UX. O frontend usa-o para decidir entre mostrar o link
+"Seleccionar todas as N" ou o aviso "Mais de 500 — refina o
+filtro" (§12.12).
+
 ### 8.8 Tabela-resumo de códigos de erro
 
 | Code | HTTP | Onde |
@@ -1629,8 +1694,10 @@ de apply-to-all do §8.5 — nenhum delta adicional.
 | `entity_not_found` | 404 | DELETE categories/:id/entities/:entity |
 | `apply_to_all_rate_limited` | 429 | POST apply-to-all (ambos) |
 | `invalid_range` | 400 | GET categories/stats |
-| `invalid_category_id` | 400 | PUT expenses/:id/category |
+| `invalid_category_id` | 400 | PUT expenses/:id/category, PUT expenses/bulk-category |
 | `expense_not_found` | 404 | PUT expenses/:id/category |
+| `invalid_body` | 400 | PUT expenses/bulk-category (ids shape) |
+| `bulk_too_large` | 400 | GET expenses?fields=_id (>500 rows) |
 
 Os 401 e 403 genéricos (§7.5) não entram na tabela — são contratos
 dos middlewares, não dos handlers.
@@ -1774,6 +1841,133 @@ system, com estado activo `bg-sand-100 text-sand-900`.
   §5.5 do UIX_DESIGN. `pessoal` ganha tint `curve-50` para
   diferenciar visualmente.
 
+### 9.5.1 Formulário "Nova regra pessoal" — autocomplete + click-to-create
+
+Sub-componente do painel "As minhas regras" dentro da tab
+"Entidades" do §9.5. O input de texto `"Nova regra pessoal para
+<Categoria>…"` ganha um dropdown de sugestões que reduz o atrito
+de criar regras com padrões correctos.
+
+**Fonte das sugestões.** Um único `GET /api/autocomplete/entity`
+no `refreshAll()` da página — as entidades não mudam entre
+categorias, logo não vale a pena re-fetch por selecção. O
+endpoint agrega `Expense.distinct('entity')` por user e
+**ordena por data mais recente** via `{ $max: '$date' }`, com
+`created_at` como tiebreak:
+
+```js
+[
+  { $match: { user_id, entity: { $nin: [null, ''] } } },
+  { $group: {
+      _id: '$entity',
+      last_date: { $max: '$date' },
+      last_created_at: { $max: '$created_at' },
+    }
+  },
+  { $sort: { last_date: -1, last_created_at: -1, _id: 1 } },
+]
+```
+
+Porquê recency em vez de alfabético: o user quer catalogar o
+que *acabou* de ver no cartão, não o que sai primeiro num
+`.sort()` UTF-16. `date` é string `YYYY-MM-DD`, por isso o `$max`
+lexicográfico coincide com o verdadeiro máximo temporal sem
+parsing.
+
+**Filtro "já coberta".** Entidades que alguma regra existente
+já apanha (**de qualquer categoria**, não só a actualmente
+seleccionada) são podadas **antes** de entrarem no dropdown. O
+cliente replica byte-a-byte o `normalize()` + os três branches
+de `matches()` do resolver (§5.2, §5.3) num helper local
+`entityCoveredByOverride()`. Assim a sugestão nunca aponta para
+um conflito que o `POST /category-overrides` devolveria como
+`409 override_exists` ou que o resolver faria match noutra
+categoria.
+
+**Interacção.**
+
+- **Focus/typing** abre o dropdown; empty input mostra os 8 mais
+  recentes; input com texto filtra via `includes(normalized)`
+  também preservando a ordem recency-first; cap de 8 rows para
+  não virar uma muralha de texto.
+- **↑/↓** navegam no highlight (com wrap-around), **Enter**
+  pica a row realçada, **Esc** fecha sem mexer no input.
+- **Click no rato** usa `onMouseDown` em vez de `onClick` para
+  disparar **antes** do `onBlur` do input — o delay de 120ms no
+  blur fecha o dropdown cedo o suficiente para não atrapalhar.
+- **Click-to-create.** Picar uma sugestão dispara
+  **imediatamente** `onCreate({ pattern: entity })` em vez de
+  apenas preencher o input. Não há dois cliques ("picar →
+  Adicionar") — o user já confirmou a escolha ao picar uma row
+  de uma lista que é garantidamente válida e livre. O botão
+  `Adicionar` continua a existir para input digitado à mão.
+- **Apply-to-all após create.** O fluxo do §9.7 dispara na
+  mesma — o parent `handleCreateOverride` chama o dry-run de
+  apply-to-all e mostra o banner "N despesas podem ser
+  re-catalogadas" se `matched > 0`.
+
+**Degradation graceful.** Se `/autocomplete` falhar, o fetch
+cai em `{ data: [] }` em silêncio e o input volta a comportar-se
+como text input normal — o dropdown nunca abre por falta de
+candidates.
+
+### 9.5.2 Contador "match c/ N despesas" por regra
+
+Cada row em "As minhas regras" mostra no subtítulo
+`<match_type> · prioridade <n> · match c/ N despesa(s)` usando o
+campo `matched_count` do §8.4. Pluralização pt-PT (1 →
+"match c/ 1 despesa", N → "match c/ N despesas"). Quando
+`matched_count == null` (rows vindos de caches pre-feature ou
+handlers que não computam o count), o sufixo é omitido — a row
+renderiza limpa sem partir.
+
+O prefixo "match c/" é deliberado — a etiqueta anterior
+("N despesas") sugeria pertença ("esta regra tem estas N
+despesas arrumadas"), mas o número é de facto a **largura da
+rede**: quantas das despesas do user é que o `matches()` do
+resolver considera que a regra apanha *agora*, independentemente
+de qual categoria elas estão hoje e de quem vence o tie-break.
+Duas regras sobrepostas (`lidl` e `lidl cascais`) podem ambas
+reportar `>0` mesmo que só uma ganhe no resolver, e uma regra
+recém-criada pode reportar `3` sem que nenhuma dessas 3 despesas
+esteja ainda catalogada na target — o apply-to-all é que
+materializa a mudança. O prefixo explicita esta distinção na UI.
+
+A mesma regra de leitura e a mesma etiqueta aplicam-se ao
+contador do catálogo global (§9.5.3 abaixo), para que as duas
+listas falem a mesma língua.
+
+O cálculo é feito **server-side** no handler de `GET /category-
+overrides` via `countMatchesPerRule()`, reutilizando
+`categoryResolver.matches()`. Ver §8.4 para a semântica exacta
+(é "largura da rede", não "quantas mudariam com apply-to-all").
+
+### 9.5.3 Contador "match c/ N despesas" no catálogo global
+
+Cada row do painel `Catálogo global` (§9 read-only, §12.11
+admin-editable) ganha o mesmo sufixo `match c/ N despesa(s)`,
+calculado da mesma forma mas contra as entradas do
+`Category.entities[]` em vez dos overrides pessoais. A lista é
+user-scoped: o número reflecte quantas das **minhas** despesas
+batem contra esta entidade global, nunca o total da plataforma.
+
+Pipeline server-side (reutiliza `normalize()` + `matches()` do
+resolver §5):
+
+1. Uma única agregação `{ entity → count }` sobre
+   `Expense.find({ user_id: req.userId })`.
+2. Por cada categoria, por cada string em `entities[]`, um
+   `matches(userEntityNorm, { pattern_normalized, match_type:
+   'contains' })` — `match_type` é sempre `contains` porque o
+   schema global do `Category` não expressa outra coisa (§5.5).
+3. Attach `entity_match_counts: { [entity_raw]: N }` por
+   categoria na resposta de `GET /api/categories?with_match_counts=true`.
+
+A flag `with_match_counts` é **opt-in** — a `/categories` do
+management screen passa-a, mas os outros consumers da API
+(`ExpensesPage`, `DashboardPage`, `CategoryPickerPopover`)
+ignoram-na e ficam no payload barato `{ id, name, icon, entities }`.
+
 ### 9.6 Painel de despesas recentes (tab alternativa)
 
 Tabela compacta com as últimas 10 despesas da categoria
@@ -1786,28 +1980,88 @@ no contexto). Link no fundo "Ver todas →" abre
 
 Qualquer edição que afecte matching (criar override, mover
 entidade, alterar `match_type`) activa um banner inline na zona
-do header do detail pane:
+do header do detail pane. **Um banner por regra pendente,
+empilhados** — ver §9.7.1 para o porquê.
 
 ```
-┌──────────────────────────────────────────────────┐
-│ ℹ  Regra alterada. Aplicar a despesas passadas? │
-│                          [ Ignorar ] [ Aplicar ] │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ ℹ Regra "lidl" → Groceries · match c/ 3 despesas.              │
+│   Aplicar a despesas passadas?                                 │
+│               [ Anular regra ]  [ Ignorar ]  [ Aplicar ]       │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+Cada banner nomeia a regra que o criou (pattern + categoria
+target + contador `match c/ N despesa(s)` snapshotado no
+momento da criação). Os três botões:
+
+- **Aplicar** → abre modal com preview fresco (via `dry_run:
+  true` do §8.5).
+- **Ignorar** → dispensa o banner sem apagar a regra. A regra
+  fica em vigor para sync futura, as despesas passadas é que
+  não são re-avaliadas.
+- **Anular regra** → apaga a regra outright
+  (`DELETE /api/category-overrides/:id`, `cascade: false`). É o
+  escape hatch para quando o user se engana a criar a regra
+  (pattern errado, categoria errada, typo). `cascade: false` é
+  sempre seguro aqui porque o banner só aparece **antes** do
+  primeiro Aplicar, logo nenhuma `category_id` foi escrita por
+  esta regra — não há nada para desfazer. Toast de sucesso:
+  `"Regra '<pattern>' anulada."`.
 
 `Aplicar` abre modal com preview (via `dry_run: true` do §8.5):
 
 ```
+Aplicar a despesas passadas?
+Regra "lidl" → Groceries
+
 Vão ser re-catalogadas 47 despesas.
   ─ 42 pertencem a ti
   ─  5 são de outros users (protegidas por overrides pessoais)
-Cancelar              Confirmar aplicação
+
+[ Anular regra ]              Cancelar   Confirmar aplicação
 ```
+
+O modal repete a mesma terceira opção `Anular regra` no canto
+inferior esquerdo (separada visualmente dos botões de fecho à
+direita) — o user pode abrir o preview, ver que afinal a regra
+está mal, e anulá-la sem ter de fechar e voltar ao banner.
 
 Loading state no botão primário (`A aplicar...` + spinner,
 conforme §10 do UIX_DESIGN). Sucesso → toast `slide-in-right`
 (`"47 despesas re-catalogadas"`) + refresh dos totais no ecrã
 (chamada silenciosa a `/api/categories/stats`).
+
+### 9.7.1 Stack de banners pendentes
+
+**Estado**: `pendingApplies: Array<{ id, pattern, category_name,
+matched }>` em `CategoriesPage`. Cada `handleCreateOverride`
+bem-sucedido **empurra** (`push`) uma entrada para o fim da
+lista, nunca sobrescreve. Consequências práticas:
+
+- Criar a regra A seguida imediatamente pela regra B mostra
+  **dois banners** empilhados — um para A, outro para B, cada
+  um com o seu próprio nome, contador e triplo de botões.
+  Clicar `Aplicar` no banner de A só aplica A; o banner de B
+  fica onde estava, à espera da decisão do user.
+- O id que o `handleApplyConfirm` usa vem de `applyPreview.entry`
+  (snapshot no momento em que o user clicou `Aplicar`), não de
+  um estado "corrente" partilhado — logo criar uma terceira
+  regra enquanto o modal está aberto **não afecta** a regra que
+  está a ser confirmada.
+- `Ignorar` e `Anular regra` actuam só sobre a entrada clicada
+  (filtro por `id`), nunca sobre toda a lista.
+- Apagar uma regra via a lista "As minhas regras" (§9.5) também
+  remove qualquer banner pendente para essa regra — evita ficar
+  com um banner zombie a apontar para um id que já não existe.
+
+**History**: a versão anterior usava um único `pendingOverrideId:
+string`. Criar a regra B enquanto o banner de A estava aberto
+sobrescrevia o id silenciosamente, e o click em `Aplicar`
+aplicava só B — A era descartada sem nenhuma indicação visual.
+O array elimina esse modo de falha por construção: cada regra
+tem o seu próprio banner rastreável até o user decidir
+explicitamente o que fazer com ela.
 
 ### 9.8 Motion & grafismo
 
@@ -2671,6 +2925,104 @@ o popover do frontend é um rollback de uma linha (remover o
   no popover e no modal de confirmação, focus trap ao abrir,
   focus restore ao fechar (volta ao chip clicado).
 
+### 12.12 Batch-move multi-select em `/expenses`
+
+O quick-edit §12.2-§12.4 resolve uma despesa de cada vez, o que
+é insuficiente quando o user volta de umas férias e tem 30
+*"Hsn Store Com"* por catalogar. Esta secção descreve o modo
+multi-select, que reutiliza o mesmo `<CategoryPickerPopover>` do
+§12.2 com um pequeno delta de props: `context={ kind: 'bulk',
+count: N }`.
+
+**Superfície.** Apenas a `/expenses` (a tabela do dashboard é
+pequena e nunca precisará disto). Não é admin-only — qualquer
+user autenticado pode fazer batch-move das suas próprias
+despesas. O cap duro é `500 ids/chamada` (espelhado no server
+§8.7 e no client `BULK_MAX = 500`).
+
+**Interacção.** Pattern Gmail-style, em três camadas:
+
+1. **Checkbox em cada linha.** Click → adiciona/remove do
+   selection set. Shift-click → selecciona o intervalo entre o
+   último anchor e o click actual (range-select clássico).
+2. **Master checkbox no header.** Estados: vazio → tudo na página
+   seleccionado; *intermediate* → algumas da página (indicado
+   via `el.indeterminate = true` no ref callback); tudo na
+   página → clear. Escopo = *página visível*, não o filtro
+   inteiro — isso é a camada 3.
+3. **"Seleccionar todas as N" (hint banner).** Quando a página
+   inteira está seleccionada **e** `total > page.length`,
+   aparece um link inline:
+   - `total <= 500` → `"Seleccionar todas as N despesas"` (um
+     click → `GET /api/expenses?fields=_id&…` (§8.7) devolve
+     até 500 ids do filtro actual, substitui o selection set).
+   - `total > 500` → `"Mais de 500 despesas — refina o filtro"`
+     (warning, sem link — o user tem de apertar o filtro antes
+     de continuar). Este é o guardrail de UX; o guardrail
+     final é o `400 bulk_too_large` do servidor.
+
+**Action bar.** Sticky na zona acima da tabela quando
+`selection.size > 0`:
+
+```
+┌────────────────────────────────────────────────┐
+│  12 seleccionadas     [ Limpar ]  [ Mover → ]  │
+└────────────────────────────────────────────────┘
+```
+
+O botão primário `Mover →` (com as mesmas variantes de §12.2:
+`btn-primary`, `active:scale-[0.97]`) ancora o
+`<CategoryPickerPopover>` em modo bulk:
+
+- Título passa a `"Mover N despesa(s) para…"` (pluralização
+  pt-PT: 1 → "1 despesa", N → "N despesas").
+- Nenhum chip tem `ring-curve-500` de "current" — a selecção é
+  tipicamente mista e um highlight seria mentira.
+- O guard `clicked === current` do single-mode é desligado — no
+  modo bulk qualquer click é um write, e o server reporta
+  honestamente no `skipped` quantas já estavam na target.
+- `"Sem categoria"` continua disponível como row explícita
+  (é o mesmo caminho do §12.9).
+
+**Write path.** O click no chip dispara
+`PUT /api/expenses/bulk-category` (§8.7) com o set completo de
+ids. O client aplica update optimista — snapshot das rows
+afectadas, reassigna `category_id` localmente, e rollback via
+rehidratação do snapshot em caso de erro 4xx/5xx. Toast com
+contagem:
+
+- Sucesso → `"N despesa(s) movida(s) para <target>"` (mais
+  `" (M saltadas)"` se `skipped > 0`).
+- Erro → `"Falhou mover despesas: <msg>"` + rollback automático.
+
+**Interacção com o quick-edit single-row.** Quando
+`selection.size > 0`, o chip de cada linha fica `disabled` (não
+abre o popover single-mode) — duas superfícies de escrita a
+competir pela mesma célula seria confuso. Limpar a selecção (`×`
+ou `Limpar`) reactiva o quick-edit.
+
+**Auditoria.** Uma única linha `expense_category_changed_bulk`
+por chamada, **não N linhas**. Ver §13.2 #36.
+
+### 12.13 Testes a acrescentar — batch-move
+
+- **Unit.** `PUT /api/expenses/bulk-category` com ids válidos
+  (200 com `moved`, `skipped`, `target_category_name`), ids
+  vazios (`400 invalid_body`), 501 ids (`400 invalid_body`),
+  `category_id` inexistente (`404 category_not_found`), ids
+  cross-user (silenciosamente em `skipped`, nada vaza).
+- **Unit.** `GET /api/expenses?fields=_id` devolve `{ ids,
+  total }` e falha com `400 bulk_too_large` quando `total > 500`.
+- **Integration.** Seleccionar 3 linhas + mover, verificar que
+  `expense_category_changed_bulk` é **uma** row de log com
+  `target=…` e `count=3` no `error_detail`.
+- **Integration.** Seleccionar via "Seleccionar todas as 24"
+  (`total <= 500`), mover, verificar que as 24 ficam todas na
+  target e o toast diz `"24 despesas movidas"`.
+- **A11y.** Master checkbox atinge estado *indeterminate*
+  quando parte da página está seleccionada. Shift-click
+  funciona em modo teclado (shift + clique no checkbox).
+
 ## 13. Auditoria e observabilidade
 
 Os capítulos 6, 7, 10 e 12 mencionam logs em várias situações
@@ -2726,6 +3078,7 @@ as entradas têm `status: 'ok'` excepto se indicado. O formato de
 | 33 | `apply_to_all_failed` | mesma rota, catch | `error` | yes | `reason=<msg>` | `"Aplicação em massa falhou: <reason>"` |
 | 34 | `expense_category_changed` | `routes/expenses.js::PUT /:id/category` (user, §12.7) | `ok` | yes | `expense_id=<id> from=<name> to=<name> entity=<value>` | `"Despesa recategorizada: <entity> → <to>"` |
 | 35 | `admin_denied` | `middleware/requireAdmin.js` (§7.2) | `error` | yes | `method=<METHOD> path=<path>` | `"Acesso admin recusado: <method> <path>"` |
+| 36 | `expense_category_changed_bulk` | `routes/expenses.js::PUT /bulk-category` (user, §12.12) | `ok` | yes | `target=<name> count=<n> from_mixed=<bool>` | `"N despesa(s) movida(s) para <target>[ (origem mista)]"` |
 
 **Notas sobre a tabela:**
 
@@ -2743,12 +3096,21 @@ as entradas têm `status: 'ok'` excepto se indicado. O formato de
   é **batched no frontend** (§13.5) — cada click no chip do §12
   gera uma linha, mas o `describeLog` agrupa adjacentes do mesmo
   dia para evitar flood.
+- `expense_category_changed_bulk` é o **oposto** do anterior: uma
+  única chamada a `PUT /bulk-category` (até 500 rows) gera uma
+  única linha de log, não N. `entity` fica `null` — a operação
+  abrange múltiplas entidades e nenhuma representa o conjunto. A
+  flag `from_mixed=true` sinaliza que as rows vinham de mais de
+  uma categoria de origem (o renderer acrescenta " (origem
+  mista)" ao título). O `describeLog` usa `hideDetail: true` para
+  esconder o raw `error_detail` na `/curve/logs` — o título já
+  diz tudo.
 
 ### 13.3 Schema do CurveLog — zero alterações
 
 Tudo assenta no que já existe:
 
-- **`action`** — adicionar as 13 novas entradas ao enum do
+- **`action`** — adicionar as 14 novas entradas ao enum do
   `server/src/models/CurveLog.js` (linha 19 do modelo actual).
 - **`user_id`** — já obrigatório, capta o `actor_id` implicitamente
   (o user que chamou a rota). Para eventos admin, é o admin; para

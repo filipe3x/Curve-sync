@@ -5,7 +5,7 @@
  *
  *     reader.fetchUnseen()
  *       → parseEmail(source)
- *         → assignCategoryFromList(entity, cachedCategories)
+ *         → resolveCategory(entity, resolverContext)
  *           → Expense.create(...)  (duplicate? → log + markSeen)
  *             → CurveLog.create(...)
  *               → reader.markSeen(uid)
@@ -24,6 +24,14 @@
  * See docs/EMAIL.md → Phase 3 for the full design rationale
  * (multi-user scoping, duplicate-detection trap, circuit breaker,
  * silent-failure canary, recovery invariants).
+ *
+ * Category resolution (docs/Categories.md §5): `loadContext(user_id)`
+ * runs ONCE per sync, producing a `{userRules, globalRules}` bundle
+ * that's reused for every email in the loop. This keeps the per-email
+ * match a pure function with zero DB reads, so thousands of receipts
+ * in one backlog stay cheap. Personal overrides short-circuit the
+ * global catalogue per §3.4 — that tier-ordering is enforced inside
+ * `resolveCategory`, not here.
  */
 
 import fs from 'node:fs';
@@ -32,9 +40,8 @@ import path from 'node:path';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import Expense from '../models/Expense.js';
-import Category from '../models/Category.js';
 import { parseEmail, ParseError } from './emailParser.js';
-import { assignCategoryFromList } from './expense.js';
+import { loadContext, resolveCategory } from './categoryResolver.js';
 import { ImapReader } from './imapReader.js';
 import { audit } from './audit.js';
 
@@ -249,15 +256,20 @@ export async function syncEmails({ config, reader, dryRun = false }) {
     }
   }
 
-  // Categories are loaded ONCE per run and reused for every email. The
-  // existing `assignCategory` would otherwise do a full Category.find()
-  // per email, which is an N+1 on every sync.
-  let categoriesCache = [];
+  // Resolver context is loaded ONCE per run and reused for every
+  // email. A naive per-email `loadContext` would be an N+1 on every
+  // sync; one upfront read (Category.find + CategoryOverride.find in
+  // parallel, see categoryResolver.js §5.5) covers the whole loop.
+  //
+  // Overrides are scoped to the config owner — the sync pass runs
+  // with that user's personal rules in play and falls back to the
+  // global catalogue when none match (docs/Categories.md §3.4, §5.4).
+  let resolverContext = { userRules: [], globalRules: [] };
   try {
-    categoriesCache = await Category.find().lean();
+    resolverContext = await loadContext(config.user_id);
   } catch (e) {
-    console.warn(`syncEmails: could not load categories: ${e.message}`);
-    // We continue with an empty cache — every expense just ends up
+    console.warn(`syncEmails: could not load resolver context: ${e.message}`);
+    // We continue with an empty context — every expense just ends up
     // with category_id = null instead of an auto-assigned category.
   }
 
@@ -331,7 +343,10 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       }
 
       // ---- 2. Categorise ----
-      const category_id = assignCategoryFromList(parsed.entity, categoriesCache);
+      // Two-tier resolution (personal overrides → global catalogue),
+      // pure and synchronous once `resolverContext` is loaded. See
+      // docs/Categories.md §5 for the pipeline.
+      const category_id = resolveCategory(parsed.entity, resolverContext);
 
       // ---- 3. Dry run: check-only path, no writes ----
       if (dryRun) {

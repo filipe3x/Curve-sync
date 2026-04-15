@@ -14,15 +14,17 @@ const TABS = [
 ];
 
 const TYPE_BADGE = {
-  despesa: 'bg-curve-50 text-curve-800',
-  sistema: 'bg-sand-100 text-sand-700',
-  auth:    'bg-indigo-50 text-indigo-700',
+  despesa:  'bg-curve-50 text-curve-800',
+  sistema:  'bg-sand-100 text-sand-700',
+  auth:     'bg-indigo-50 text-indigo-700',
+  catalogo: 'bg-violet-50 text-violet-700',
 };
 
 const TYPE_LABEL = {
-  despesa: 'Despesa',
-  sistema: 'Sistema',
-  auth:    'Auth',
+  despesa:  'Despesa',
+  sistema:  'Sistema',
+  auth:     'Auth',
+  catalogo: 'Catálogo',
 };
 
 export default function CurveLogsPage() {
@@ -140,7 +142,7 @@ export default function CurveLogsPage() {
 // ---------- Row components ----------
 
 function SingleRow({ log }) {
-  const { type, title } = describeLog(log);
+  const { type, title, hideDetail } = describeLog(log);
   const isExpense = type === 'despesa' && log.entity;
   return (
     <tr className="border-b border-sand-50 transition-colors hover:bg-sand-50/60">
@@ -162,7 +164,7 @@ function SingleRow({ log }) {
             )}
           </div>
         )}
-        {!isExpense && log.error_detail && !title.includes(log.error_detail) && (
+        {!isExpense && !hideDetail && log.error_detail && !title.includes(log.error_detail) && (
           <div className="mt-0.5 break-all font-mono text-xs text-sand-400">{log.error_detail}</div>
         )}
       </td>

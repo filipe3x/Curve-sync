@@ -44,6 +44,61 @@ const curveLogSchema = new mongoose.Schema(
       //                            end-to-end happy path for new users.
       'oauth_start', 'oauth_completed', 'oauth_cancelled', 'oauth_failed',
       'oauth_token_refreshed', 'first_sync_completed',
+      // Category management (docs/Categories.md §13.2). PR #1 of the
+      // roadmap only ships the single-expense quick-edit path; the other
+      // 12 action values (category_created, override_*, apply_to_all, …)
+      // are added in later phases when their routes land.
+      //   expense_category_changed — user clicked the chip in the
+      //     `/expenses` or `/` table and reassigned a single expense to
+      //     a different category via PUT /api/expenses/:id/category
+      //     (§12.7). Carries `expense_id`, `entity`, and
+      //     `error_detail = "from=<name> to=<name>"`.
+      //   override_created / override_updated / override_deleted —
+      //     personal matching rules (CategoryOverride). Landed with
+      //     PR #2 even though the UI to create them arrives later;
+      //     the endpoints are usable via API right away. Carry
+      //     `entity` (the raw pattern) and `error_detail` with the
+      //     pattern + match_type + category name per §13.2 #29-31.
+      //   apply_to_all / apply_to_all_failed — retroactive
+      //     recategorisation via POST /api/category-overrides/:id/
+      //     apply-to-all. Success carries
+      //     `error_detail = "scope=personal target=override
+      //     affected=<n> skipped_personal=0 category=<name>"` and
+      //     `entity` = raw pattern, so the renderer can build the
+      //     §13.2 #32 pt-PT message without parsing
+      //     (`skipped_personal` stays 0 on the personal path —
+      //     shape parity with the admin variant that lands in
+      //     Fase 3). Failure carries `reason=<msg>` and inherits
+      //     `status: 'error'` from the audit helper heuristic
+      //     (`includes('failed')`).
+      'expense_category_changed',
+      // Bulk multi-select move from the /expenses table
+      // (docs/Categories.md §13.2 — batch-move slice). Fired by
+      // PUT /api/expenses/bulk-category once per call, regardless of
+      // how many rows moved (one audit row scales better than N
+      // near-identical rows flooding `curve_logs`). Carries
+      // `error_detail = "target=<name> count=<N> from_mixed=true|false"`.
+      // `entity` is left null because the selection is typically a
+      // mix of entities — the per-row provenance lives in the
+      // optimistic update on the client, not in the audit row.
+      'expense_category_changed_bulk',
+      'override_created', 'override_updated', 'override_deleted',
+      'apply_to_all', 'apply_to_all_failed',
+      // Admin-only catalogue surgery on the shared `categories`
+      // collection (docs/Categories.md §13.2 #27). Only the
+      // entity-removal variant ships in PR #6 — the rest of the
+      // §13.2 admin catalogue (category_created/updated/deleted,
+      // category_entity_added, category_entity_moved) will land
+      // when the admin full-CRUD slice does. Carries the category
+      // name + removed entity in `error_detail` as
+      // `category=<name> entity=<value>`.
+      'category_entity_removed',
+      // Admin-gate rejection fired by `middleware/requireAdmin.js`
+      // when a non-admin hits an admin-only route (§13.2 #35,
+      // renamed per §13.7 #2 to include the `failed` suffix so
+      // `audit.js` auto-flips `status: 'error'`). Carries
+      // `method=<METHOD> path=<path>` in `error_detail`.
+      'admin_access_failed',
     ]},
     ip: String,
   },

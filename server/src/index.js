@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import { connectDB } from './config/db.js';
 import expensesRouter from './routes/expenses.js';
 import categoriesRouter from './routes/categories.js';
+import categoryOverridesRouter from './routes/categoryOverrides.js';
 import curveRouter from './routes/curve.js';
 import autocompleteRouter from './routes/autocomplete.js';
 import authRouter from './routes/auth.js';
@@ -121,6 +122,7 @@ app.use('/api', apiLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/expenses', authenticate, expensesRouter);
 app.use('/api/categories', authenticate, categoriesRouter);
+app.use('/api/category-overrides', authenticate, categoryOverridesRouter);
 app.use('/api/curve', authenticate, curveRouter);
 app.use('/api/autocomplete', authenticate, autocompleteRouter);
 

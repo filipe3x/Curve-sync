@@ -3,6 +3,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import {
   HomeIcon,
   BanknotesIcon,
+  FolderIcon,
   CogIcon,
   ClipboardDocumentListIcon,
   ArrowRightOnRectangleIcon,
@@ -11,6 +12,7 @@ import {
 const links = [
   { to: '/', label: 'Dashboard', icon: HomeIcon },
   { to: '/expenses', label: 'Despesas', icon: BanknotesIcon },
+  { to: '/categories', label: 'Categorias', icon: FolderIcon },
   { to: '/curve/config', label: 'Configuração', icon: CogIcon },
   { to: '/curve/logs', label: 'Logs', icon: ClipboardDocumentListIcon },
 ];

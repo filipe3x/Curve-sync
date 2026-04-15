@@ -64,11 +64,20 @@ export default {
           '0%': { opacity: '0', transform: 'translateX(16px)' },
           '100%': { opacity: '1', transform: 'translateX(0)' },
         },
+        // Distribution bar segments (`/categories` §9.8 #5). Each
+        // segment starts at scaleX(0) with origin-left and animates
+        // to scaleX(1), producing a left-to-right grow cascade when
+        // combined with a per-segment `animationDelay`.
+        'grow-x': {
+          '0%': { transform: 'scaleX(0)' },
+          '100%': { transform: 'scaleX(1)' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.4s ease-out',
         'fade-in-up': 'fade-in-up 0.5s ease-out',
         'slide-in-right': 'slide-in-right 0.4s ease-out',
+        'grow-x': 'grow-x 0.5s ease-out forwards',
       },
     },
   },
