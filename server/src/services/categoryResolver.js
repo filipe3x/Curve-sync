@@ -64,7 +64,7 @@ export function normalize(raw) {
 // not match "lidlmart".
 // ─────────────────────────────────────────────────────────────────────
 
-function matches(norm, rule) {
+export function matches(norm, rule) {
   const p = rule.pattern_normalized;
   if (!p) return false;
   switch (rule.match_type) {

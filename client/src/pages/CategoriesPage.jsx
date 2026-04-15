@@ -318,11 +318,19 @@ function OverridesList({
     if (highlightIdx >= filteredSuggestions.length) setHighlightIdx(-1);
   }, [filteredSuggestions, highlightIdx]);
 
-  const pickSuggestion = (entity) => {
-    setPattern(entity);
+  // Click-to-create: picking a suggestion immediately hands the
+  // entity off to `onCreate` instead of just filling the input. The
+  // two-click flow (pick → Adicionar) made no sense when the user
+  // had already explicitly chosen a valid, unused entity from the
+  // dropdown — the parent's apply-to-all banner still runs after
+  // creation, so the apply flow is unchanged.
+  const pickSuggestion = async (entity) => {
+    if (busy) return;
     setOpen(false);
     setHighlightIdx(-1);
     if (error) setError(null);
+    await onCreate({ pattern: entity.trim() });
+    setPattern('');
   };
 
   const handleKeyDown = (e) => {
@@ -448,27 +456,42 @@ function OverridesList({
         </div>
       ) : (
         <ul className="divide-y divide-sand-100 rounded-2xl border border-sand-200 bg-white">
-          {mine.map((o) => (
-            <li
-              key={o.id}
-              className="flex items-center justify-between px-4 py-3"
-            >
-              <div>
-                <p className="text-sm font-medium text-sand-900">{o.pattern}</p>
-                <p className="text-xs text-sand-400">
-                  {o.match_type} · prioridade {o.priority}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => onDelete(o.id)}
-                disabled={busy}
-                className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
+          {mine.map((o) => {
+            // `matched_count` is server-provided (see
+            // routes/categoryOverrides.js :: countMatchesPerRule).
+            // Fall back to `null` → hidden subtitle suffix so the row
+            // still renders cleanly if a cached response predates
+            // the field.
+            const count = o.matched_count;
+            const countLabel =
+              count == null
+                ? null
+                : count === 1
+                  ? '1 despesa'
+                  : `${count} despesas`;
+            return (
+              <li
+                key={o.id}
+                className="flex items-center justify-between px-4 py-3"
               >
-                Apagar
-              </button>
-            </li>
-          ))}
+                <div>
+                  <p className="text-sm font-medium text-sand-900">{o.pattern}</p>
+                  <p className="text-xs text-sand-400">
+                    {o.match_type} · prioridade {o.priority}
+                    {countLabel && <> · {countLabel}</>}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onDelete(o.id)}
+                  disabled={busy}
+                  className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
+                >
+                  Apagar
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

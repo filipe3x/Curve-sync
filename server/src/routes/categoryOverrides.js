@@ -5,6 +5,7 @@ import Category from '../models/Category.js';
 import Expense from '../models/Expense.js';
 import {
   loadContext,
+  matches,
   normalize,
   resolveCategory,
 } from '../services/categoryResolver.js';
@@ -64,9 +65,12 @@ function isValidPriority(value) {
 /**
  * Serialize a CategoryOverride document for the API response. Adds
  * `category_name` via a small lookup — callers supply the catalogue so
- * we don't query Category once per doc in list handlers.
+ * we don't query Category once per doc in list handlers. `matchedCount`
+ * is optional because the single-doc handlers (POST/PUT/DELETE) don't
+ * compute it — only GET / pre-computes the per-rule histogram and
+ * passes it in.
  */
-function serialize(doc, categoryMap) {
+function serialize(doc, categoryMap, matchedCount) {
   const id = doc._id?.toString?.() ?? doc._id;
   return {
     id,
@@ -78,6 +82,7 @@ function serialize(doc, categoryMap) {
     pattern_normalized: doc.pattern_normalized,
     match_type: doc.match_type,
     priority: doc.priority ?? 0,
+    matched_count: matchedCount ?? null,
     created_at: doc.created_at,
     updated_at: doc.updated_at,
   };
@@ -91,11 +96,53 @@ async function loadCategoryMap(categoryIds) {
   return new Map(rows.map((c) => [c._id.toString(), c.name]));
 }
 
+/**
+ * Count, per rule, how many of the caller's expenses the rule's
+ * `matches()` verdict is positive for. Used by GET / to power the
+ * "15 despesas" subtitle on each row in the /categories override list.
+ *
+ * This is NOT the "if I apply-to-all, how many change" number — the
+ * resolver's tie-breaking means a lower-priority rule could match an
+ * expense that a higher-priority rule already claims. The UI count
+ * reflects "how wide is this rule's net" and is intentionally
+ * independent of the winner so two overlapping rules can both show
+ * a non-zero catch.
+ *
+ * Algorithm: one `{ entity, count }` aggregation per user, then an
+ * in-memory pass of O(rules × distinct_entities). At MVP scale
+ * (~10k expenses, <50 distinct entities) this is a few hundred
+ * comparisons — cheaper than a round-trip per rule.
+ */
+async function countMatchesPerRule(userId, rules) {
+  if (!rules.length) return new Map();
+  const entityAgg = await Expense.aggregate([
+    { $match: { user_id: userId } },
+    { $group: { _id: '$entity', count: { $sum: 1 } } },
+  ]);
+  // Pre-normalise entities once so we don't re-normalise per rule.
+  const normalisedEntities = entityAgg
+    .map(({ _id, count }) => ({ norm: normalize(_id), count }))
+    .filter((e) => e.norm);
+
+  const counts = new Map();
+  for (const rule of rules) {
+    let total = 0;
+    for (const { norm, count } of normalisedEntities) {
+      if (matches(norm, rule)) total += count;
+    }
+    counts.set(rule._id.toString(), total);
+  }
+  return counts;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // GET /api/category-overrides
 //
 // Lists every override owned by the authenticated user. Category names
 // are resolved in a single batch query so the response is self-contained.
+// Each row also carries `matched_count` — how many of the caller's
+// expenses the rule matches right now — so the /categories screen can
+// label "Pingo Doce" with "15 despesas" without a round-trip per row.
 // ─────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
@@ -105,8 +152,15 @@ router.get('/', async (req, res) => {
     const categoryIds = [
       ...new Set(rows.map((r) => r.category_id?.toString()).filter(Boolean)),
     ];
-    const categoryMap = await loadCategoryMap(categoryIds);
-    res.json({ data: rows.map((r) => serialize(r, categoryMap)) });
+    const [categoryMap, countMap] = await Promise.all([
+      loadCategoryMap(categoryIds),
+      countMatchesPerRule(req.userId, rows),
+    ]);
+    res.json({
+      data: rows.map((r) =>
+        serialize(r, categoryMap, countMap.get(r._id.toString()) ?? 0),
+      ),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -184,7 +238,16 @@ router.post('/', async (req, res) => {
     });
 
     const categoryMap = new Map([[category._id.toString(), category.name]]);
-    res.status(201).json({ data: serialize(doc.toObject(), categoryMap) });
+    // Count matches for the freshly-minted rule so the caller can
+    // render the "N despesas" subtitle without an extra round-trip.
+    const countMap = await countMatchesPerRule(req.userId, [doc.toObject()]);
+    res.status(201).json({
+      data: serialize(
+        doc.toObject(),
+        categoryMap,
+        countMap.get(doc._id.toString()) ?? 0,
+      ),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -304,7 +367,16 @@ router.put('/:id', async (req, res) => {
       });
     }
 
-    res.json({ data: serialize(existing.toObject(), categoryMap) });
+    const countMap = await countMatchesPerRule(req.userId, [
+      existing.toObject(),
+    ]);
+    res.json({
+      data: serialize(
+        existing.toObject(),
+        categoryMap,
+        countMap.get(existing._id.toString()) ?? 0,
+      ),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
