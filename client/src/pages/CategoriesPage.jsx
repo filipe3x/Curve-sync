@@ -632,6 +632,124 @@ function GlobalEntitiesList({
   );
 }
 
+// Admin-only: batch-add entity strings to a global category. The form
+// splits on commas and newlines, so the admin can paste "galp, bp,
+// repsol" OR type one per line and hit Enter. Trimmed, blank-dropped,
+// and forwarded to `onSubmit(entities)` which is expected to call
+// `api.addCategoryEntities`.
+//
+// The 409 `entity_conflict` path renders inline under the form: the
+// parent re-throws the augmented Error (`err.body.conflicts`) so this
+// component can list the collisions ("<entity> está em <other>") and
+// tell the admin to either remove them from the other category first
+// or edit the input and retry. The whole batch is aborted on any
+// conflict — the server explicitly refuses to half-apply (§8.3).
+//
+// On success the input clears; on any error the draft is preserved so
+// the admin can fix-and-retry without re-typing. The parent handles
+// the apply-to-all banner (pushed after a successful add, keyed off
+// `{ kind: 'admin' }` — see pendingApplies).
+function AddGlobalEntitiesForm({ categoryId, categoryName, onSubmit, busy }) {
+  const [text, setText] = useState('');
+  const [conflicts, setConflicts] = useState([]);
+  const [error, setError] = useState(null);
+
+  const parseEntities = (raw) =>
+    raw
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  const clearFeedback = () => {
+    if (error) setError(null);
+    if (conflicts.length) setConflicts([]);
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const entities = parseEntities(text);
+    if (!entities.length) {
+      setError('Indica pelo menos uma entidade.');
+      return;
+    }
+    setError(null);
+    setConflicts([]);
+    try {
+      await onSubmit(entities);
+      setText('');
+    } catch (err) {
+      if (err?.message === 'entity_conflict' && err?.body?.conflicts) {
+        setConflicts(err.body.conflicts);
+      } else if (err?.message === 'invalid_entities') {
+        setError('Uma ou mais entidades são inválidas.');
+      } else if (err?.message === 'category_not_found') {
+        setError('Categoria não encontrada — recarrega a página.');
+      } else {
+        setError(err?.message ?? 'Erro a adicionar entidades.');
+      }
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-2">
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            clearFeedback();
+          }}
+          placeholder={`Nova entidade para ${categoryName ?? 'esta categoria'}…`}
+          className="input flex-1"
+          disabled={busy}
+          aria-label="Adicionar entidade ao catálogo global"
+        />
+        <button
+          type="submit"
+          className="btn-primary"
+          disabled={busy || !text.trim()}
+        >
+          <PlusIcon className="h-4 w-4" />
+          Adicionar
+        </button>
+      </div>
+      <p className="text-xs text-sand-400">
+        Várias de uma vez? Separa com vírgulas ou quebras de linha.
+      </p>
+      {error && (
+        <p className="text-xs text-curve-700" role="alert">
+          {error}
+        </p>
+      )}
+      {conflicts.length > 0 && (
+        <div
+          className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+          role="alert"
+        >
+          <p className="font-medium">
+            {conflicts.length === 1
+              ? 'Esta entidade já está atribuída a outra categoria:'
+              : `${conflicts.length} entidades já estão atribuídas a outras categorias:`}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {conflicts.map((c) => (
+              <li key={c.entity}>
+                <strong>{c.entity}</strong> está em{' '}
+                <em>{c.category_name}</em>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2">
+            Remove-a de lá antes de a trazer para aqui — o catálogo não
+            permite duplicados entre categorias.
+          </p>
+        </div>
+      )}
+    </form>
+  );
+}
+
 function RecentExpenses({ categoryId }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1075,6 +1193,13 @@ function ApplyConfirmDialog({
   busy,
 }) {
   if (!preview) return null;
+  // Admin entries (from batch-add on the global catalogue) don't have
+  // a `pattern` — they carry `category_name` + `entities[]` instead.
+  // The subtitle, hit-count copy and the Anular-regra escape hatch
+  // all branch on `kind` so the two flows share this dialog without a
+  // parallel component.
+  const isAdmin = entry?.kind === 'admin';
+  const skipped = preview.skipped_personal ?? 0;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-sand-950/30 p-4 animate-fade-in"
@@ -1087,13 +1212,28 @@ function ApplyConfirmDialog({
         </h2>
         {entry && (
           <p className="mt-1 text-xs uppercase tracking-wide text-sand-400">
-            Regra "{entry.pattern}" → {entry.category_name}
+            {isAdmin ? (
+              <>Catálogo global · {entry.category_name}</>
+            ) : (
+              <>Regra "{entry.pattern}" → {entry.category_name}</>
+            )}
           </p>
         )}
         <p className="mt-2 text-sm text-sand-600">
           Vão ser re-catalogadas <strong>{preview.matched}</strong>{' '}
-          {preview.matched === 1 ? 'despesa' : 'despesas'} tuas.
+          {preview.matched === 1 ? 'despesa' : 'despesas'}
+          {isAdmin ? ' de todos os utilizadores' : ' tuas'}.
         </p>
+        {isAdmin && skipped > 0 && (
+          // "Personal is sacred" footnote — tells the admin that some
+          // rows they might have expected to catch were already
+          // claimed by an owner's personal override, and stay put.
+          <p className="mt-2 text-xs text-sand-500">
+            {skipped === 1
+              ? '1 despesa fica como está — há uma regra pessoal a redireccioná-la.'
+              : `${skipped} despesas ficam como estão — há regras pessoais a redireccioná-las.`}
+          </p>
+        )}
         {preview.samples?.length > 0 && (
           <ul className="mt-4 max-h-56 space-y-1 overflow-y-auto rounded-xl border border-sand-200 bg-sand-50 p-3 text-xs">
             {preview.samples.map((s) => (
@@ -1110,11 +1250,10 @@ function ApplyConfirmDialog({
           {/* Escape hatch on the left side so it visually separates
               from Cancelar/Confirmar — a three-way decision needs a
               three-way layout, not three adjacent pills that look
-              the same. Only rendered when the caller passes an
-              `onCancelRule` handler (it will always do so today, but
-              the prop is optional for future reuse of this dialog
-              outside the apply-to-all flow). */}
-          {entry && onCancelRule && (
+              the same. Only rendered for personal entries; admin
+              batch-adds have no single-rule undo (the equivalent is
+              the per-entity Apagar button in GlobalEntitiesList). */}
+          {entry && !isAdmin && onCancelRule && (
             <button
               type="button"
               className="rounded-lg px-3 py-2 text-sm font-medium text-curve-700 hover:bg-curve-50 disabled:opacity-50"
@@ -1368,10 +1507,15 @@ export default function CategoriesPage() {
         if (matched > 0) {
           // Push, never overwrite. Two rules created in quick
           // succession produce two stacked banners — the user sees
-          // both and decides per-entry.
+          // both and decides per-entry. `kind: 'personal'` is the
+          // discriminator that tells the apply handlers to call
+          // `applyCategoryOverride` (user-scoped), as opposed to the
+          // `kind: 'admin'` sibling pushed by `handleAddGlobalEntities`
+          // which goes through `applyCategoryToAll` (cross-user).
           setPendingApplies((prev) => [
             ...prev,
             {
+              kind: 'personal',
               id: res.data.id,
               pattern: res.data.pattern,
               category_name: res.data.category_name ?? selectedRow.category_name,
@@ -1398,6 +1542,7 @@ export default function CategoriesPage() {
         setPendingApplies((prev) => [
           ...prev,
           {
+            kind: 'personal',
             id: res.data.id,
             pattern: res.data.pattern,
             category_name: res.data.category_name ?? selectedRow.category_name,
@@ -1672,18 +1817,124 @@ export default function CategoriesPage() {
     setDeleteCategoryBlock(null);
   };
 
+  // Admin batch-add of global entities. Called from
+  // AddGlobalEntitiesForm with the parsed string[] — conflicts are
+  // re-thrown verbatim so the form can render `err.body.conflicts`
+  // inline (see the form component above for the translation logic).
+  //
+  // Success path has two side effects:
+  //   1. Refresh the categories list so the new entities show up in
+  //      GlobalEntitiesList below the form (and their per-entity
+  //      match counts come back from the server).
+  //   2. Dry-run apply-to-all immediately so we can push an admin-
+  //      kind pending-apply banner when the added entities would
+  //      catch historical expenses across users. The banner mirrors
+  //      the personal variant's shape, keyed off `kind: 'admin'` so
+  //      `handleApplyPreview` / `handleApplyConfirm` know to route
+  //      through `applyCategoryToAll` instead of the per-override
+  //      endpoint. No "Anular regra" escape hatch in the admin
+  //      banner — undo for the batch lives in the per-entity
+  //      `Apagar` button of GlobalEntitiesList (§11.4, agreed in the
+  //      Phase 5 design chat).
+  //
+  // Re-throws EVERY error so the form's catch can decide which codes
+  // render inline (entity_conflict, invalid_entities) vs which land
+  // in the toast stack via a parent-level catch. The toast here is
+  // success-only.
+  const handleAddGlobalEntities = async (entities) => {
+    if (!selectedRow?.category_id) return;
+    const { category_id: categoryId, category_name: categoryName } =
+      selectedRow;
+    setGlobalEntityBusy(true);
+    try {
+      const res = await api.addCategoryEntities(categoryId, entities);
+      // Patch the local categories cache in place so the new entries
+      // show up under GlobalEntitiesList without waiting for a full
+      // refresh. The server returns the canonical post-add document,
+      // so we just replace the whole record for this category.
+      setCategories((prev) =>
+        prev.map((c) =>
+          c._id.toString() === categoryId
+            ? { ...c, entities: res.data.entities ?? c.entities }
+            : c,
+        ),
+      );
+      setToast({
+        type: 'ok',
+        text:
+          entities.length === 1
+            ? `Entidade "${entities[0]}" adicionada.`
+            : `${entities.length} entidades adicionadas.`,
+      });
+
+      // Dry-run apply-to-all so the banner only appears when there's
+      // something to actually apply. `matched === 0` is the common
+      // "brand new category, no historical expenses yet" case — the
+      // banner would be a dead click in that state. Same degradation
+      // strategy as the personal variant: if the preview fails, push
+      // the banner anyway with `matched: null` so the admin can
+      // still try Aplicar on the real path.
+      try {
+        const preview = await api.applyCategoryToAll(categoryId, {
+          dryRun: true,
+        });
+        const matched = preview.data?.matched ?? 0;
+        if (matched > 0) {
+          setPendingApplies((prev) => [
+            ...prev,
+            {
+              kind: 'admin',
+              id: `admin:${categoryId}:${Date.now()}`,
+              category_id: categoryId,
+              category_name: categoryName,
+              entities,
+              matched,
+            },
+          ]);
+        }
+      } catch {
+        setPendingApplies((prev) => [
+          ...prev,
+          {
+            kind: 'admin',
+            id: `admin:${categoryId}:${Date.now()}`,
+            category_id: categoryId,
+            category_name: categoryName,
+            entities,
+            matched: null,
+          },
+        ]);
+      }
+    } finally {
+      setGlobalEntityBusy(false);
+    }
+  };
+
   // Clicking "Aplicar" on a banner opens the preview dialog for
   // *that* specific entry. `entry` is the pendingApplies row —
   // passing it in (instead of reading from a "current" ref)
   // makes every call site explicit about which rule it's acting
   // on, which is the whole point of this refactor.
+  //
+  // Branches on `entry.kind`:
+  //   - `'personal'` → `applyCategoryOverride(entry.id)` (user-scoped,
+  //     returns preview w/ matched + samples)
+  //   - `'admin'`    → `applyCategoryToAll(entry.category_id)`
+  //     (cross-user, returns matched + skipped_personal; no samples
+  //     field, which the ApplyConfirmDialog already guards for with
+  //     `preview.samples?.length > 0`).
   const handleApplyPreview = async (entry) => {
     if (!entry) return;
     setApplyBusy(true);
     try {
-      const res = await api.applyCategoryOverride(entry.id, {
-        dryRun: true,
-      });
+      const res =
+        entry.kind === 'admin'
+          ? await api.applyCategoryToAll(entry.category_id, {
+              dryRun: true,
+            })
+          : await api.applyCategoryOverride(entry.id, {
+              dryRun: true,
+            });
       setApplyPreview({ entry, preview: res.data });
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro no preview.' });
@@ -1695,15 +1946,20 @@ export default function CategoriesPage() {
   // Invoked from the confirm dialog. Reads the entry off
   // `applyPreview.entry` so it always applies the same rule the user
   // previewed, even if a new rule was created in the meantime and
-  // appended to `pendingApplies`.
+  // appended to `pendingApplies`. Same `kind`-branch as the preview.
   const handleApplyConfirm = async () => {
     const entry = applyPreview?.entry;
     if (!entry) return;
     setApplyBusy(true);
     try {
-      const res = await api.applyCategoryOverride(entry.id, {
-        dryRun: false,
-      });
+      const res =
+        entry.kind === 'admin'
+          ? await api.applyCategoryToAll(entry.category_id, {
+              dryRun: false,
+            })
+          : await api.applyCategoryOverride(entry.id, {
+              dryRun: false,
+            });
       setToast({
         type: 'ok',
         text: `${res.data.updated} ${res.data.updated === 1 ? 'despesa re-catalogada' : 'despesas re-catalogadas'}.`,
@@ -1973,47 +2229,75 @@ export default function CategoriesPage() {
               {/* Apply-to-all banners — one per pending rule. Stacked
                   so creating two rules in quick succession keeps both
                   actionable; each banner names its own rule so the
-                  user knows exactly what Aplicar/Ignorar will touch. */}
+                  user knows exactly what Aplicar/Ignorar will touch.
+                  `entry.kind` discriminates personal (per-override)
+                  from admin (cross-user global-entity add) — the
+                  copy, the "Anular regra" escape hatch, and the
+                  underlying apply endpoint all branch on it. */}
               {pendingApplies.length > 0 && (
                 <div className="space-y-2">
-                  {pendingApplies.map((entry) => (
+                  {pendingApplies.map((entry) => {
+                    const isAdminEntry = entry.kind === 'admin';
+                    return (
                     <div
                       key={entry.id}
                       className="flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 animate-fade-in"
                     >
                       <span className="min-w-0">
-                        Regra <strong>"{entry.pattern}"</strong>
-                        {entry.category_name && (
-                          <> → {entry.category_name}</>
-                        )}
-                        {entry.matched != null && (
+                        {isAdminEntry ? (
                           <>
-                            {' '}
-                            · match c/{' '}
-                            <strong>
-                              {entry.matched}{' '}
-                              {entry.matched === 1 ? 'despesa' : 'despesas'}
-                            </strong>
+                            Entidades adicionadas a{' '}
+                            <strong>{entry.category_name}</strong>
+                            {entry.matched != null && (
+                              <>
+                                {' '}
+                                · match c/{' '}
+                                <strong>
+                                  {entry.matched}{' '}
+                                  {entry.matched === 1 ? 'despesa' : 'despesas'}
+                                </strong>
+                              </>
+                            )}
+                            . Aplicar a todos os utilizadores?
+                          </>
+                        ) : (
+                          <>
+                            Regra <strong>"{entry.pattern}"</strong>
+                            {entry.category_name && (
+                              <> → {entry.category_name}</>
+                            )}
+                            {entry.matched != null && (
+                              <>
+                                {' '}
+                                · match c/{' '}
+                                <strong>
+                                  {entry.matched}{' '}
+                                  {entry.matched === 1 ? 'despesa' : 'despesas'}
+                                </strong>
+                              </>
+                            )}
+                            . Aplicar a despesas passadas?
                           </>
                         )}
-                        . Aplicar a despesas passadas?
                       </span>
                       <div className="flex shrink-0 gap-2">
-                        {/* "Anular regra" = delete the override
-                            outright. Destructive but safe: the
-                            banner is only shown pre-apply, so no
-                            `category_id` was ever written from this
-                            rule. Styled red-ish to telegraph that
-                            it's not the same as Ignorar. */}
-                        <button
-                          type="button"
-                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-curve-700 hover:bg-curve-50 disabled:opacity-50"
-                          onClick={() => handleCancelPendingRule(entry)}
-                          disabled={applyBusy || overrideBusy}
-                          title="Apagar esta regra — útil se foi criada por engano"
-                        >
-                          Anular regra
-                        </button>
+                        {/* "Anular regra" is personal-only — admin
+                            batch-adds have no single-rule undo, the
+                            per-entity `Apagar` button in
+                            GlobalEntitiesList takes that role. Styled
+                            red-ish to telegraph that it's not the
+                            same as Ignorar. */}
+                        {!isAdminEntry && (
+                          <button
+                            type="button"
+                            className="rounded-lg px-3 py-1.5 text-xs font-medium text-curve-700 hover:bg-curve-50 disabled:opacity-50"
+                            onClick={() => handleCancelPendingRule(entry)}
+                            disabled={applyBusy || overrideBusy}
+                            title="Apagar esta regra — útil se foi criada por engano"
+                          >
+                            Anular regra
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="btn-secondary !py-1.5 !px-3 text-xs"
@@ -2032,7 +2316,8 @@ export default function CategoriesPage() {
                         </button>
                       </div>
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               )}
 
@@ -2083,12 +2368,26 @@ export default function CategoriesPage() {
                     </section>
                   )}
 
-                  {/* Read-only global entities */}
+                  {/* Catálogo global — read-only for users; admins
+                      get the batch-add form above the list so they
+                      can extend the catalogue without opening a
+                      separate modal. Uses the same apply-to-all
+                      banner stack as the personal override path,
+                      but via `kind: 'admin'` entries that route
+                      through `applyCategoryToAll`. */}
                   {selectedRow.category_id && (
-                    <section>
-                      <h3 className="mb-3 text-xs font-medium uppercase tracking-wide text-sand-400">
+                    <section className="space-y-3">
+                      <h3 className="text-xs font-medium uppercase tracking-wide text-sand-400">
                         Catálogo global
                       </h3>
+                      {isAdmin && (
+                        <AddGlobalEntitiesForm
+                          categoryId={selectedRow.category_id}
+                          categoryName={selectedRow.category_name}
+                          onSubmit={handleAddGlobalEntities}
+                          busy={globalEntityBusy}
+                        />
+                      )}
                       <GlobalEntitiesList
                         entities={selectedRow.global_entities}
                         counts={selectedRow.global_entity_counts}
