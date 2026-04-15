@@ -33,7 +33,17 @@ async function request(path, options = {}) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Request failed: ${res.status}`);
+    // Attach the parsed body + status to the Error so callers that
+    // need the structured payload (e.g. admin category CRUD's 409
+    // `entity_conflict` carrying `conflicts[]`, or `category_in_use`
+    // carrying `expenses_count` / `overrides_count`) can read them
+    // via `err.body` / `err.status`. `err.message` stays the short
+    // code the rest of the app already renders, so this is
+    // backwards-compat for every existing call site.
+    const err = new Error(body.error || `Request failed: ${res.status}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
   }
   // 204 No Content has an empty body — calling `.json()` on it
   // throws "Unexpected end of JSON input" in the browser. Several
@@ -126,6 +136,116 @@ export const deleteCategoryEntity = (categoryId, entity) =>
     `/categories/${categoryId}/entities/${encodeURIComponent(entity)}`,
     { method: 'DELETE' },
   );
+
+// ─── Admin CRUD on the global catalogue ──────────────────────────────
+//
+// The five functions below land the Fase 3 backend from
+// docs/Categories.md §8.2 on the client. All five are admin-only on
+// the server — non-admins get `403 admin_required` (surfaced as
+// `err.message === 'admin_required'` by the shared request() helper
+// + an `admin_access_failed` audit row written by the middleware).
+// None of these are called from user-mode flows; they're wired
+// exclusively from the Fase 5 admin surface in
+// client/src/pages/CategoriesPage.jsx.
+//
+// Why we don't gate by `role` on the client: the server is the real
+// enforcement boundary, and hiding the buttons in the UI is a
+// separate UX concern handled in the page. This keeps the API
+// client dumb and the permission surface single-sourced to
+// middleware/requireAdmin.js.
+
+// POST /api/categories — create a new global catalogue category.
+// Body: `{ name: string, entities?: string[] }`. Returns
+// `{ data: Category }` with a 201. Known errors (thrown with
+// `err.status` + `err.body` attached by request()):
+//   400 name_required / invalid_entities
+//   409 name_taken          — case-insensitive collision on `name`
+//                             (pre-check + 11000 race catch on the
+//                             server; the 11000 case carries no
+//                             structured body beyond `error`)
+// See server/src/routes/categories.js :: router.post('/') and
+// docs/Categories.md §13.2 #23 for the audit contract.
+export const createCategory = (data) =>
+  request('/categories', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+
+// PUT /api/categories/:id — partial update of a global category.
+// Today only `name` is actually persisted (see the handler comment);
+// `icon_url` is accepted-but-dropped until the schema question is
+// resolved (Embers uses Paperclip — CLAUDE.md "never modify the
+// schema"). Returns `{ data: Category }` with a 200. Known errors:
+//   404 category_not_found
+//   400 name_required
+//   409 name_taken
+// No-op PUTs (identical name) return 200 with no audit row written
+// server-side, per docs/Categories.md §13.4.
+export const updateCategory = (id, data) =>
+  request(`/categories/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+
+// DELETE /api/categories/:id — remove a global category. Returns 204
+// on success (short-circuits via the 204 branch in `request()`).
+// Known errors:
+//   404 category_not_found
+//   409 category_in_use     — body carries `{ error,
+//                             expenses_count, overrides_count }`.
+//                             Readable via `err.body.expenses_count`
+//                             / `err.body.overrides_count` in the
+//                             catch site. The UX is strictly
+//                             read-only for the Fase 5 slice: the
+//                             dialog lists the counters and tells
+//                             the admin to move rows away manually
+//                             (no "mover tudo para…" picker yet).
+export const deleteCategory = (id) =>
+  request(`/categories/${id}`, { method: 'DELETE' });
+
+// POST /api/categories/:id/entities — batch-add entity strings to a
+// category's `entities[]`. Body: `{ entities: string[] }`. Returns
+// `{ data: Category }` with the updated entities array. Idempotent —
+// entries already present on the target category are silently
+// dropped and the audit row is suppressed when the net change is
+// zero (docs/Categories.md §13.4). Known errors:
+//   400 invalid_entities
+//   404 category_not_found
+//   409 entity_conflict     — body carries
+//                             `{ error, conflicts: [{ entity,
+//                             category_id, category_name }] }`.
+//                             The server aborts the whole batch on
+//                             the first conflict (§8.3 — "never
+//                             half-apply"). Callers read the list
+//                             from `err.body.conflicts` and surface
+//                             it inline so the admin can edit the
+//                             form and retry.
+export const addCategoryEntities = (id, entities) =>
+  request(`/categories/${id}/entities`, {
+    method: 'POST',
+    body: JSON.stringify({ entities }),
+  });
+
+// POST /api/categories/:id/apply-to-all — admin cross-user retroactive
+// recategorisation. The global-catalogue mirror of
+// `applyCategoryOverride` above. Same semantics: `dryRun: true`
+// returns the preview counts (matched/updated/skipped_personal) with
+// no writes; the real run writes through `reassignCategoryBulk` and
+// audits `apply_to_all` with `scope=global target=category`. See
+// docs/Categories.md §6.5 + §8.5 for the "personal is sacred"
+// invariant (an owner's personal override still beats the admin's
+// new rule after an apply-to-all pass).
+//
+// Response shape: `{ data: { dry_run, scope, matched, updated,
+// skipped_personal } }`. The 30s timeout mirrors the personal
+// variant — a cross-user full scan over the MVP's dataset is still
+// tight but not free.
+export const applyCategoryToAll = (id, { dryRun = false } = {}) =>
+  request(`/categories/${id}/apply-to-all`, {
+    method: 'POST',
+    body: JSON.stringify({ dry_run: dryRun }),
+    timeoutMs: 30_000,
+  });
 
 // Spend aggregate over a cycle. `cycle` defaults to the day-22 current
 // cycle; pass `'previous'` for the one-back view, or `{start, end}`
