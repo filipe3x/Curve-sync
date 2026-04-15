@@ -85,14 +85,29 @@ const curveLogSchema = new mongoose.Schema(
       'override_created', 'override_updated', 'override_deleted',
       'apply_to_all', 'apply_to_all_failed',
       // Admin-only catalogue surgery on the shared `categories`
-      // collection (docs/Categories.md §13.2 #27). Only the
-      // entity-removal variant ships in PR #6 — the rest of the
-      // §13.2 admin catalogue (category_created/updated/deleted,
-      // category_entity_added, category_entity_moved) will land
-      // when the admin full-CRUD slice does. Carries the category
-      // name + removed entity in `error_detail` as
-      // `category=<name> entity=<value>`.
+      // collection (docs/Categories.md §13.2 #23-28). The full
+      // admin CRUD slice now exposes create/update/delete of
+      // categories plus batch entity add/remove on
+      // `POST /api/categories`, `PUT /api/categories/:id`,
+      // `DELETE /api/categories/:id`, `POST /:id/entities`, and
+      // `DELETE /:id/entities/:entity`. Each handler writes a
+      // single `audit()` row with `error_detail` following the
+      // k=v convention from §13.2:
+      //   category_created       — `name=<name> entity_count=<n>`
+      //   category_updated       — `name=<name> changed=<fields>`
+      //   category_deleted       — `name=<name> expense_count=<n>`
+      //   category_entity_added  — `category=<name> entities=<first>[,+<k>]`
+      //   category_entity_removed — `category=<name> entity=<value>`
+      // `category_entity_moved` (§13.2 #28) is not yet exposed —
+      // no bulk-move handler lands with this slice — but the
+      // enum value is added proactively so the audit helper can
+      // accept it when the route ships.
+      'category_created',
+      'category_updated',
+      'category_deleted',
+      'category_entity_added',
       'category_entity_removed',
+      'category_entity_moved',
       // Admin-gate rejection fired by `middleware/requireAdmin.js`
       // when a non-admin hits an admin-only route (§13.2 #35,
       // renamed per §13.7 #2 to include the `failed` suffix so
