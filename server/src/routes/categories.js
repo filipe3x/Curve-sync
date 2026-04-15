@@ -1,9 +1,16 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import Category from '../models/Category.js';
+import CategoryOverride from '../models/CategoryOverride.js';
 import Expense from '../models/Expense.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
-import { matches, normalize } from '../services/categoryResolver.js';
+import {
+  loadContext,
+  matches,
+  normalize,
+  resolveCategory,
+} from '../services/categoryResolver.js';
+import { reassignCategoryBulk } from '../services/expense.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
@@ -381,6 +388,149 @@ router.delete('/:id/entities/:entity', requireAdmin, async (req, res) => {
     });
 
     res.status(204).end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Case-insensitive name collision check for POST / and PUT /:id.
+//
+// The unique index on `categories.name` is case-sensitive (standard
+// Mongo behaviour, and we can't switch it to a collation-aware form
+// without rewriting the shared `categories` schema Embers expects to
+// read). §8.2 of docs/Categories.md requires case-insensitive
+// uniqueness, so we pre-check with a regex before writing and still
+// catch the race-condition 11000 error at write time as a safety belt.
+//
+// `excludeId` is used by PUT to allow a no-op rename ("Groceries" →
+// "groceries") that would otherwise collide with its own row.
+// ─────────────────────────────────────────────────────────────────────
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function nameCollides(name, excludeId) {
+  const filter = {
+    name: { $regex: `^${escapeRegex(name)}$`, $options: 'i' },
+  };
+  if (excludeId) filter._id = { $ne: excludeId };
+  const hit = await Category.findOne(filter).select('_id').lean();
+  return !!hit;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Normalise + dedupe a caller-supplied `entities` payload.
+//
+// Used by POST / and POST /:id/entities to collapse cosmetic variants
+// ("Lidl", "LIDL", " lidl ") onto a single entry before we touch the
+// DB. Dedup key is `normalize()` (§5.2) so the collision surface
+// matches the matcher's — two forms that the resolver treats as
+// identical never both land in `entities[]`.
+//
+// Input:  raw array (may contain non-strings, blanks, unicode noise)
+// Output: { raw: <trimmed>, norm: <normalized> }[] — only well-formed
+//         entries survive, order preserved for deterministic audits.
+// ─────────────────────────────────────────────────────────────────────
+function normaliseEntityInput(entities) {
+  const seen = new Set();
+  const out = [];
+  for (const e of entities) {
+    if (typeof e !== 'string') continue;
+    const trimmed = e.trim();
+    if (!trimmed) continue;
+    const norm = normalize(trimmed);
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push({ raw: trimmed, norm });
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/categories   (admin only)
+//
+// Creates a new global catalogue category. This is the first of the
+// admin CRUD endpoints specified in docs/Categories.md §8.2, and the
+// gating item that unblocks Fase 5 (admin mode in /categories screen,
+// §11.3). The schema stays identical to Embers' Mongoid `Category`
+// (name + entities[] + timestamps) — no new fields are introduced,
+// per CLAUDE.md's "never modify the schema of categories" rule.
+//
+// Auth: `authenticate` (router-level, mounted in index.js) +
+// `requireAdmin` (per-route). Non-admins get 403 + an
+// `admin_access_failed` audit row handled by the middleware.
+//
+// Body:
+//   { name: string, entities?: string[] }
+//
+// Validation:
+//   400 name_required        — name missing or empty after trim
+//   400 invalid_entities     — entities is present but not an array
+//   409 name_taken           — case-insensitive collision with an
+//                              existing category (pre-check by regex,
+//                              plus 11000 catch for race safety)
+//
+// Entities are normalised and deduped server-side: blanks, non-string
+// entries, and repeated normalised forms are dropped silently before
+// the insert. The raw trimmed form is persisted — consistent with how
+// DELETE /:id/entities/:entity matches on the raw string (§8.3).
+//
+// Response: 201 { data: Category }
+//
+// Audit (§13.2 #23):
+//   action: 'category_created'
+//   detail: `name=<name> entity_count=<n>`
+//   Canonical pt-PT (curveLogsUtils): "Categoria criada: <name>"
+// ─────────────────────────────────────────────────────────────────────
+router.post('/', requireAdmin, async (req, res) => {
+  try {
+    const { name, entities } = req.body ?? {};
+
+    if (typeof name !== 'string' || name.trim() === '') {
+      return res.status(400).json({ error: 'name_required' });
+    }
+    const trimmedName = name.trim();
+
+    let entityArr = [];
+    if (entities !== undefined) {
+      if (!Array.isArray(entities)) {
+        return res.status(400).json({ error: 'invalid_entities' });
+      }
+      entityArr = normaliseEntityInput(entities).map((e) => e.raw);
+    }
+
+    // Pre-check for case-insensitive collision. The unique index on
+    // `name` is case-sensitive, so "Groceries" and "groceries" would
+    // both succeed without this guard.
+    if (await nameCollides(trimmedName)) {
+      return res.status(409).json({ error: 'name_taken' });
+    }
+
+    let doc;
+    try {
+      doc = await Category.create({
+        name: trimmedName,
+        entities: entityArr,
+      });
+    } catch (err) {
+      // Race condition: another admin created a colliding name between
+      // our pre-check and the insert. Translate the Mongo duplicate
+      // key error into the documented 409 response.
+      if (err?.code === 11000) {
+        return res.status(409).json({ error: 'name_taken' });
+      }
+      throw err;
+    }
+
+    audit({
+      action: 'category_created',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `name=${doc.name} entity_count=${doc.entities.length}`,
+    });
+
+    res.status(201).json({ data: doc.toObject() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
