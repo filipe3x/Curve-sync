@@ -86,6 +86,49 @@ function percentDelta(current, previous) {
   return ((current - previous) / previous) * 100;
 }
 
+// Client-side mirror of `services/categoryResolver.js :: normalize`.
+// Kept byte-for-byte compatible so the autocomplete "is this entity
+// already covered by an override?" check uses the same comparison key
+// the server does when it actually matches at sync time. Do not
+// diverge — if the server rules change, this must follow.
+function normalizeEntity(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Does any of the caller's overrides already claim `entity`? Replicates
+// the three match-type branches from `categoryResolver.js :: matches`
+// so the autocomplete preview matches what the sync would decide.
+// Called for every candidate entity on every keystroke, so it must
+// stay allocation-light — no regex, no array building.
+function entityCoveredByOverride(entity, overrides) {
+  const norm = normalizeEntity(entity);
+  if (!norm) return false;
+  for (const o of overrides) {
+    const p = o.pattern_normalized;
+    if (!p) continue;
+    switch (o.match_type) {
+      case 'exact':
+        if (norm === p) return true;
+        break;
+      case 'starts_with':
+        if (norm === p || norm.startsWith(p + ' ')) return true;
+        break;
+      case 'contains':
+      default:
+        if (norm.includes(p)) return true;
+        break;
+    }
+  }
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Small presentational components (single-use, kept inside this file
 // so the /categories screen lands as one reviewable unit)
@@ -209,6 +252,7 @@ function AnimatedKPI({ label, value, format }) {
 
 function OverridesList({
   overrides,
+  entitySuggestions = [],
   categoryId,
   categoryName,
   onCreate,
@@ -221,7 +265,84 @@ function OverridesList({
   // looked like a dead click to users. Now clicking (or hitting Enter)
   // with an empty field surfaces the message below the form.
   const [error, setError] = useState(null);
+  // Autocomplete dropdown: `open` gates visibility (set on focus +
+  // typing, cleared on blur / pick / Escape), `highlightIdx` tracks the
+  // keyboard-selected row. `-1` means "nothing highlighted" so arrow-up
+  // can wrap to the last entry on the first press.
+  const [open, setOpen] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(-1);
   const mine = overrides.filter((o) => o.category_id === categoryId);
+
+  // Available entities for the autocomplete = caller's distinct expense
+  // entities MINUS anything already covered by an existing override.
+  // The "already covered" check is purely local (no round-trip), using
+  // the same match logic the server runs at sync time (see
+  // `entityCoveredByOverride`).
+  //
+  // The filter runs once per change of `entitySuggestions`/`overrides`,
+  // not on every keystroke — the query filter below is cheap and
+  // operates on the already-pruned list.
+  const availableEntities = useMemo(() => {
+    if (!entitySuggestions.length) return [];
+    return entitySuggestions.filter(
+      (e) => e && !entityCoveredByOverride(e, overrides),
+    );
+  }, [entitySuggestions, overrides]);
+
+  // Case-insensitive, accent-insensitive startsWith-OR-includes filter.
+  // Empty input shows the full available list (users often want to
+  // browse before committing to a prefix). Capped at 8 rows so a user
+  // with hundreds of distinct entities doesn't get a wall of text.
+  const filteredSuggestions = useMemo(() => {
+    if (!availableEntities.length) return [];
+    const needle = normalizeEntity(pattern);
+    if (!needle) return availableEntities.slice(0, 8);
+    const hits = [];
+    for (const e of availableEntities) {
+      const norm = normalizeEntity(e);
+      if (!norm) continue;
+      if (norm.includes(needle)) hits.push(e);
+      if (hits.length >= 8) break;
+    }
+    return hits;
+  }, [availableEntities, pattern]);
+
+  // Keep the highlight inside bounds whenever the candidate list
+  // changes — otherwise typing a prefix that shrinks the list would
+  // leave the highlight pointing at a stale (now out-of-range) index
+  // and the Enter key would submit whatever row replaced it.
+  useEffect(() => {
+    if (highlightIdx >= filteredSuggestions.length) setHighlightIdx(-1);
+  }, [filteredSuggestions, highlightIdx]);
+
+  const pickSuggestion = (entity) => {
+    setPattern(entity);
+    setOpen(false);
+    setHighlightIdx(-1);
+    if (error) setError(null);
+  };
+
+  const handleKeyDown = (e) => {
+    // Only intercept navigation keys while the dropdown is open and
+    // actually has candidates — otherwise Enter must keep its "submit
+    // the form" default.
+    if (!open || filteredSuggestions.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightIdx((i) => (i + 1) % filteredSuggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightIdx((i) =>
+        i <= 0 ? filteredSuggestions.length - 1 : i - 1,
+      );
+    } else if (e.key === 'Enter' && highlightIdx >= 0) {
+      e.preventDefault();
+      pickSuggestion(filteredSuggestions[highlightIdx]);
+    } else if (e.key === 'Escape') {
+      setOpen(false);
+      setHighlightIdx(-1);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -230,24 +351,73 @@ function OverridesList({
       return;
     }
     setError(null);
+    setOpen(false);
     await onCreate({ pattern: pattern.trim() });
     setPattern('');
   };
 
   return (
     <div className="space-y-4">
-      <form onSubmit={submit} className="flex gap-2">
-        <input
-          type="text"
-          value={pattern}
-          onChange={(e) => {
-            setPattern(e.target.value);
-            if (error) setError(null);
-          }}
-          placeholder={`Nova regra pessoal para ${categoryName ?? 'esta categoria'}…`}
-          className="input flex-1"
-          disabled={busy}
-        />
+      <form onSubmit={submit} className="relative flex gap-2">
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={pattern}
+            onChange={(e) => {
+              setPattern(e.target.value);
+              setOpen(true);
+              setHighlightIdx(-1);
+              if (error) setError(null);
+            }}
+            onFocus={() => setOpen(true)}
+            // Delay the close so a click on a suggestion row (which
+            // blurs the input) still registers its onMouseDown before
+            // the dropdown disappears.
+            onBlur={() => setTimeout(() => setOpen(false), 120)}
+            onKeyDown={handleKeyDown}
+            placeholder={`Nova regra pessoal para ${categoryName ?? 'esta categoria'}…`}
+            className="input w-full"
+            disabled={busy}
+            autoComplete="off"
+            role="combobox"
+            aria-expanded={open && filteredSuggestions.length > 0}
+            aria-autocomplete="list"
+            aria-controls="override-entity-suggestions"
+          />
+          {open && filteredSuggestions.length > 0 && (
+            <ul
+              id="override-entity-suggestions"
+              role="listbox"
+              className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-xl border border-sand-200 bg-white py-1 shadow-lg animate-fade-in"
+            >
+              {filteredSuggestions.map((entity, i) => {
+                const isActive = i === highlightIdx;
+                return (
+                  <li
+                    key={entity}
+                    role="option"
+                    aria-selected={isActive}
+                    // `onMouseDown` (not `onClick`) fires before the
+                    // input's `onBlur`, which is what lets the click
+                    // beat the delayed-close timer above.
+                    onMouseDown={(ev) => {
+                      ev.preventDefault();
+                      pickSuggestion(entity);
+                    }}
+                    onMouseEnter={() => setHighlightIdx(i)}
+                    className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
+                      isActive
+                        ? 'bg-curve-50 text-curve-800'
+                        : 'text-sand-800 hover:bg-sand-50'
+                    }`}
+                  >
+                    {entity}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
         <button
           type="submit"
           className="btn-primary"
@@ -643,6 +813,12 @@ export default function CategoriesPage() {
   const [statsCurrent, setStatsCurrent] = useState(null);
   const [statsPrevious, setStatsPrevious] = useState(null);
   const [overrides, setOverrides] = useState([]);
+  // Full list of distinct `entity` strings across the caller's
+  // expenses, used to power the override-form autocomplete. Fetched
+  // once alongside the other page-level data so switching between
+  // categories doesn't re-hit /autocomplete — the list is the same
+  // regardless of which category is selected.
+  const [entitySuggestions, setEntitySuggestions] = useState([]);
   const [selectedId, setSelectedId] = useState(null); // category_id or '__null__'
   const [tab, setTab] = useState('entities'); // 'entities' | 'recent'
   const [loading, setLoading] = useState(true);
@@ -668,16 +844,21 @@ export default function CategoriesPage() {
   const refreshAll = async () => {
     setLoading(true);
     try {
-      const [cats, statsC, statsP, ovs] = await Promise.all([
+      const [cats, statsC, statsP, ovs, ents] = await Promise.all([
         api.getCategories(),
         api.getCategoryStats({ cycle: 'current' }),
         api.getCategoryStats({ cycle: 'previous' }).catch(() => ({ data: { totals: [] } })),
         api.getCategoryOverrides(),
+        // Autocomplete is a nice-to-have — a failure here must not
+        // break the page, so swallow and fall back to an empty list
+        // (which the form handles as "just a plain text input").
+        api.autocomplete('entity').catch(() => ({ data: [] })),
       ]);
       setCategories(cats.data ?? []);
       setStatsCurrent(statsC.data);
       setStatsPrevious(statsP.data ?? { totals: [] });
       setOverrides(ovs.data ?? []);
+      setEntitySuggestions(ents.data ?? []);
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro a carregar categorias.' });
     } finally {
@@ -1140,6 +1321,7 @@ export default function CategoriesPage() {
                       </h3>
                       <OverridesList
                         overrides={overrides}
+                        entitySuggestions={entitySuggestions}
                         categoryId={selectedRow.category_id}
                         categoryName={selectedRow.category_name}
                         onCreate={handleCreateOverride}
