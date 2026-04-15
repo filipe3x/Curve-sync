@@ -289,10 +289,13 @@ function OverridesList({
     );
   }, [entitySuggestions, overrides]);
 
-  // Case-insensitive, accent-insensitive startsWith-OR-includes filter.
-  // Empty input shows the full available list (users often want to
-  // browse before committing to a prefix). Capped at 8 rows so a user
-  // with hundreds of distinct entities doesn't get a wall of text.
+  // Accent-insensitive `includes` filter. `availableEntities` is
+  // already ordered by most-recent expense first on the server side
+  // (see routes/autocomplete.js), so the loop just preserves that
+  // order and picks the first 8 hits — "I bought something yesterday"
+  // always wins over "I bought something in 2023". Empty input shows
+  // the top 8 most-recent entries so users can browse before
+  // committing to a prefix.
   const filteredSuggestions = useMemo(() => {
     if (!availableEntities.length) return [];
     const needle = normalizeEntity(pattern);
