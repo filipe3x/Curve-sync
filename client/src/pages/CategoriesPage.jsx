@@ -461,14 +461,20 @@ function OverridesList({
             // routes/categoryOverrides.js :: countMatchesPerRule).
             // Fall back to `null` → hidden subtitle suffix so the row
             // still renders cleanly if a cached response predates
-            // the field.
+            // the field. The "match c/" prefix is deliberate — the
+            // number is "how wide is this rule's net against my
+            // expenses", not "how many are already sitting in the
+            // target category" (§8.4, §9.5.2). The previous
+            // "N despesas" reading implied ownership and was
+            // misleading when two rules overlapped or when the rule
+            // had never been apply-to-all'd.
             const count = o.matched_count;
             const countLabel =
               count == null
                 ? null
                 : count === 1
-                  ? '1 despesa'
-                  : `${count} despesas`;
+                  ? 'match c/ 1 despesa'
+                  : `match c/ ${count} despesas`;
             return (
               <li
                 key={o.id}
@@ -548,16 +554,18 @@ function GlobalEntitiesList({
       <ul className="max-h-96 overflow-y-auto divide-y divide-sand-100 rounded-2xl border border-sand-200 bg-white">
         {filtered.map((entity) => {
           // Same semantics as the override row subtitle (§9.5.2):
-          // "1 despesa" vs "N despesas", omitted entirely when the
-          // count is null/undefined so pre-feature consumers stay
-          // visually unchanged.
+          // "match c/ 1 despesa" vs "match c/ N despesas", omitted
+          // entirely when the count is null/undefined so pre-feature
+          // consumers stay visually unchanged. The "match c/" prefix
+          // is deliberate — the number is the rule's net width, not
+          // "how many are catalogued inside this bucket" (§8.4).
           const count = counts?.[entity];
           const countLabel =
             count == null
               ? null
               : count === 1
-                ? '1 despesa'
-                : `${count} despesas`;
+                ? 'match c/ 1 despesa'
+                : `match c/ ${count} despesas`;
           return (
           <li
             key={entity}

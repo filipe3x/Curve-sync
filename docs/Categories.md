@@ -1911,19 +1911,62 @@ cai em `{ data: [] }` em silêncio e o input volta a comportar-se
 como text input normal — o dropdown nunca abre por falta de
 candidates.
 
-### 9.5.2 Contador "N despesas" por regra
+### 9.5.2 Contador "match c/ N despesas" por regra
 
 Cada row em "As minhas regras" mostra no subtítulo
-`<match_type> · prioridade <n> · N despesa(s)` usando o campo
-`matched_count` do §8.4. Pluralização pt-PT (1 → "1 despesa",
-N → "N despesas"). Quando `matched_count == null` (rows vindos
-de caches pre-feature ou handlers que não computam o count), o
-sufixo é omitido — a row renderiza limpa sem partir.
+`<match_type> · prioridade <n> · match c/ N despesa(s)` usando o
+campo `matched_count` do §8.4. Pluralização pt-PT (1 →
+"match c/ 1 despesa", N → "match c/ N despesas"). Quando
+`matched_count == null` (rows vindos de caches pre-feature ou
+handlers que não computam o count), o sufixo é omitido — a row
+renderiza limpa sem partir.
+
+O prefixo "match c/" é deliberado — a etiqueta anterior
+("N despesas") sugeria pertença ("esta regra tem estas N
+despesas arrumadas"), mas o número é de facto a **largura da
+rede**: quantas das despesas do user é que o `matches()` do
+resolver considera que a regra apanha *agora*, independentemente
+de qual categoria elas estão hoje e de quem vence o tie-break.
+Duas regras sobrepostas (`lidl` e `lidl cascais`) podem ambas
+reportar `>0` mesmo que só uma ganhe no resolver, e uma regra
+recém-criada pode reportar `3` sem que nenhuma dessas 3 despesas
+esteja ainda catalogada na target — o apply-to-all é que
+materializa a mudança. O prefixo explicita esta distinção na UI.
+
+A mesma regra de leitura e a mesma etiqueta aplicam-se ao
+contador do catálogo global (§9.5.3 abaixo), para que as duas
+listas falem a mesma língua.
 
 O cálculo é feito **server-side** no handler de `GET /category-
 overrides` via `countMatchesPerRule()`, reutilizando
 `categoryResolver.matches()`. Ver §8.4 para a semântica exacta
 (é "largura da rede", não "quantas mudariam com apply-to-all").
+
+### 9.5.3 Contador "match c/ N despesas" no catálogo global
+
+Cada row do painel `Catálogo global` (§9 read-only, §12.11
+admin-editable) ganha o mesmo sufixo `match c/ N despesa(s)`,
+calculado da mesma forma mas contra as entradas do
+`Category.entities[]` em vez dos overrides pessoais. A lista é
+user-scoped: o número reflecte quantas das **minhas** despesas
+batem contra esta entidade global, nunca o total da plataforma.
+
+Pipeline server-side (reutiliza `normalize()` + `matches()` do
+resolver §5):
+
+1. Uma única agregação `{ entity → count }` sobre
+   `Expense.find({ user_id: req.userId })`.
+2. Por cada categoria, por cada string em `entities[]`, um
+   `matches(userEntityNorm, { pattern_normalized, match_type:
+   'contains' })` — `match_type` é sempre `contains` porque o
+   schema global do `Category` não expressa outra coisa (§5.5).
+3. Attach `entity_match_counts: { [entity_raw]: N }` por
+   categoria na resposta de `GET /api/categories?with_match_counts=true`.
+
+A flag `with_match_counts` é **opt-in** — a `/categories` do
+management screen passa-a, mas os outros consumers da API
+(`ExpensesPage`, `DashboardPage`, `CategoryPickerPopover`)
+ignoram-na e ficam no payload barato `{ id, name, icon, entities }`.
 
 ### 9.6 Painel de despesas recentes (tab alternativa)
 
