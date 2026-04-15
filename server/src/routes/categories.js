@@ -658,4 +658,94 @@ router.put('/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// DELETE /api/categories/:id   (admin only)
+//
+// Deletes a global catalogue category, with a hard guard against
+// dangling references: the delete is refused with `409 category_in_use`
+// when there are any `expenses` or `curve_category_overrides` still
+// pointing at the category. The 409 body carries both counts so the
+// frontend modal can tell the admin exactly what needs to be
+// reassigned before the delete goes through (§11.4 risk #3).
+//
+// This is the only admin CRUD endpoint that gets a pre-delete scan —
+// POST and PUT work on the row in isolation, but DELETE has to
+// protect the invariant that every `expense.category_id` and every
+// `override.category_id` points at a row that exists. Embers never
+// writes either field, but it does read them, so a dangling id would
+// silently produce a `null` category on the shared app.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id  — category _id (validated as ObjectId, 404 otherwise)
+//
+// Responses:
+//   204 on success (no body)
+//   404 category_not_found
+//   409 category_in_use  — body: `{ error, expenses_count, overrides_count }`
+//
+// Audit (§13.2 #25):
+//   action: 'category_deleted'
+//   detail: `name=<name> expense_count=0`
+//   Canonical pt-PT (curveLogsUtils): "Categoria apagada: <name>"
+//
+// `expense_count` is always `0` at audit time because the 409 guard
+// above blocks any delete where expenses still reference the row.
+// The field is retained in the detail for shape-parity with §13.2
+// and forensic clarity ("yes, we confirmed zero references before
+// the drop"). Future variants that allow force-delete with cascade
+// would carry a non-zero count here.
+// ─────────────────────────────────────────────────────────────────────
+router.delete('/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    // Load first so the audit row can capture the category name, and
+    // so a missing category returns a clean 404 before we run the
+    // in-use scan (which would otherwise succeed vacuously with zero
+    // references for a non-existent id).
+    const category = await Category.findById(id).select('_id name').lean();
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    // Parallel count of references. Both collections index
+    // `category_id` (expenses via its own field, overrides via the
+    // user_id compound index fallback), so at MVP scale this is two
+    // cheap round trips.
+    const [expensesCount, overridesCount] = await Promise.all([
+      Expense.countDocuments({ category_id: id }),
+      CategoryOverride.countDocuments({ category_id: id }),
+    ]);
+
+    if (expensesCount > 0 || overridesCount > 0) {
+      return res.status(409).json({
+        error: 'category_in_use',
+        expenses_count: expensesCount,
+        overrides_count: overridesCount,
+      });
+    }
+
+    // Safe to drop: zero references in both collections. `deleteOne`
+    // instead of `findByIdAndDelete` because we already have the doc
+    // in memory — no need for a second round trip to reload it.
+    await Category.deleteOne({ _id: id });
+
+    audit({
+      action: 'category_deleted',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `name=${category.name} expense_count=0`,
+    });
+
+    res.status(204).end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
