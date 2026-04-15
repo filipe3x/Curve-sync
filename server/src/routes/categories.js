@@ -748,4 +748,168 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/categories/:id/entities   (admin only)
+//
+// Batch-adds N entity strings to a global catalogue category's
+// `entities[]` array. Complements DELETE /:id/entities/:entity
+// (which removes one at a time) and avoids a heavy full-category
+// PUT when the admin just wants to append — §8.3 of
+// docs/Categories.md is the spec.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id — category _id (validated as ObjectId, 404 otherwise)
+//
+// Body:
+//   { entities: string[] }  — non-empty array of raw strings
+//
+// Input handling:
+//   - Non-string entries, blanks, and `normalize()` duplicates are
+//     dropped silently (via `normaliseEntityInput()`). This matches
+//     the behaviour of POST / for the same dedup surface — two
+//     variants the resolver treats as identical never both end up in
+//     `entities[]`.
+//   - Entries whose normalised form already exists in THIS
+//     category's `entities[]` are skipped silently (idempotent —
+//     re-POSTing the same list is a no-op).
+//   - Entries whose normalised form exists in ANY OTHER category
+//     trigger `409 entity_conflict` with `{ conflicts: [...] }` so
+//     the admin can decide explicitly whether to move. "Move" is an
+//     out-of-band decision (remove-from-origin + add-here), not an
+//     implicit side effect of this endpoint (§8.3).
+//
+// Validation:
+//   404 category_not_found   — invalid id or missing row
+//   400 invalid_entities     — missing / not an array / empty array /
+//                              every entry dropped by normalisation
+//   409 entity_conflict      — at least one entry collides with
+//                              another category. Body:
+//                              `{ conflicts: [{ entity, category_id,
+//                              category_name }] }`
+//
+// Response: 200 { data: Category }  — the full updated row so the
+// caller can drop the result straight into the category detail
+// pane without a refetch.
+//
+// Audit (§13.2 #26):
+//   action: 'category_entity_added'
+//   detail: `category=<name> entities=<first>[,+<k>]`
+//   Canonical pt-PT (curveLogsUtils): "Entidades adicionadas a <name>: <lista>"
+//
+// One audit row per POST regardless of batch size (the doc's §13.2
+// note #2 specifies this). The detail is truncated to first +
+// count to keep it under the 120-char `truncateDetail` cap.
+// ─────────────────────────────────────────────────────────────────────
+router.post('/:id/entities', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const { entities } = req.body ?? {};
+    if (!Array.isArray(entities) || entities.length === 0) {
+      return res.status(400).json({ error: 'invalid_entities' });
+    }
+
+    // Normalise + dedupe the caller's payload. Drops blanks, non-
+    // strings, and `normalize()` duplicates within the same request.
+    const incoming = normaliseEntityInput(entities);
+    if (incoming.length === 0) {
+      return res.status(400).json({ error: 'invalid_entities' });
+    }
+
+    // Build the set of THIS category's existing normalised entities
+    // so we can silently drop duplicates that are already present
+    // (idempotent re-POSTs). The raw form is preserved in storage —
+    // normalise only here on the check side.
+    const currentNormalised = new Set(
+      (category.entities ?? []).map((e) => normalize(e)).filter(Boolean),
+    );
+
+    // Scan every OTHER category for conflicts. At MVP scale the
+    // catalogue is small (~50 categories × ~10 entities each), so a
+    // full fetch + in-memory map is cheaper than N round trips. We
+    // key by normalised form so "Lidl" in Groceries still conflicts
+    // with an incoming "lidl".
+    const others = await Category.find({ _id: { $ne: id } })
+      .select('_id name entities')
+      .lean();
+    const conflictMap = new Map(); // norm → { category_id, category_name, entity }
+    for (const c of others) {
+      if (!Array.isArray(c.entities)) continue;
+      for (const e of c.entities) {
+        const norm = normalize(e);
+        if (!norm || conflictMap.has(norm)) continue;
+        conflictMap.set(norm, {
+          category_id: c._id.toString(),
+          category_name: c.name,
+          entity: e,
+        });
+      }
+    }
+
+    // Partition the incoming list into additions vs conflicts. A
+    // single conflict aborts the whole batch with 409 — §8.3 is
+    // explicit that we never half-apply, because "the admin decides
+    // explicitly on the frontend whether to move".
+    const conflicts = [];
+    const additions = [];
+    for (const { raw, norm } of incoming) {
+      const conflict = conflictMap.get(norm);
+      if (conflict) {
+        conflicts.push({
+          entity: raw,
+          category_id: conflict.category_id,
+          category_name: conflict.category_name,
+        });
+        continue;
+      }
+      if (currentNormalised.has(norm)) continue; // idempotent: already present
+      additions.push(raw);
+    }
+
+    if (conflicts.length > 0) {
+      return res.status(409).json({
+        error: 'entity_conflict',
+        conflicts,
+      });
+    }
+
+    if (additions.length === 0) {
+      // Everything was an already-present duplicate — idempotent 200.
+      // No audit row because nothing actually changed (§13.4).
+      return res.json({ data: category.toObject() });
+    }
+
+    category.entities = [...(category.entities ?? []), ...additions];
+    await category.save();
+
+    // Detail format matches §13.2 note #2: the first entry verbatim,
+    // plus `+<k>` for the remaining count, so the whole string stays
+    // under the 120-char truncateDetail cap even for large batches.
+    const detailList =
+      additions.length === 1
+        ? additions[0]
+        : `${additions[0]},+${additions.length - 1}`;
+    audit({
+      action: 'category_entity_added',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `category=${category.name} entities=${detailList}`,
+    });
+
+    res.json({ data: category.toObject() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
