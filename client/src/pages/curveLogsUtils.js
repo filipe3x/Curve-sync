@@ -45,9 +45,20 @@ export function describeLog(log) {
       'apply_to_all',
       'apply_to_all_failed',
       // Admin surgery on the global catalogue (docs/Categories.md §13.2
-      // #27). Shares the Catálogo badge with personal-override rows
+      // #23-27). Shares the Catálogo badge with personal-override rows
       // because from the user's point of view it's still "something
-      // happened to the category system".
+      // happened to the category system". `category_created`,
+      // `category_updated`, `category_deleted`, and
+      // `category_entity_added` land with the admin CRUD slice;
+      // `category_entity_removed` already shipped with the minimal
+      // admin slice (PR #6). `apply_to_all` with `scope=global`
+      // reuses the same enum value as the personal variant — the
+      // renderer branches on `target=category` inside the switch case
+      // below to pick the right pt-PT message.
+      'category_created',
+      'category_updated',
+      'category_deleted',
+      'category_entity_added',
       'category_entity_removed',
     ];
     const type = auth.includes(log.action)
@@ -150,19 +161,35 @@ export function describeLog(log) {
         // rewritten; `category=` is at the tail so it may contain
         // spaces — the regex stops at end-of-string to capture it.
         //
-        // Variant: `target=delete_cascade` flags a cascade pass
-        // triggered by `DELETE /api/category-overrides/:id?cascade=true`.
-        // The rule is already gone by the time the log lands, and
-        // expenses may have fanned out into several different
-        // categories (or `null`), so there is no single target to
-        // show. The message focuses on the trigger instead.
+        // Variants:
+        //   target=override       — personal apply-to-all (default)
+        //   target=delete_cascade — cascade pass triggered by
+        //                           DELETE override?cascade=true. The
+        //                           rule is already gone, expenses may
+        //                           have fanned out, so the message
+        //                           focuses on the trigger instead.
+        //   target=category       — admin cross-user apply-to-all
+        //                           (docs/Categories.md §8.5, landed
+        //                           with the Fase 3 CRUD slice). There
+        //                           is no single pattern because the
+        //                           category carries many entities, so
+        //                           `log.entity` is null and the title
+        //                           is built from the category name in
+        //                           `error_detail` alone. `scope=global`
+        //                           also lives in the detail but we
+        //                           branch on `target=category` — it's
+        //                           the more specific signal and keeps
+        //                           the parser forward-compatible if a
+        //                           future variant adds a new scope.
         const pattern = log.entity ?? '—';
         const affectedMatch = log.error_detail?.match(/affected=(\d+)/);
         const targetMatch = log.error_detail?.match(/target=(\w+)/);
         const catMatch = log.error_detail?.match(/category=(.+)$/);
+        const skippedMatch = log.error_detail?.match(/skipped_personal=(\d+)/);
         const affected = affectedMatch ? Number(affectedMatch[1]) : null;
         const target = targetMatch ? targetMatch[1] : null;
         const category = catMatch ? catMatch[1] : null;
+        const skippedPersonal = skippedMatch ? Number(skippedMatch[1]) : 0;
         // "1 despesa" vs "N despesas" — the singular form matters
         // for the dry-run preview that shows "1 despesa" after
         // surgical edits. Portuguese pluralisation is regular here.
@@ -173,6 +200,25 @@ export function describeLog(log) {
             title: affected !== null
               ? `${affected} ${noun} re-catalogadas após apagar regra: ${pattern}`
               : `Re-catalogação após apagar regra: ${pattern}`,
+          };
+        }
+        if (target === 'category') {
+          // Admin variant. Suffix the skipped-personal count only when
+          // it's > 0 so the common case ("everyone got recatalogued")
+          // stays readable. The count surfaces the "personal is
+          // sacred" exclusion so an admin scanning the trail can see
+          // at a glance how many rows a personal override intercepted.
+          const skippedSuffix =
+            skippedPersonal > 0 ? ` (${skippedPersonal} ignoradas)` : '';
+          if (affected !== null && category) {
+            return {
+              type,
+              title: `Aplicado a ${affected} ${noun}: catálogo ${category}${skippedSuffix}`,
+            };
+          }
+          return {
+            type,
+            title: category ? `Catálogo aplicado: ${category}` : 'Catálogo aplicado',
           };
         }
         if (affected !== null && category) {
@@ -192,13 +238,95 @@ export function describeLog(log) {
         // only the reason in the title. `audit.js` sets
         // `status: 'error'` on any action that `includes('failed')`,
         // so the badge colour is already "error" at the renderer.
-        const reasonMatch = log.error_detail?.match(/reason=([^]*?)(?: pattern=|$)/);
+        // The regex stops at ` pattern=` (personal override failure
+        // tail: `reason=<msg> pattern=<raw>`) OR ` target=` (admin
+        // apply-to-all failure tail: `reason=<msg> target=category
+        // category=<name>`, landed with Fase 3 CRUD). Adding both
+        // separators keeps the reason clean for both variants while
+        // remaining forward-compatible with any future k=v tail — the
+        // trailing `|$` still wins when no known separator is present.
+        const reasonMatch = log.error_detail?.match(/reason=([^]*?)(?: pattern=| target=|$)/);
         const reason = reasonMatch ? reasonMatch[1] : null;
         return {
           type,
           title: reason
             ? `Aplicação em massa falhou: ${reason}`
             : 'Aplicação em massa falhou',
+        };
+      }
+      case 'category_created': {
+        // docs/Categories.md §13.2 #23 — canonical pt-PT:
+        // "Categoria criada: <name>"
+        //
+        // Server writes `error_detail = "name=<name> entity_count=<n>"`
+        // (see server/src/routes/categories.js POST handler). We only
+        // surface the name in the title — the initial entity count is
+        // useful for the admin trail but would dilute the headline.
+        // Stops at ` entity_count=` so category names with spaces
+        // ("Casa e Jardim") round-trip cleanly.
+        const nameMatch = log.error_detail?.match(/name=(.+?)(?: entity_count=|$)/);
+        const name = nameMatch ? nameMatch[1] : null;
+        return {
+          type,
+          title: name ? `Categoria criada: ${name}` : 'Categoria criada',
+        };
+      }
+      case 'category_updated': {
+        // docs/Categories.md §13.2 #24 — canonical pt-PT:
+        // "Categoria actualizada: <name>"
+        //
+        // Server writes `error_detail = "name=<name> changed=<fields>"`
+        // where `<fields>` is a comma-separated list of mutated keys
+        // (name, icon, ...). The changed-field summary is useful for
+        // diffing but noisy in the headline — keep the title focused
+        // on the identity. Stops at ` changed=` for space-safe names.
+        const nameMatch = log.error_detail?.match(/name=(.+?)(?: changed=|$)/);
+        const name = nameMatch ? nameMatch[1] : null;
+        return {
+          type,
+          title: name ? `Categoria actualizada: ${name}` : 'Categoria actualizada',
+        };
+      }
+      case 'category_deleted': {
+        // docs/Categories.md §13.2 #25 — canonical pt-PT:
+        // "Categoria apagada: <name>"
+        //
+        // Server writes `error_detail = "name=<name> expense_count=<n>"`
+        // where `<n>` is always 0 today (the DELETE handler refuses
+        // in-use categories with 409). The field is kept for shape
+        // parity in case a future "force delete" variant ships. Stops
+        // at ` expense_count=` to keep names with spaces intact.
+        const nameMatch = log.error_detail?.match(/name=(.+?)(?: expense_count=|$)/);
+        const name = nameMatch ? nameMatch[1] : null;
+        return {
+          type,
+          title: name ? `Categoria apagada: ${name}` : 'Categoria apagada',
+        };
+      }
+      case 'category_entity_added': {
+        // docs/Categories.md §13.2 #26 — canonical pt-PT:
+        // "Entidades adicionadas a <name>: <lista>"
+        //
+        // Server writes `error_detail = "category=<name>
+        // entities=<first>[,+<k>]"` (see routes/categories.js POST
+        // /:id/entities). The `<first>[,+<k>]` shape keeps the
+        // detail under the 120-char truncation cap when an admin
+        // batches dozens of entities in one call — the first entity
+        // is rendered verbatim and the rest become a "+N" suffix.
+        // The category name may contain spaces so we stop at
+        // ` entities=`; the entities tail runs to end of string.
+        const catMatch = log.error_detail?.match(/category=(.+?)(?: entities=|$)/);
+        const entitiesMatch = log.error_detail?.match(/entities=(.+)$/);
+        const category = catMatch ? catMatch[1] : null;
+        const entities = entitiesMatch ? entitiesMatch[1] : null;
+        if (category && entities) {
+          return { type, title: `Entidades adicionadas a ${category}: ${entities}` };
+        }
+        return {
+          type,
+          title: category
+            ? `Entidades adicionadas a ${category}`
+            : 'Entidades adicionadas',
         };
       }
       case 'category_entity_removed': {
