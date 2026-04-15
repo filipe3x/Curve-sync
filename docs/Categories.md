@@ -1980,28 +1980,88 @@ no contexto). Link no fundo "Ver todas →" abre
 
 Qualquer edição que afecte matching (criar override, mover
 entidade, alterar `match_type`) activa um banner inline na zona
-do header do detail pane:
+do header do detail pane. **Um banner por regra pendente,
+empilhados** — ver §9.7.1 para o porquê.
 
 ```
-┌──────────────────────────────────────────────────┐
-│ ℹ  Regra alterada. Aplicar a despesas passadas? │
-│                          [ Ignorar ] [ Aplicar ] │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ ℹ Regra "lidl" → Groceries · match c/ 3 despesas.              │
+│   Aplicar a despesas passadas?                                 │
+│               [ Anular regra ]  [ Ignorar ]  [ Aplicar ]       │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+Cada banner nomeia a regra que o criou (pattern + categoria
+target + contador `match c/ N despesa(s)` snapshotado no
+momento da criação). Os três botões:
+
+- **Aplicar** → abre modal com preview fresco (via `dry_run:
+  true` do §8.5).
+- **Ignorar** → dispensa o banner sem apagar a regra. A regra
+  fica em vigor para sync futura, as despesas passadas é que
+  não são re-avaliadas.
+- **Anular regra** → apaga a regra outright
+  (`DELETE /api/category-overrides/:id`, `cascade: false`). É o
+  escape hatch para quando o user se engana a criar a regra
+  (pattern errado, categoria errada, typo). `cascade: false` é
+  sempre seguro aqui porque o banner só aparece **antes** do
+  primeiro Aplicar, logo nenhuma `category_id` foi escrita por
+  esta regra — não há nada para desfazer. Toast de sucesso:
+  `"Regra '<pattern>' anulada."`.
 
 `Aplicar` abre modal com preview (via `dry_run: true` do §8.5):
 
 ```
+Aplicar a despesas passadas?
+Regra "lidl" → Groceries
+
 Vão ser re-catalogadas 47 despesas.
   ─ 42 pertencem a ti
   ─  5 são de outros users (protegidas por overrides pessoais)
-Cancelar              Confirmar aplicação
+
+[ Anular regra ]              Cancelar   Confirmar aplicação
 ```
+
+O modal repete a mesma terceira opção `Anular regra` no canto
+inferior esquerdo (separada visualmente dos botões de fecho à
+direita) — o user pode abrir o preview, ver que afinal a regra
+está mal, e anulá-la sem ter de fechar e voltar ao banner.
 
 Loading state no botão primário (`A aplicar...` + spinner,
 conforme §10 do UIX_DESIGN). Sucesso → toast `slide-in-right`
 (`"47 despesas re-catalogadas"`) + refresh dos totais no ecrã
 (chamada silenciosa a `/api/categories/stats`).
+
+### 9.7.1 Stack de banners pendentes
+
+**Estado**: `pendingApplies: Array<{ id, pattern, category_name,
+matched }>` em `CategoriesPage`. Cada `handleCreateOverride`
+bem-sucedido **empurra** (`push`) uma entrada para o fim da
+lista, nunca sobrescreve. Consequências práticas:
+
+- Criar a regra A seguida imediatamente pela regra B mostra
+  **dois banners** empilhados — um para A, outro para B, cada
+  um com o seu próprio nome, contador e triplo de botões.
+  Clicar `Aplicar` no banner de A só aplica A; o banner de B
+  fica onde estava, à espera da decisão do user.
+- O id que o `handleApplyConfirm` usa vem de `applyPreview.entry`
+  (snapshot no momento em que o user clicou `Aplicar`), não de
+  um estado "corrente" partilhado — logo criar uma terceira
+  regra enquanto o modal está aberto **não afecta** a regra que
+  está a ser confirmada.
+- `Ignorar` e `Anular regra` actuam só sobre a entrada clicada
+  (filtro por `id`), nunca sobre toda a lista.
+- Apagar uma regra via a lista "As minhas regras" (§9.5) também
+  remove qualquer banner pendente para essa regra — evita ficar
+  com um banner zombie a apontar para um id que já não existe.
+
+**History**: a versão anterior usava um único `pendingOverrideId:
+string`. Criar a regra B enquanto o banner de A estava aberto
+sobrescrevia o id silenciosamente, e o click em `Aplicar`
+aplicava só B — A era descartada sem nenhuma indicação visual.
+O array elimina esse modo de falha por construção: cada regra
+tem o seu próprio banner rastreável até o user decidir
+explicitamente o que fazer com ela.
 
 ### 9.8 Motion & grafismo
 

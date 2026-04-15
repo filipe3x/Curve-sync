@@ -814,7 +814,14 @@ function DeleteGlobalEntityDialog({ target, onCancel, onConfirm, busy }) {
   );
 }
 
-function ApplyConfirmDialog({ preview, onCancel, onConfirm, busy }) {
+function ApplyConfirmDialog({
+  preview,
+  entry,
+  onCancel,
+  onConfirm,
+  onCancelRule,
+  busy,
+}) {
   if (!preview) return null;
   return (
     <div
@@ -826,6 +833,11 @@ function ApplyConfirmDialog({ preview, onCancel, onConfirm, busy }) {
         <h2 className="text-lg font-semibold text-sand-900">
           Aplicar a despesas passadas?
         </h2>
+        {entry && (
+          <p className="mt-1 text-xs uppercase tracking-wide text-sand-400">
+            Regra "{entry.pattern}" → {entry.category_name}
+          </p>
+        )}
         <p className="mt-2 text-sm text-sand-600">
           Vão ser re-catalogadas <strong>{preview.matched}</strong>{' '}
           {preview.matched === 1 ? 'despesa' : 'despesas'} tuas.
@@ -842,23 +854,43 @@ function ApplyConfirmDialog({ preview, onCancel, onConfirm, busy }) {
             ))}
           </ul>
         )}
-        <div className="mt-6 flex justify-end gap-2">
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onCancel}
-            disabled={busy}
-          >
-            Cancelar
-          </button>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={onConfirm}
-            disabled={busy || preview.matched === 0}
-          >
-            {busy ? 'A aplicar…' : 'Confirmar aplicação'}
-          </button>
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
+          {/* Escape hatch on the left side so it visually separates
+              from Cancelar/Confirmar — a three-way decision needs a
+              three-way layout, not three adjacent pills that look
+              the same. Only rendered when the caller passes an
+              `onCancelRule` handler (it will always do so today, but
+              the prop is optional for future reuse of this dialog
+              outside the apply-to-all flow). */}
+          {entry && onCancelRule && (
+            <button
+              type="button"
+              className="rounded-lg px-3 py-2 text-sm font-medium text-curve-700 hover:bg-curve-50 disabled:opacity-50"
+              onClick={() => onCancelRule(entry)}
+              disabled={busy}
+              title="Apagar esta regra — útil se foi criada por engano"
+            >
+              Anular regra
+            </button>
+          )}
+          <div className="ml-auto flex gap-2">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={onCancel}
+              disabled={busy}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={onConfirm}
+              disabled={busy || preview.matched === 0}
+            >
+              {busy ? 'A aplicar…' : 'Confirmar aplicação'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -887,7 +919,26 @@ export default function CategoriesPage() {
   const [tab, setTab] = useState('entities'); // 'entities' | 'recent'
   const [loading, setLoading] = useState(true);
   const [overrideBusy, setOverrideBusy] = useState(false);
-  const [pendingOverrideId, setPendingOverrideId] = useState(null); // for "aplicar" banner
+  // Stack of pending apply-to-all banners, one per freshly-created
+  // override that had `matched > 0` at creation time. Each entry is
+  // `{ id, pattern, category_name, matched }` — `matched` is a
+  // snapshot from the create-time dry-run, good enough for the
+  // banner count; `handleApplyPreview` re-fetches a fresh dry-run
+  // before opening the confirm dialog so the confirmation number
+  // is always current.
+  //
+  // History: this was a single `pendingOverrideId` string. Creating a
+  // second rule while the banner was still up silently overwrote the
+  // first rule's id, so clicking Aplicar applied only the second
+  // rule. The array form keeps every pending rule visible and
+  // actionable until the user explicitly clicks Aplicar or Ignorar
+  // on each banner.
+  const [pendingApplies, setPendingApplies] = useState([]);
+  // When the confirm dialog is open, `applyPreview` carries
+  // `{ entry, preview }` — `entry` is the pendingApplies row being
+  // applied (so the confirm handler knows which override id to call
+  // and which entry to remove on success), `preview` is the fresh
+  // dry-run response from the server (matched, samples, …).
   const [applyPreview, setApplyPreview] = useState(null);
   const [applyBusy, setApplyBusy] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1038,7 +1089,18 @@ export default function CategoriesPage() {
         });
         const matched = preview.data?.matched ?? 0;
         if (matched > 0) {
-          setPendingOverrideId(res.data.id);
+          // Push, never overwrite. Two rules created in quick
+          // succession produce two stacked banners — the user sees
+          // both and decides per-entry.
+          setPendingApplies((prev) => [
+            ...prev,
+            {
+              id: res.data.id,
+              pattern: res.data.pattern,
+              category_name: res.data.category_name ?? selectedRow.category_name,
+              matched,
+            },
+          ]);
           setToast({
             type: 'ok',
             text: `Regra criada. ${matched} ${matched === 1 ? 'despesa pode' : 'despesas podem'} ser re-catalogadas.`,
@@ -1055,7 +1117,16 @@ export default function CategoriesPage() {
         // decides whether to click it) so the apply path is still
         // reachable — the alternative of silently hiding the banner
         // would be worse if the preview route is temporarily down.
-        setPendingOverrideId(res.data.id);
+        // `matched: null` skips the count in the banner copy.
+        setPendingApplies((prev) => [
+          ...prev,
+          {
+            id: res.data.id,
+            pattern: res.data.pattern,
+            category_name: res.data.category_name ?? selectedRow.category_name,
+            matched: null,
+          },
+        ]);
         setToast({ type: 'ok', text: 'Regra pessoal criada.' });
       }
     } catch (err) {
@@ -1093,7 +1164,11 @@ export default function CategoriesPage() {
     try {
       await api.deleteCategoryOverride(id, { cascade });
       setOverrides((prev) => prev.filter((o) => o.id !== id));
-      if (pendingOverrideId === id) setPendingOverrideId(null);
+      // Drop any still-pending banner for this rule — the rule is
+      // gone, there's nothing left to apply. Works for both cascade
+      // and non-cascade deletes because the banner operates on the
+      // rule's id, not on the side-effect.
+      setPendingApplies((prev) => prev.filter((e) => e.id !== id));
       setToast({
         type: 'ok',
         text: cascade
@@ -1160,14 +1235,19 @@ export default function CategoriesPage() {
     }
   };
 
-  const handleApplyPreview = async () => {
-    if (!pendingOverrideId) return;
+  // Clicking "Aplicar" on a banner opens the preview dialog for
+  // *that* specific entry. `entry` is the pendingApplies row —
+  // passing it in (instead of reading from a "current" ref)
+  // makes every call site explicit about which rule it's acting
+  // on, which is the whole point of this refactor.
+  const handleApplyPreview = async (entry) => {
+    if (!entry) return;
     setApplyBusy(true);
     try {
-      const res = await api.applyCategoryOverride(pendingOverrideId, {
+      const res = await api.applyCategoryOverride(entry.id, {
         dryRun: true,
       });
-      setApplyPreview(res.data);
+      setApplyPreview({ entry, preview: res.data });
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro no preview.' });
     } finally {
@@ -1175,11 +1255,16 @@ export default function CategoriesPage() {
     }
   };
 
+  // Invoked from the confirm dialog. Reads the entry off
+  // `applyPreview.entry` so it always applies the same rule the user
+  // previewed, even if a new rule was created in the meantime and
+  // appended to `pendingApplies`.
   const handleApplyConfirm = async () => {
-    if (!pendingOverrideId) return;
+    const entry = applyPreview?.entry;
+    if (!entry) return;
     setApplyBusy(true);
     try {
-      const res = await api.applyCategoryOverride(pendingOverrideId, {
+      const res = await api.applyCategoryOverride(entry.id, {
         dryRun: false,
       });
       setToast({
@@ -1187,13 +1272,51 @@ export default function CategoriesPage() {
         text: `${res.data.updated} ${res.data.updated === 1 ? 'despesa re-catalogada' : 'despesas re-catalogadas'}.`,
       });
       setApplyPreview(null);
-      setPendingOverrideId(null);
+      // Drop just *this* entry from the stack — other pending
+      // banners stay up waiting for their own Aplicar/Ignorar.
+      setPendingApplies((prev) => prev.filter((e) => e.id !== entry.id));
       // Refresh stats silently so the totals reflect the reassignment.
       await refreshAll();
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro a aplicar.' });
     } finally {
       setApplyBusy(false);
+    }
+  };
+
+  // Dismiss a banner without applying. Keeps every other pending
+  // banner in place — only the entry the user actually clicked gets
+  // removed.
+  const handleIgnorePending = (entryId) => {
+    setPendingApplies((prev) => prev.filter((e) => e.id !== entryId));
+  };
+
+  // Third banner option: "Anular regra" — escape hatch for a fresh
+  // rule the user just realised is wrong (wrong pattern, wrong
+  // category, fat-fingered the input). Deletes the override outright
+  // and drops the banner. `cascade: false` is always safe because the
+  // banner is only ever shown BEFORE the user clicked Aplicar — so
+  // no `category_id` was ever written from this rule. If the user had
+  // already applied and then reopened the banner via some future
+  // surface, the cascade decision would live in the delete dialog,
+  // not here.
+  //
+  // Also closes the confirm dialog if it happened to be open for
+  // this same entry — prevents the dialog from hanging on a now-
+  // deleted rule id.
+  const handleCancelPendingRule = async (entry) => {
+    if (!entry) return;
+    setOverrideBusy(true);
+    try {
+      await api.deleteCategoryOverride(entry.id, { cascade: false });
+      setOverrides((prev) => prev.filter((o) => o.id !== entry.id));
+      setPendingApplies((prev) => prev.filter((e) => e.id !== entry.id));
+      if (applyPreview?.entry?.id === entry.id) setApplyPreview(null);
+      setToast({ type: 'ok', text: `Regra "${entry.pattern}" anulada.` });
+    } catch (err) {
+      setToast({ type: 'error', text: err.message ?? 'Erro a anular regra.' });
+    } finally {
+      setOverrideBusy(false);
     }
   };
 
@@ -1329,30 +1452,69 @@ export default function CategoriesPage() {
                 />
               </div>
 
-              {/* Apply-to-all banner */}
-              {pendingOverrideId && (
-                <div className="flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 animate-fade-in">
-                  <span>
-                    Regra alterada. Aplicar a despesas passadas?
-                  </span>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      className="btn-secondary !py-1.5 !px-3 text-xs"
-                      onClick={() => setPendingOverrideId(null)}
-                      disabled={applyBusy}
+              {/* Apply-to-all banners — one per pending rule. Stacked
+                  so creating two rules in quick succession keeps both
+                  actionable; each banner names its own rule so the
+                  user knows exactly what Aplicar/Ignorar will touch. */}
+              {pendingApplies.length > 0 && (
+                <div className="space-y-2">
+                  {pendingApplies.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 animate-fade-in"
                     >
-                      Ignorar
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary !py-1.5 !px-3 text-xs"
-                      onClick={handleApplyPreview}
-                      disabled={applyBusy}
-                    >
-                      {applyBusy ? 'A calcular…' : 'Aplicar'}
-                    </button>
-                  </div>
+                      <span className="min-w-0">
+                        Regra <strong>"{entry.pattern}"</strong>
+                        {entry.category_name && (
+                          <> → {entry.category_name}</>
+                        )}
+                        {entry.matched != null && (
+                          <>
+                            {' '}
+                            · match c/{' '}
+                            <strong>
+                              {entry.matched}{' '}
+                              {entry.matched === 1 ? 'despesa' : 'despesas'}
+                            </strong>
+                          </>
+                        )}
+                        . Aplicar a despesas passadas?
+                      </span>
+                      <div className="flex shrink-0 gap-2">
+                        {/* "Anular regra" = delete the override
+                            outright. Destructive but safe: the
+                            banner is only shown pre-apply, so no
+                            `category_id` was ever written from this
+                            rule. Styled red-ish to telegraph that
+                            it's not the same as Ignorar. */}
+                        <button
+                          type="button"
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-curve-700 hover:bg-curve-50 disabled:opacity-50"
+                          onClick={() => handleCancelPendingRule(entry)}
+                          disabled={applyBusy || overrideBusy}
+                          title="Apagar esta regra — útil se foi criada por engano"
+                        >
+                          Anular regra
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary !py-1.5 !px-3 text-xs"
+                          onClick={() => handleIgnorePending(entry.id)}
+                          disabled={applyBusy || overrideBusy}
+                        >
+                          Ignorar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary !py-1.5 !px-3 text-xs"
+                          onClick={() => handleApplyPreview(entry)}
+                          disabled={applyBusy || overrideBusy}
+                        >
+                          {applyBusy ? 'A calcular…' : 'Aplicar'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -1439,10 +1601,12 @@ export default function CategoriesPage() {
       </div>
 
       <ApplyConfirmDialog
-        preview={applyPreview}
+        preview={applyPreview?.preview ?? null}
+        entry={applyPreview?.entry ?? null}
         onCancel={() => setApplyPreview(null)}
         onConfirm={handleApplyConfirm}
-        busy={applyBusy}
+        onCancelRule={handleCancelPendingRule}
+        busy={applyBusy || overrideBusy}
       />
 
       <DeleteOverrideDialog
