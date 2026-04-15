@@ -3,19 +3,108 @@ import mongoose from 'mongoose';
 import Category from '../models/Category.js';
 import Expense from '../models/Expense.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
+import { matches, normalize } from '../services/categoryResolver.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
 
+// ─────────────────────────────────────────────────────────────────────
 // GET /api/categories (read-only)
-router.get('/', async (_req, res) => {
+//
+// Returns the catalogue sorted by name. The default shape is the
+// full Category document — consumers like /expenses, the dashboard
+// and CategoryPickerPopover only need the id + name + icon and
+// ignore everything else.
+//
+// Opt-in `?with_match_counts=true` adds a per-category
+// `entity_match_counts: { [entity_raw]: N }` map, keyed on the raw
+// entries of `entities[]`, counting how many of the caller's own
+// expenses each global entity catches right now. Semantics mirror
+// the personal-override counter (§8.4, docs/Categories.md): "how
+// wide is this entity's net" — not "how many would move on an
+// apply-to-all". User-scoped by construction (`user_id: req.userId`)
+// so the number on the /categories screen reflects *my* expenses,
+// never the platform total.
+//
+// The heavy consumers (ExpensesPage, DashboardPage, CategoryPicker)
+// never set the flag, so they stay on the cheap two-field path.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/', async (req, res) => {
   try {
     const data = await Category.find().sort('name').lean();
+
+    const withCounts =
+      req.query.with_match_counts === 'true' ||
+      req.query.with_match_counts === '1';
+    if (withCounts) {
+      const countsByCategory = await countGlobalEntityMatches(req.userId, data);
+      for (const cat of data) {
+        cat.entity_match_counts =
+          countsByCategory.get(cat._id.toString()) ?? {};
+      }
+    }
+
     res.json({ data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Per-global-entity match count, user-scoped.
+//
+// Mirrors `countMatchesPerRule` in routes/categoryOverrides.js — one
+// `{ entity → count }` aggregation for the caller, followed by an
+// in-memory O(total_global_entities × distinct_user_entities) pass
+// that reuses `categoryResolver.matches()`. At MVP scale
+// (~50 categories × ~10 entities × <50 distinct user entities) this
+// is a few tens of thousands of comparisons and stays comfortably
+// under the §6.7 budget.
+//
+// Global entities are always `match_type: 'contains'` with
+// `priority: 0` (§5.5 loadContext) — same rule shape the resolver
+// uses on the hot path, so the count is computed with the exact
+// same `matches()` verdict the sync orchestrator would apply.
+// ─────────────────────────────────────────────────────────────────────
+async function countGlobalEntityMatches(userId, categories) {
+  const result = new Map();
+  if (!userId || !categories.length) return result;
+
+  const entityAgg = await Expense.aggregate([
+    { $match: { user_id: userId } },
+    { $group: { _id: '$entity', count: { $sum: 1 } } },
+  ]);
+  const normalisedUserEntities = entityAgg
+    .map(({ _id, count }) => ({ norm: normalize(_id), count }))
+    .filter((e) => e.norm);
+
+  // Early out: no expenses yet → every category gets an empty map.
+  if (!normalisedUserEntities.length) {
+    for (const cat of categories) result.set(cat._id.toString(), {});
+    return result;
+  }
+
+  for (const cat of categories) {
+    const counts = {};
+    if (Array.isArray(cat.entities)) {
+      for (const entity of cat.entities) {
+        const norm = normalize(entity);
+        if (!norm) {
+          counts[entity] = 0;
+          continue;
+        }
+        const rule = { pattern_normalized: norm, match_type: 'contains' };
+        let total = 0;
+        for (const { norm: userNorm, count } of normalisedUserEntities) {
+          if (matches(userNorm, rule)) total += count;
+        }
+        counts[entity] = total;
+      }
+    }
+    result.set(cat._id.toString(), counts);
+  }
+  return result;
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // GET /api/categories/stats

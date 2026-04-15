@@ -503,7 +503,21 @@ function OverridesList({
 // admin surgery slice (PR #6) only wires up entity DELETE — category
 // create/rename/delete and batch entity-add land later. When
 // `isAdmin` is false the component behaves exactly as it did in PR #5.
-function GlobalEntitiesList({ entities, isAdmin = false, busy = false, onDelete }) {
+//
+// `counts` is an optional `{ [entity]: N }` map — how many of the
+// caller's expenses each global entity catches right now, computed
+// server-side via `GET /api/categories?with_match_counts=true`
+// (see §8.4 + server/src/routes/categories.js). Always scoped to the
+// caller's own expenses, never the platform total. Missing keys and
+// missing maps both degrade to "no subtitle count" so pre-feature
+// callers render unchanged.
+function GlobalEntitiesList({
+  entities,
+  counts = null,
+  isAdmin = false,
+  busy = false,
+  onDelete,
+}) {
   const [q, setQ] = useState('');
   const filtered = useMemo(() => {
     if (!q) return entities;
@@ -532,7 +546,19 @@ function GlobalEntitiesList({ entities, isAdmin = false, busy = false, onDelete 
         />
       </div>
       <ul className="max-h-96 overflow-y-auto divide-y divide-sand-100 rounded-2xl border border-sand-200 bg-white">
-        {filtered.map((entity) => (
+        {filtered.map((entity) => {
+          // Same semantics as the override row subtitle (§9.5.2):
+          // "1 despesa" vs "N despesas", omitted entirely when the
+          // count is null/undefined so pre-feature consumers stay
+          // visually unchanged.
+          const count = counts?.[entity];
+          const countLabel =
+            count == null
+              ? null
+              : count === 1
+                ? '1 despesa'
+                : `${count} despesas`;
+          return (
           <li
             key={entity}
             className="flex items-center justify-between px-4 py-3"
@@ -541,7 +567,10 @@ function GlobalEntitiesList({ entities, isAdmin = false, busy = false, onDelete 
               <p className="truncate text-sm font-medium text-sand-900">
                 {entity}
               </p>
-              <p className="text-xs text-sand-400">global</p>
+              <p className="text-xs text-sand-400">
+                global
+                {countLabel && <> · {countLabel}</>}
+              </p>
             </div>
             {isAdmin && (
               <button
@@ -555,7 +584,8 @@ function GlobalEntitiesList({ entities, isAdmin = false, busy = false, onDelete 
               </button>
             )}
           </li>
-        ))}
+          );
+        })}
         {!filtered.length && (
           <li className="px-4 py-3 text-sm text-sand-400">
             Nada corresponde a "{q}".
@@ -871,7 +901,7 @@ export default function CategoriesPage() {
     setLoading(true);
     try {
       const [cats, statsC, statsP, ovs, ents] = await Promise.all([
-        api.getCategories(),
+        api.getCategories({ withMatchCounts: true }),
         api.getCategoryStats({ cycle: 'current' }),
         api.getCategoryStats({ cycle: 'previous' }).catch(() => ({ data: { totals: [] } })),
         api.getCategoryOverrides(),
@@ -921,6 +951,13 @@ export default function CategoriesPage() {
         entity_count: cur?.entity_count ?? 0,
         delta: percentDelta(cur?.total ?? 0, prev?.total ?? 0),
         global_entities: c.entities ?? [],
+        // Per-global-entity match counts, user-scoped. Populated by
+        // GET /api/categories?with_match_counts=true — each key is the
+        // raw entity string, each value is the number of the caller's
+        // own expenses the rule catches right now. Missing (or
+        // partially missing) keys degrade gracefully to "no count"
+        // in GlobalEntitiesList.
+        global_entity_counts: c.entity_match_counts ?? {},
       };
     });
     // Add the uncategorised row only if it has any weight in either
@@ -937,6 +974,7 @@ export default function CategoriesPage() {
         entity_count: uncCur?.entity_count ?? 0,
         delta: percentDelta(uncCur?.total ?? 0, uncPrev?.total ?? 0),
         global_entities: [],
+        global_entity_counts: {},
       });
     }
     // Sort descending by current total so the distribution bar and
@@ -1365,6 +1403,7 @@ export default function CategoriesPage() {
                       </h3>
                       <GlobalEntitiesList
                         entities={selectedRow.global_entities}
+                        counts={selectedRow.global_entity_counts}
                         isAdmin={isAdmin}
                         busy={globalEntityBusy}
                         onDelete={(entity) =>

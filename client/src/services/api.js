@@ -98,7 +98,20 @@ export const bulkMoveExpenses = (ids, category_id) =>
   });
 
 // Categories (read-only for users; admin-only entity DELETE below)
-export const getCategories = () => request('/categories');
+//
+// `opts.withMatchCounts` attaches a per-category
+// `entity_match_counts: { [entity]: N }` map to each returned row,
+// counted against the caller's own expenses only. Used by
+// /categories to label global entities with "N despesas" the same
+// way personal overrides do (§8.4). The dashboard, /expenses and
+// CategoryPickerPopover don't pass the flag — they only need the
+// cheap id+name payload.
+export const getCategories = (opts = {}) => {
+  if (opts.withMatchCounts) {
+    return request('/categories?with_match_counts=true');
+  }
+  return request('/categories');
+};
 
 // Admin-only catalogue surgery — removes a single entity string from
 // a global category's `entities` array. See docs/Categories.md §13.2
