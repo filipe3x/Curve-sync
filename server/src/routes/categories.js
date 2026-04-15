@@ -536,4 +536,126 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// PUT /api/categories/:id   (admin only)
+//
+// Partial update of a global catalogue category. Only `name` is
+// actually persisted in this slice — the `entities[]` array is NOT
+// editable here (use the granular §8.3 endpoints), and `icon_url`
+// is accepted-but-dropped until the schema question is resolved
+// (see the comment inside the handler). Together with POST and
+// DELETE, this is the second of the five admin CRUD endpoints from
+// docs/Categories.md §8.2.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id  — category _id (validated as ObjectId, 404 otherwise)
+//
+// Body:
+//   { name?: string, icon_url?: string }
+//
+// Validation:
+//   404 category_not_found   — invalid id or no such row
+//   400 name_required        — name is present but empty after trim
+//   409 name_taken           — case-insensitive collision against ANY
+//                              OTHER category (pre-check via
+//                              nameCollides() + 11000 catch as a
+//                              safety belt for concurrent renames)
+//
+// No-op PUTs (identical name, or a request that carries only a
+// dropped icon_url) return 200 with the current document and skip
+// the audit row entirely — §13.4 discourages audit noise from
+// autosave-style writes that don't actually change state.
+//
+// Response: 200 { data: Category }
+//
+// Audit (§13.2 #24):
+//   action: 'category_updated'
+//   detail: `name=<name> changed=<fields>`
+//   Canonical pt-PT (curveLogsUtils): "Categoria actualizada: <name>"
+// ─────────────────────────────────────────────────────────────────────
+router.put('/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const existing = await Category.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const { name, icon_url } = req.body ?? {};
+    const changed = [];
+
+    if (name !== undefined) {
+      if (typeof name !== 'string' || name.trim() === '') {
+        return res.status(400).json({ error: 'name_required' });
+      }
+      const trimmedName = name.trim();
+      if (trimmedName !== existing.name) {
+        // Collision check against every OTHER row. Case-insensitive
+        // to match POST / behaviour, with `excludeId` so a cosmetic
+        // case-only rename ("Groceries" → "groceries") doesn't
+        // self-collide with the row being edited.
+        if (await nameCollides(trimmedName, id)) {
+          return res.status(409).json({ error: 'name_taken' });
+        }
+        existing.name = trimmedName;
+        changed.push('name');
+      }
+    }
+
+    // `icon_url` is part of the documented contract (§8.2) but the
+    // Mongoose `Category` model has no `icon` field — Embers stores
+    // the icon as a Paperclip attachment (icon_file_name +
+    // icon_content_type + icon_file_size + icon_updated_at), and
+    // CLAUDE.md forbids adding fields to the shared `categories`
+    // schema. Until the schema question is resolved (follow-up PR),
+    // the parameter is accepted to keep the contract stable but
+    // never persisted, so writes never diverge from Embers' read
+    // expectations. The frontend can POST icon_url into the wind
+    // without getting a 400 or a silent "unknown field" error —
+    // it just won't stick yet.
+    if (icon_url !== undefined) {
+      void icon_url;
+    }
+
+    if (changed.length === 0) {
+      // No-op PUT: nothing to persist and nothing to audit (§13.4).
+      // Return the current document so clients that PUT {name:same}
+      // as part of an autosave flow still see a coherent response.
+      return res.json({ data: existing.toObject() });
+    }
+
+    try {
+      await existing.save();
+    } catch (err) {
+      // Race condition: another admin renamed a sibling into our
+      // target between nameCollides() and save(). The unique index
+      // on `name` is case-sensitive, so 11000 only fires on an
+      // exact-case collision — the case-insensitive variant is
+      // already caught above. Translate either to the documented
+      // 409 so the client path is uniform.
+      if (err?.code === 11000) {
+        return res.status(409).json({ error: 'name_taken' });
+      }
+      throw err;
+    }
+
+    audit({
+      action: 'category_updated',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `name=${existing.name} changed=${changed.join(',')}`,
+    });
+
+    res.json({ data: existing.toObject() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
