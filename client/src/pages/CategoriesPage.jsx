@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
@@ -10,9 +10,37 @@ import * as api from '../services/api';
 /**
  * /categories — master-detail category management screen.
  *
- * User mode only for PR #5 (Fase 4 of docs/Categories.md §11.3). The
- * admin branch (+ Categoria, editable header, global entity CRUD) lands
- * in Fase 5 on the same component, gated by `user.role === 'admin'`.
+ * User mode landed with Fase 4 (PR #5); the admin branch lands in
+ * Fase 5 on the same component, gated by `user.role === 'admin'`.
+ * The gate is purely UX-level — the server is the real enforcement
+ * boundary via `requireAdmin` on every admin catalogue route. Admin
+ * adds, on top of the shared user surface:
+ *   - `+ Categoria` button in the master pane header (opens the
+ *     CreateCategoryDialog with name + optional entity seed).
+ *   - Inline rename of the selected category in the detail header
+ *     (blur / Enter commits, Esc cancels). Piped through
+ *     `api.updateCategory` → `PUT /api/categories/:id`.
+ *   - Delete button in the detail header; 409 `category_in_use`
+ *     responses populate the DeleteCategoryDialog's "blocked" mode
+ *     with the expense + override reference counts so the admin
+ *     sees why it refused (docs/Categories.md §11.4 risk #3).
+ *   - Batch-add of entities above the read-only global catalogue
+ *     list (AddGlobalEntitiesForm), committing via
+ *     `POST /api/categories/:id/entities` and pushing an
+ *     admin-kind pending-apply banner on success.
+ *   - Admin branch of the apply-to-all stack: pending entries with
+ *     `kind: 'admin'` call `api.applyCategoryToAll` instead of the
+ *     personal variant, show "Entidades adicionadas a <cat>" copy,
+ *     and hide the "Anular regra" escape hatch (undo lives on the
+ *     per-entity DELETE button, not a whole-batch rollback).
+ *
+ * Icon picker is explicitly NOT in this slice — the Category model
+ * has no `icon` field today and adding one collides with Embers'
+ * Paperclip schema (CLAUDE.md "never modify the schema of
+ * categories"). A follow-up spike clarifies whether we can write
+ * Paperclip-compat images from Curve Sync or introduce an
+ * `icon_emoji` Curve-Sync-only field. Until then the header renders
+ * without an icon for every user.
  *
  * Data sources:
  *   - GET /api/categories         — full read-only catalogue
@@ -814,6 +842,230 @@ function DeleteGlobalEntityDialog({ target, onCancel, onConfirm, busy }) {
   );
 }
 
+// Admin-only: create a new global catalogue category. Name is
+// required; entities is an optional newline-separated list that lets
+// the admin seed the category with a starter pattern set in a single
+// click. The form is deliberately skeletal — no icon picker until the
+// Paperclip / schema question is resolved (see the commit that
+// introduces this component and CLAUDE.md "never modify the schema
+// of categories" — the `Category` model today only has `name` and
+// `entities[]`). When a new `icon` field is wired server-side we
+// reopen this dialog to add the picker.
+//
+// Error handling is split between the dialog and the parent:
+//   - `error` prop renders inline under the form (used for
+//     `name_taken` and any other code that the server returns).
+//   - Network / unexpected failures surface via the global toast
+//     stack, handled by the parent's `handleCreateCategoryConfirm`.
+//
+// The controlled name / entitiesText state resets when the dialog
+// closes (via `open` prop falling to false) so reopening always
+// lands on a fresh form instead of the last-submitted values.
+function CreateCategoryDialog({ open, busy, error, onCancel, onConfirm }) {
+  const [name, setName] = useState('');
+  const [entitiesText, setEntitiesText] = useState('');
+
+  useEffect(() => {
+    if (!open) {
+      setName('');
+      setEntitiesText('');
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    // Newline-separated list → string[]. Empty lines and whitespace-
+    // only lines are dropped; the server normalises and dedupes
+    // further via normaliseEntityInput() in routes/categories.js.
+    const entities = entitiesText
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    onConfirm({ name: trimmedName, entities });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-sand-950/30 p-4 animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+    >
+      <form onSubmit={handleSubmit} className="card w-full max-w-md">
+        <h2 className="text-lg font-semibold text-sand-900">
+          Nova categoria
+        </h2>
+        <p className="mt-2 text-sm text-sand-600">
+          Cria uma categoria no catálogo global. As entidades que
+          indicares ficam disponíveis para todos os users.
+        </p>
+        <div className="mt-4 space-y-3">
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-sand-500">
+              Nome
+            </span>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoFocus
+              required
+              placeholder="Ex.: Transportes"
+              className="input mt-1"
+              disabled={busy}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-sand-500">
+              Entidades (opcional) — uma por linha
+            </span>
+            <textarea
+              value={entitiesText}
+              onChange={(e) => setEntitiesText(e.target.value)}
+              rows={4}
+              placeholder={'galp\nbp\nrepsol'}
+              className="input mt-1 font-mono text-xs"
+              disabled={busy}
+            />
+          </label>
+        </div>
+        {error && (
+          <p className="mt-3 text-sm text-curve-700" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onCancel}
+            disabled={busy}
+          >
+            Cancelar
+          </button>
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={busy || !name.trim()}
+          >
+            {busy ? 'A criar…' : 'Criar categoria'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// Admin-only: delete a global catalogue category. Two visual modes:
+//
+//   1. Confirmation — `block` is null. The dialog asks "Apagar X?"
+//      with a Cancelar / Apagar footer.
+//   2. Blocked (409 category_in_use) — `block` carries
+//      `{ expenses_count, overrides_count }` from the server's refusal
+//      body. The dialog swaps to a read-only message listing the
+//      reference counts and tells the admin to move rows manually
+//      before retrying. The "mover tudo para ___" picker is
+//      deliberately out of scope for the Fase 5 slice (Phase 7 or
+//      later, docs/Categories.md §11.4 risk #3 — "Admin tem de
+//      resolver antes").
+//
+// The parent toggles between modes by setting `deleteCategoryBlock`
+// after a 409 response. Cancelling the dialog clears both `target`
+// and `block` so reopening lands on the fresh confirmation mode.
+function DeleteCategoryDialog({ target, block, busy, onCancel, onConfirm }) {
+  if (!target) return null;
+  const isBlocked = Boolean(block);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-sand-950/30 p-4 animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="card w-full max-w-md">
+        <h2 className="text-lg font-semibold text-sand-900">
+          {isBlocked
+            ? `Não é possível apagar "${target.name}"`
+            : `Apagar "${target.name}"?`}
+        </h2>
+        {isBlocked ? (
+          <>
+            <p className="mt-2 text-sm text-sand-600">
+              Esta categoria ainda está a ser usada e não pode ser
+              apagada do catálogo global.
+            </p>
+            <ul className="mt-3 space-y-1 text-sm text-sand-700">
+              {block.expenses_count > 0 && (
+                <li>
+                  <strong>{block.expenses_count}</strong>{' '}
+                  {block.expenses_count === 1
+                    ? 'despesa aponta'
+                    : 'despesas apontam'}{' '}
+                  para esta categoria.
+                </li>
+              )}
+              {block.overrides_count > 0 && (
+                <li>
+                  <strong>{block.overrides_count}</strong>{' '}
+                  {block.overrides_count === 1
+                    ? 'regra pessoal aponta'
+                    : 'regras pessoais apontam'}{' '}
+                  para esta categoria.
+                </li>
+              )}
+            </ul>
+            <p className="mt-4 text-xs text-sand-500">
+              Move as despesas para outra categoria e apaga as regras
+              pessoais antes de tentar de novo.
+            </p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={onCancel}
+              >
+                Fechar
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="mt-2 text-sm text-sand-600">
+              A categoria <strong>{target.name}</strong> será removida
+              do catálogo global. As entidades deixam de ser
+              associadas automaticamente em sincronizações futuras.
+            </p>
+            <p className="mt-3 text-xs text-sand-500">
+              A remoção não é retroactiva — despesas passadas mantêm a
+              categoria actual.
+            </p>
+            <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={onCancel}
+                disabled={busy}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={onConfirm}
+                disabled={busy}
+              >
+                {busy ? 'A apagar…' : 'Apagar categoria'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ApplyConfirmDialog({
   preview,
   entry,
@@ -955,6 +1207,31 @@ export default function CategoriesPage() {
   // admin is deciding. Separate from `deleteTarget` because the two
   // flows have different consequences and can coexist.
   const [deleteEntityTarget, setDeleteEntityTarget] = useState(null);
+  // ── Fase 5 admin state ──────────────────────────────────────────
+  // Create-category dialog: `createDialogOpen` toggles visibility,
+  // `createBusy` locks the form during the POST, `createError` is an
+  // inline pt-PT message rendered under the form (used for known
+  // server codes like `name_taken`). Non-admins never flip any of
+  // these — the button that opens the dialog is admin-gated.
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState(null);
+  // Inline header rename: a single busy flag is enough because the
+  // input itself is uncontrolled (we read `nameInputRef.current.value`
+  // at commit time). The input remounts when the detail section
+  // re-keys on `selectedId`, so stale drafts cannot leak between
+  // categories.
+  const [renameBusy, setRenameBusy] = useState(false);
+  const nameInputRef = useRef(null);
+  // Delete-category dialog: `deleteCategoryTarget` holds
+  // `{ id, name }` while the dialog is open; `deleteCategoryBlock`
+  // is populated with `{ expenses_count, overrides_count }` when the
+  // server answers 409 `category_in_use`, flipping the dialog into
+  // its read-only "move rows first" mode. `deleteCategoryBusy` locks
+  // the primary action while the DELETE round trip is in flight.
+  const [deleteCategoryTarget, setDeleteCategoryTarget] = useState(null);
+  const [deleteCategoryBlock, setDeleteCategoryBlock] = useState(null);
+  const [deleteCategoryBusy, setDeleteCategoryBusy] = useState(false);
 
   const refreshAll = async () => {
     setLoading(true);
@@ -1235,6 +1512,166 @@ export default function CategoriesPage() {
     }
   };
 
+  // ── Fase 5 admin handlers ──────────────────────────────────────
+  //
+  // Create a new global category. `entities` is an optional starter
+  // list — when non-empty we drop the pending-apply banner for it in
+  // the next commit (Commit 3 of the Fase 5 slice); for now a fresh
+  // category with seed entities just lands silently and refreshes
+  // the list. Known error codes translated to inline pt-PT:
+  //   name_taken        — case-insensitive collision on `name`
+  //   name_required     — UI normally blocks submit on empty names,
+  //                       so this is defence-in-depth
+  //   invalid_entities  — UI normally normalises, ditto
+  const handleCreateCategoryConfirm = async ({ name, entities }) => {
+    setCreateBusy(true);
+    setCreateError(null);
+    try {
+      const res = await api.createCategory({
+        name,
+        entities: entities.length ? entities : undefined,
+      });
+      await refreshAll();
+      // Auto-select the newly created category so the admin lands
+      // straight on its detail pane and can keep editing without
+      // scrolling the master list.
+      setSelectedId(res.data._id.toString());
+      setCreateDialogOpen(false);
+      setToast({
+        type: 'ok',
+        text: `Categoria "${res.data.name}" criada.`,
+      });
+    } catch (err) {
+      // Surface known error codes as human copy, unknown ones
+      // verbatim. The inline message stays under the form so the
+      // admin can edit and retry without closing the dialog.
+      const code = err.message;
+      if (code === 'name_taken') {
+        setCreateError(`Já existe uma categoria com o nome "${name}".`);
+      } else if (code === 'name_required') {
+        setCreateError('O nome é obrigatório.');
+      } else if (code === 'invalid_entities') {
+        setCreateError('Uma ou mais entidades são inválidas.');
+      } else {
+        setCreateError(err.message ?? 'Erro a criar categoria.');
+      }
+    } finally {
+      setCreateBusy(false);
+    }
+  };
+
+  // Inline rename commit. Triggered by blur or Enter on the detail
+  // header input; Esc restores the old name before firing blur, so
+  // this is a no-op in the "discarded" case (newName === old).
+  //
+  // The input is uncontrolled — we read `nameInputRef.current.value`
+  // instead of threading a controlled `renameDraft` through the
+  // parent. Simpler, and the detail section's `key={selectedId}`
+  // already takes care of resetting to the canonical form on
+  // category switches (React remounts the whole subtree).
+  //
+  // On failure we reset the input back to the current name so the
+  // visual state doesn't look like the rename succeeded. The toast
+  // carries the error code; `name_taken` and `name_required` are
+  // translated to pt-PT the same way the create dialog does.
+  const handleRenameCategory = async () => {
+    const input = nameInputRef.current;
+    if (!input || !selectedRow?.category_id) return;
+    const newName = input.value.trim();
+    if (!newName || newName === selectedRow.category_name) {
+      // Blank or unchanged — restore the canonical form so the
+      // input doesn't keep an empty/whitespace value.
+      input.value = selectedRow.category_name;
+      return;
+    }
+    setRenameBusy(true);
+    try {
+      await api.updateCategory(selectedRow.category_id, { name: newName });
+      await refreshAll();
+      setToast({
+        type: 'ok',
+        text: `Categoria renomeada para "${newName}".`,
+      });
+    } catch (err) {
+      input.value = selectedRow.category_name;
+      const code = err.message;
+      const msg =
+        code === 'name_taken'
+          ? `Já existe uma categoria com o nome "${newName}".`
+          : code === 'name_required'
+            ? 'O nome é obrigatório.'
+            : err.message ?? 'Erro a renomear categoria.';
+      setToast({ type: 'error', text: msg });
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
+  // Open the delete-category dialog for the currently-selected row.
+  // Guarded on admin + real category_id (not the synthetic "Sem
+  // categoria" bucket). The actual DELETE happens in
+  // `handleDeleteCategoryConfirm`; this two-step split mirrors the
+  // override / entity delete flow so the dialog can surface the 409
+  // `category_in_use` path without racing the click.
+  const handleRequestDeleteCategory = () => {
+    if (!isAdmin || !selectedRow?.category_id) return;
+    setDeleteCategoryBlock(null);
+    setDeleteCategoryTarget({
+      id: selectedRow.category_id,
+      name: selectedRow.category_name,
+    });
+  };
+
+  // Commit the category delete. The 409 path populates
+  // `deleteCategoryBlock` which re-renders the dialog in its
+  // blocked/read-only mode (counts + "move rows first" copy). Every
+  // other error lands as a toast and closes the dialog. The
+  // success path refreshes the whole page and defaults the
+  // selection back to whatever `rows[0]` is — the auto-select
+  // effect (L1047-1051 area) handles this because `selectedId`
+  // becomes stale after refreshAll removes the deleted category
+  // from the cached list.
+  const handleDeleteCategoryConfirm = async () => {
+    if (!deleteCategoryTarget) return;
+    const { id, name } = deleteCategoryTarget;
+    setDeleteCategoryBusy(true);
+    try {
+      await api.deleteCategory(id);
+      await refreshAll();
+      // Reset selection so the auto-select effect picks the heaviest
+      // remaining row. Setting to null triggers the effect branch
+      // that picks `rows[0]` on the next render.
+      setSelectedId(null);
+      setDeleteCategoryTarget(null);
+      setDeleteCategoryBlock(null);
+      setToast({ type: 'ok', text: `Categoria "${name}" apagada.` });
+    } catch (err) {
+      if (err.message === 'category_in_use' && err.body) {
+        // Flip the dialog into blocked mode. The admin reads the
+        // counts and clicks Fechar — no retry path from this state,
+        // they have to move the referencing rows first.
+        setDeleteCategoryBlock({
+          expenses_count: err.body.expenses_count ?? 0,
+          overrides_count: err.body.overrides_count ?? 0,
+        });
+      } else {
+        setToast({
+          type: 'error',
+          text: err.message ?? 'Erro a apagar categoria.',
+        });
+        setDeleteCategoryTarget(null);
+      }
+    } finally {
+      setDeleteCategoryBusy(false);
+    }
+  };
+
+  const handleCloseDeleteCategoryDialog = () => {
+    if (deleteCategoryBusy) return;
+    setDeleteCategoryTarget(null);
+    setDeleteCategoryBlock(null);
+  };
+
   // Clicking "Aplicar" on a banner opens the preview dialog for
   // *that* specific entry. `entry` is the pendingApplies row —
   // passing it in (instead of reading from a "current" ref)
@@ -1343,7 +1780,35 @@ export default function CategoriesPage() {
         <PageHeader title="Categorias" />
         <EmptyState
           title="Ainda não há categorias"
-          description="Contacta o administrador para criar o primeiro conjunto."
+          description={
+            isAdmin
+              ? 'Cria a primeira categoria para começar.'
+              : 'Contacta o administrador para criar o primeiro conjunto.'
+          }
+        >
+          {isAdmin && (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => {
+                setCreateError(null);
+                setCreateDialogOpen(true);
+              }}
+            >
+              + Criar categoria
+            </button>
+          )}
+        </EmptyState>
+        <CreateCategoryDialog
+          open={createDialogOpen}
+          busy={createBusy}
+          error={createError}
+          onCancel={() => {
+            if (createBusy) return;
+            setCreateDialogOpen(false);
+            setCreateError(null);
+          }}
+          onConfirm={handleCreateCategoryConfirm}
         />
       </div>
     );
@@ -1383,13 +1848,29 @@ export default function CategoriesPage() {
       <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
         {/* Left column — list */}
         <aside className="overflow-hidden rounded-2xl border border-sand-200 bg-white">
-          <header className="flex items-center justify-between border-b border-sand-100 px-4 py-3">
+          <header className="flex items-center justify-between gap-2 border-b border-sand-100 px-4 py-3">
             <span className="text-xs font-medium uppercase tracking-wide text-sand-400">
               Categorias
             </span>
-            <span className="text-xs text-sand-500">
-              {formatEUR(grandTotal)}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-sand-500">
+                {formatEUR(grandTotal)}
+              </span>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreateError(null);
+                    setCreateDialogOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg bg-curve-50 px-2 py-1 text-xs font-medium text-curve-700 hover:bg-curve-100"
+                  title="Criar nova categoria"
+                >
+                  <PlusIcon className="h-3.5 w-3.5" />
+                  Categoria
+                </button>
+              )}
+            </div>
           </header>
           <div className="max-h-[70vh] overflow-y-auto">
             {rows.map((row, i) => (
@@ -1418,10 +1899,47 @@ export default function CategoriesPage() {
                   className="h-3 w-3 rounded-full"
                   style={{ backgroundColor: swatchColor(selectedRow.category_id) }}
                 />
-                <h2 className="text-xl font-semibold text-sand-900">
-                  {selectedRow.category_name}
-                </h2>
+                {isAdmin && selectedRow.category_id ? (
+                  // Uncontrolled — the ref reads the canonical value at
+                  // commit time and the `<section key={selectedId}>`
+                  // wrapper remounts the whole subtree on category
+                  // switches, so a stale draft can't leak across rows.
+                  // Enter commits via blur; Escape restores the
+                  // original name and blurs.
+                  <input
+                    ref={nameInputRef}
+                    defaultValue={selectedRow.category_name}
+                    onBlur={handleRenameCategory}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                      } else if (e.key === 'Escape') {
+                        e.currentTarget.value = selectedRow.category_name;
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    disabled={renameBusy}
+                    aria-label="Nome da categoria"
+                    className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-xl font-semibold text-sand-900 hover:border-sand-200 focus:border-curve-300 focus:bg-white focus:outline-none"
+                  />
+                ) : (
+                  <h2 className="text-xl font-semibold text-sand-900">
+                    {selectedRow.category_name}
+                  </h2>
+                )}
                 <DeltaBadge delta={selectedRow.delta} />
+                {isAdmin && selectedRow.category_id && (
+                  <button
+                    type="button"
+                    onClick={handleRequestDeleteCategory}
+                    disabled={renameBusy || deleteCategoryBusy}
+                    className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
+                    title="Apagar esta categoria do catálogo global"
+                  >
+                    Apagar
+                  </button>
+                )}
               </div>
 
               {/* KPI strip */}
@@ -1624,6 +2142,26 @@ export default function CategoriesPage() {
         }}
         onConfirm={handleDeleteGlobalEntityConfirm}
         busy={globalEntityBusy}
+      />
+
+      <CreateCategoryDialog
+        open={createDialogOpen}
+        busy={createBusy}
+        error={createError}
+        onCancel={() => {
+          if (createBusy) return;
+          setCreateDialogOpen(false);
+          setCreateError(null);
+        }}
+        onConfirm={handleCreateCategoryConfirm}
+      />
+
+      <DeleteCategoryDialog
+        target={deleteCategoryTarget}
+        block={deleteCategoryBlock}
+        busy={deleteCategoryBusy}
+        onCancel={handleCloseDeleteCategoryDialog}
+        onConfirm={handleDeleteCategoryConfirm}
       />
     </div>
   );
