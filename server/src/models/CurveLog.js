@@ -14,6 +14,25 @@ const curveLogSchema = new mongoose.Schema(
     // from real syncs. Dry runs still write CurveLog entries for visibility, but
     // the audit UI should filter them out of normal views by default.
     dry_run: { type: Boolean, default: false },
+    // Structured mirror of the "uncategorised" signal that the
+    // orchestrator also writes as the literal string
+    // `error_detail = "uncategorised"` on sync `ok` rows where no
+    // tier matched (see services/syncOrchestrator.js ::
+    // formatResolutionDetail). Having a dedicated indexed boolean
+    // — rather than relying on a string-equality check over
+    // error_detail — lets downstream consumers answer "how many
+    // uncategorised this cycle?" with a covered count query
+    // instead of a full-collection scan, and keeps the filter path
+    // forward-compatible if we ever change the free-text detail
+    // wording (the boolean stays stable).
+    //
+    // Only ever true on `status: 'ok'` sync rows. All other rows
+    // (duplicates, errors, parse_errors, audit entries) leave it
+    // false by default. The string in error_detail is the source of
+    // truth for the /curve/logs pill renderer (§13.5); this field is
+    // the source of truth for the dashboard stat card + filter
+    // endpoint (§11.3 Fase 7).
+    uncategorised: { type: Boolean, default: false },
     // Audit logging fields (MU-5). When `action` is set, the entry represents
     // a security/admin event rather than a sync result.
     action: { type: String, enum: [
@@ -136,5 +155,17 @@ const curveLogSchema = new mongoose.Schema(
 
 // TTL index: auto-delete logs older than 90 days
 curveLogSchema.index({ created_at: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
+
+// Compound index for the "uncategorised this cycle" stat query
+// (docs/Categories.md §11.3 Fase 7). The dashboard card and the
+// /curve/logs filter both hit `{ user_id, uncategorised: true,
+// created_at: {$gte: cycleStart} }` — user + flag + range — so a
+// compound on the same three fields makes it covered. Partial
+// filter so only the ~5-10% of rows with the flag set occupy
+// space; the false/undefined rows stay out of the index.
+curveLogSchema.index(
+  { user_id: 1, uncategorised: 1, created_at: -1 },
+  { partialFilterExpression: { uncategorised: true } },
+);
 
 export default mongoose.model('CurveLog', curveLogSchema);

@@ -291,17 +291,28 @@ router.post('/test-connection', async (req, res) => {
 });
 
 // GET /api/curve/logs
-// Optional query: ?type=audit  → only audit/security events (action != null)
-//                 ?type=sync   → only sync events (action == null)
-//                 (omit)       → all entries
+// Optional query: ?type=audit          → only audit/security events (action != null)
+//                 ?type=sync           → only sync events (action == null)
+//                 ?uncategorised=true  → only ok sync rows with no tier match
+//                                        (docs/Categories.md §11.3 Fase 7). Hits
+//                                        the partial compound index on
+//                                        `{user_id, uncategorised, created_at}`
+//                                        so the count is O(matches), not
+//                                        O(user's logs).
+//                 (omit)               → all entries
 router.get('/logs', async (req, res) => {
   try {
-    const { page = 1, limit = 30, type } = req.query;
+    const { page = 1, limit = 30, type, uncategorised } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
     const logFilter = { user_id: req.userId };
     if (type === 'audit') logFilter.action = { $ne: null };
     else if (type === 'sync') logFilter.action = null;
+    // `?uncategorised=true` is an additive filter — it composes with
+    // `?type=sync` (the implied bucket for these rows) but the client
+    // can omit `type` and the server still restricts to sync rows
+    // because only sync rows ever carry the flag.
+    if (uncategorised === 'true') logFilter.uncategorised = true;
     const [data, total] = await Promise.all([
       CurveLog.find(logFilter)
         .sort('-created_at')

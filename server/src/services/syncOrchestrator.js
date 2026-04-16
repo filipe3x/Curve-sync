@@ -401,6 +401,12 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         resolverContext,
       );
       const resolutionDetail = formatResolutionDetail(source, category_name);
+      // Structured mirror of the "no tier matched" state for the
+      // dashboard stat card + /curve/logs filter (§11.3 Fase 7). The
+      // free-text `resolutionDetail` already carries the same signal
+      // ("uncategorised"), but the boolean is indexable and survives
+      // future renaming of the detail string.
+      const isUncategorised = source === null;
 
       // ---- 3. Dry run: check-only path, no writes ----
       if (dryRun) {
@@ -441,6 +447,7 @@ export async function syncEmails({ config, reader, dryRun = false }) {
             amount: parsed.amount,
             digest: parsed.digest,
             error_detail: resolutionDetail,
+            uncategorised: isUncategorised,
           });
         }
         consecutiveParseErrors = 0;
@@ -512,6 +519,7 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         digest: parsed.digest,
         expense_id: expenseDoc._id,
         error_detail: resolutionDetail,
+        uncategorised: isUncategorised,
       });
       seenUids.push(uid);
     }
@@ -641,6 +649,7 @@ async function writeLog(entry) {
     digest,
     expense_id,
     error_detail,
+    uncategorised,
   } = entry;
   try {
     await CurveLog.create({
@@ -653,6 +662,7 @@ async function writeLog(entry) {
       expense_id,
       error_detail,
       dry_run: Boolean(dryRun),
+      uncategorised: Boolean(uncategorised),
     });
   } catch (e) {
     // CurveLog write failure is bad but non-fatal — we still want the
