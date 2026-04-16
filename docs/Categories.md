@@ -2691,13 +2691,25 @@ toca na relaxação de `expenses`.
   `error_detail`, e o `ResolutionPill` em `curveLogsUtils.js` +
   `CurveLogsPage.jsx` mostra a pílula colorida no `/curve/logs`
   (§10.5, §13.5).
-- Flag `uncategorised: true` nos logs para o filtro do
-  `/curve/logs`. **Ainda não.** A string-match em
-  `error_detail = "uncategorised"` já permite filtrar ad-hoc —
-  o campo dedicado indexado só vale a pena quando ligarmos a
-  stat card do dashboard abaixo.
-- Métricas no dashboard: "N overrides activos" como stat card
-  opcional.
+- ~~Flag `uncategorised: true` nos logs para o filtro do
+  `/curve/logs`.~~ **Feito.** `CurveLog.uncategorised` (boolean)
+  escrito pelo orchestrator em paralelo com o `error_detail`,
+  com índice parcial composto
+  `{ user_id: 1, uncategorised: 1, created_at: -1 }` (filtro
+  parcial `uncategorised: true`) para count queries sub-ms.
+  `GET /api/curve/logs?uncategorised=true` compõe com
+  `?type=sync`, e o `/curve/logs` ganhou a tab **"Sem
+  categoria"** deep-linkável via `?tab=uncategorised` com empty
+  state celebratório quando a lista está vazia.
+- ~~Métricas no dashboard: stat card "Sem categoria" do ciclo
+  actual.~~ **Feito.** `GET /api/curve/stats/uncategorised`
+  devolve `{ count, cycle: { start, end } }` usando o índice
+  parcial + `cycleBoundsFor(new Date())` partilhado com
+  `/api/categories/stats` via `services/cycle.js`. O
+  `DashboardPage` substituiu o placeholder "Emails processados"
+  por uma StatCard interactiva, animada com `useCountUp`
+  (convenção §9.8), que deep-linka para
+  `/curve/logs?tab=uncategorised`.
 - Seed script (opcional) de entidades comuns portuguesas
   (Continente, Lidl, Pingo Doce, Auchan, Mercadona, Galp, BP,
   Repsol, MBWay, Via Verde) no catálogo global — acelera a

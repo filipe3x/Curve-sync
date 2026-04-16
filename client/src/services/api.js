@@ -420,5 +420,12 @@ export const getOAuthStatus = () => request('/curve/oauth/status');
 export const getCurveLogs = (params) =>
   request(`/curve/logs?${new URLSearchParams(params)}`);
 
+// Count of "Sem categoria" sync rows in the current day-22 cycle —
+// feeds the dashboard stat card that deep-links to
+// `/curve/logs?tab=uncategorised`. See docs/Categories.md §10.5.
+// Response: `{ count, cycle: { start, end } }` (YYYY-MM-DD labels).
+export const getUncategorisedStats = () =>
+  request('/curve/stats/uncategorised');
+
 // Autocomplete
 export const autocomplete = (field) => request(`/autocomplete/${field}`);

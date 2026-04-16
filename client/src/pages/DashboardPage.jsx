@@ -6,6 +6,7 @@ import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
+import { useCountUp } from '../hooks/useCountUp';
 import * as api from '../services/api';
 
 // Per-entry auto-dismiss window for the undo banner. Matches the
@@ -52,6 +53,13 @@ export default function DashboardPage() {
   const [error, setError] = useState(null);
   const [syncStatus, setSyncStatus] = useState(null);
   const [oauthStatus, setOauthStatus] = useState(null);
+  // "Sem categoria" count over the current day-22 cycle. Backs the
+  // dashboard stat card that deep-links to /curve/logs?tab=uncategorised
+  // — see docs/Categories.md §10.5 / §11.3 Fase 7. `null` while
+  // loading; a failed fetch falls through to `null` and the card
+  // renders `—` the same way the other placeholders do, so the
+  // dashboard never blocks on this endpoint.
+  const [uncategorisedCount, setUncategorisedCount] = useState(null);
   // Category catalogue + popover state for the quick-edit chip on the
   // "Despesas recentes" table. Mirrors ExpensesPage so the same
   // component handles both entry points from docs/Categories.md §12.
@@ -125,6 +133,13 @@ export default function DashboardPage() {
         setIconByCategory(new Map(entries));
       })
       .catch(() => setIconByCategory(new Map()));
+
+    // Uncategorised count for the current day-22 cycle. Failures are
+    // silent — the card just stays on `—`.
+    api
+      .getUncategorisedStats()
+      .then((res) => setUncategorisedCount(res?.count ?? null))
+      .catch(() => setUncategorisedCount(null));
   }, []);
 
   // ─── Undo-banner plumbing ───────────────────────────────────────
@@ -310,6 +325,14 @@ export default function DashboardPage() {
       } catch {
         /* best-effort — the banner will catch up on next mount */
       }
+      // Re-pull the uncategorised count too — a successful sync may
+      // have added new "Sem categoria" rows (or the user re-categorised
+      // them via the popover, in which case the count should drop).
+      // Silent on failure — the card keeps the stale number.
+      api
+        .getUncategorisedStats()
+        .then((res) => setUncategorisedCount(res?.count ?? null))
+        .catch(() => {});
       // Keep the message visible but slightly longer on success so
       // the user can read it. Error messages stay until the next
       // click because dismissing them silently would just recreate
@@ -321,6 +344,13 @@ export default function DashboardPage() {
   };
 
   const showReauth = needsReauth({ syncStatus, oauthStatus });
+
+  // KPI-strip convention per docs/Categories.md §9.8: tween numeric
+  // stats from 0 → target on first paint so the dashboard feels alive
+  // rather than teleporting values in. Passing 0 while loading keeps
+  // the tween target deterministic; the card itself shows `—` until
+  // the fetch resolves, so the user never sees a spurious "0".
+  const uncategorisedDisplay = useCountUp(uncategorisedCount ?? 0);
 
   return (
     <>
@@ -401,10 +431,29 @@ export default function DashboardPage() {
           value={stats?.savings_score != null ? stats.savings_score : '—'}
           accent
         />
-        <StatCard
-          label="Emails processados"
-          value={stats?.emails_processed ?? '—'}
-        />
+        {/*
+          "Sem categoria" card — the one interactive stat on the
+          dashboard. Wrapping StatCard in a Link rather than teaching
+          StatCard about href keeps the component dumb (it's used in
+          four other places, none of which should light up on hover).
+          Deep-links to /curve/logs with the tab param so the user
+          lands directly on the uncategorised bucket, scoped to the
+          current day-22 cycle by the server.
+         */}
+        <Link
+          to="/curve/logs?tab=uncategorised"
+          className="block rounded-2xl transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+        >
+          <StatCard
+            label="Sem categoria"
+            value={
+              uncategorisedCount == null
+                ? '—'
+                : Math.round(uncategorisedDisplay).toLocaleString('pt-PT')
+            }
+            sub="ciclo actual"
+          />
+        </Link>
         <StatCard
           label="Último sync"
           value={stats?.last_sync ?? '—'}
