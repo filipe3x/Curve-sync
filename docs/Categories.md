@@ -2079,6 +2079,62 @@ management screen passa-a, mas os outros consumers da API
 (`ExpensesPage`, `DashboardPage`, `CategoryPickerPopover`)
 ignoram-na e ficam no payload barato `{ id, name, icon, entities }`.
 
+### 9.5.4 Formulário "Nova entidade" — autocomplete admin (Catálogo global)
+
+Contraparte do §9.5.1 no painel do catálogo global, visível só
+para admins. O input `"Nova entidade para <Categoria>…"` ganha o
+mesmo dropdown de sugestões que "As minhas regras" — o objectivo
+é que o admin não tenha de ir pesquisar o nome exacto da entidade
+que lhe apareceu num extracto: escreve um pedaço, pica, entra.
+
+**Fonte das sugestões.** Reutiliza o mesmo
+`GET /api/autocomplete/entity` já carregado no `refreshAll()` —
+zero round-trips extra. Recency-first, lista única passada por
+props (`entitySuggestions`) para o componente
+`AddGlobalEntitiesForm`.
+
+**Filtro "já catalogada".** O cliente constrói um
+`Set<normalized>` (`allGlobalEntityNorms`) com a forma
+normalizada de **todas** as `Category.entities[]` do catálogo
+global (todas as categorias, não só a seleccionada) e poda essas
+entradas antes de o dropdown abrir. A chave é exactamente a que
+o servidor usa em `routes/categories.js :: normaliseEntityInput`
+para decidir `409 entity_conflict`, logo uma sugestão picada
+**nunca** pode bater em conflito. Diferente do §9.5.1 onde a
+filtragem passa pelos três branches de `matches()`: aqui só
+interessa igualdade normalizada porque o catálogo global é
+uniqueness-by-norm, não matching-by-type.
+
+**Modo batch preservado.** O admin continua a poder colar "galp,
+bp, repsol" ou uma lista com quebras de linha — essa era a razão
+de existir do form original. Escrever `,` ou `\n` no input flipa
+a flag local `isBatchInput` e **esconde o dropdown**, para que a
+autocomplete não distraia mid-paste. Sem separadores, o input
+comporta-se como o de §9.5.1.
+
+**Interacção.**
+
+- **Focus/typing** abre o dropdown (excepto em batch mode);
+  empty input mostra os 8 mais recentes; input com texto filtra
+  via `includes(normalized)`; cap de 8.
+- **↑/↓** + **Enter** + **Esc** idem §9.5.1 (mesmo handler).
+- **Click no rato** usa `onMouseDown` com `preventDefault` para
+  disparar antes do blur do input, mesma técnica do §9.5.1.
+- **Click-to-create.** Picar uma sugestão dispara
+  `onSubmit([entity])` — um batch de um elemento — que cai no
+  mesmo `handleAddGlobalEntities` do form livre. O apply-to-all
+  (`kind: 'admin'`) que seria empilhado num add manual **também
+  acontece aqui**: a lógica é a jusante, o ponto de entrada não
+  distingue click-pick de type-and-submit.
+- **Erros inline.** `entity_conflict`, `invalid_entities` e
+  `category_not_found` são mapeados pt-PT sob o form,
+  preservando o draft para retry (tal como o submit livre).
+
+**Degradation graceful.** `entitySuggestions = []` ou
+`existingGlobalNorms = null` caem silenciosamente para
+"sem dropdown" — o input continua a funcionar em free-form +
+modo batch sem regressão face à forma pre-autocomplete.
+
 ### 9.6 Painel de despesas recentes (tab alternativa)
 
 Tabela compacta com as últimas 10 despesas da categoria
