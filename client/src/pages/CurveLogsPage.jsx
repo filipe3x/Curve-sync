@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import { ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
@@ -66,7 +67,15 @@ const RESOLUTION_LABEL = {
 };
 
 export default function CurveLogsPage() {
-  const [tab, setTab] = useState('all');
+  // Deep-linkable tab state — `/curve/logs?tab=uncategorised` lands
+  // directly on the filtered view, used by the dashboard's
+  // "Sem categoria" stat card and by any sharable URL. Falls back to
+  // 'all' when the query is absent or names an unknown tab.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = TABS.some((t) => t.id === searchParams.get('tab'))
+    ? searchParams.get('tab')
+    : 'all';
+  const [tab, setTab] = useState(initialTab);
   const [logs, setLogs] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -106,6 +115,16 @@ export default function CurveLogsPage() {
             onClick={() => {
               setTab(t.id);
               setPage(1);
+              // Keep the URL in sync so the tab is sharable and so a
+              // browser-back from /categories lands back on the same
+              // filter. Omit `?tab=all` to keep URLs clean for the
+              // default view.
+              if (t.id === 'all') {
+                searchParams.delete('tab');
+              } else {
+                searchParams.set('tab', t.id);
+              }
+              setSearchParams(searchParams, { replace: true });
             }}
             className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition-colors ${
               tab === t.id
