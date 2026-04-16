@@ -111,7 +111,12 @@ function formatEUR(value) {
 // raw string if the input doesn't parse.
 function prettyDate(iso) {
   if (!iso) return '';
-  const [, m, d] = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/) ?? [];
+  // `match()` returns [fullMatch, year, month, day]; skip the full
+  // match AND the year with two leading holes. A previous version
+  // skipped only one, which silently put the year into `m` and the
+  // month into `d` — the cycle subtitle rendered as "3 – 4" instead
+  // of "22 Mar – 21 Abr".
+  const [, , m, d] = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/) ?? [];
   if (!d) return iso;
   const months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
   return `${Number(d)} ${months[Number(m) - 1] ?? ''}`.trim();
