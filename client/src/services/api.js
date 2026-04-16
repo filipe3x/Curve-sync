@@ -331,6 +331,45 @@ export const applyCategoryOverride = (id, { dryRun = false } = {}) =>
     timeoutMs: 30_000,
   });
 
+// ─── Category icons (Curve-Sync-owned mapping) ───────────────────────
+//
+// Backed by `curve_category_icons` — our own collection, completely
+// independent from the Paperclip `icon_*` fields on the shared
+// `categories` docs (which we deliberately never touch, see
+// server/src/models/CategoryIcon.js for the rationale). Keyed by
+// `category_id`, values are PascalCase Lucide component names the
+// client renders via `components/common/CategoryIcon.jsx`.
+//
+// Read is global (any authenticated user); writes are admin-only
+// (server enforces via requireAdmin, client renders the buttons
+// conditionally for UX). The three consumers of this data today:
+//   - CategoryPickerPopover   — glyph inside each tile
+//   - CreateCategoryDialog    — icon selection at creation
+//   - CategoriesPage          — list rows + detail header
+
+// GET /api/category-icons — full mapping as a flat array. At MVP
+// scale the payload is sub-kB, fetched once per page mount and
+// kept in a Map keyed by category_id.
+export const getCategoryIcons = () => request('/category-icons');
+
+// PUT /api/category-icons/:id — upsert. Admin-only (403
+// `admin_required` for regular users). 404 on invalid/missing
+// category; 400 `invalid_icon_name` if the name is outside the
+// server's whitelist (keep the client registry aligned with
+// `server/src/services/iconRegistry.js`). Response:
+// `{ data: { category_id, icon_name } }`.
+export const setCategoryIcon = (categoryId, iconName) =>
+  request(`/category-icons/${categoryId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ icon_name: iconName }),
+  });
+
+// DELETE /api/category-icons/:id — clear. Admin-only. Idempotent:
+// returns 204 whether or not an icon was actually stored. Short-
+// circuits through the 204 branch in `request()` and returns null.
+export const clearCategoryIcon = (categoryId) =>
+  request(`/category-icons/${categoryId}`, { method: 'DELETE' });
+
 // Curve Config
 export const getCurveConfig = () => request('/curve/config');
 
