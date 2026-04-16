@@ -2117,6 +2117,17 @@ export default function CategoriesPage() {
             : `${entities.length} entidades adicionadas.`,
       });
 
+      // Re-fetch categories with match counts so the new entries render
+      // their "match c/ N despesas" subtitle immediately. The optimistic
+      // update above puts the row in the list instantly (entities array
+      // patched) but the server's add endpoint does NOT return per-entity
+      // match counts — those come from the `with_match_counts=true`
+      // variant fetched inside `refreshAll`. Without this, the new row
+      // sits with a blank subtitle until the next organic refresh
+      // (page navigation, apply-to-all, etc.) and the user sees a stale
+      // "global" without the count.
+      await refreshAll();
+
       // Dry-run apply-to-all so the banner only appears when there's
       // something to actually apply. `matched === 0` is the common
       // "brand new category, no historical expenses yet" case — the
