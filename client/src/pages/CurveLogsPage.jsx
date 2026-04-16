@@ -7,10 +7,19 @@ import { describeLog, groupSyncBatches, parseResolutionDetail } from './curveLog
 
 const PER_PAGE = 30;
 
+// The `param` shape is open: `type` still drives the sync/audit split,
+// and individual tabs can add extra query params (e.g. `uncategorised`)
+// that compose server-side. Keeping each tab declarative means the
+// fetch layer stays a single URLSearchParams expansion.
 const TABS = [
-  { id: 'all',   label: 'Tudo',           param: undefined },
-  { id: 'sync',  label: 'Sincronizações', param: 'sync' },
-  { id: 'audit', label: 'Auditoria',      param: 'audit' },
+  { id: 'all',           label: 'Tudo',           params: {} },
+  { id: 'sync',          label: 'Sincronizações', params: { type: 'sync' } },
+  { id: 'audit',         label: 'Auditoria',      params: { type: 'audit' } },
+  // "Sem categoria" — filtered view of sync `ok` rows where
+  // `resolveCategoryDetailed` returned `source: null` (docs/Categories.md
+  // §11.3 Fase 7). Hits the partial compound index added in the model
+  // for sub-ms counts even at year-scale log volumes.
+  { id: 'uncategorised', label: 'Sem categoria',  params: { uncategorised: 'true' } },
 ];
 
 const TYPE_BADGE = {
@@ -65,9 +74,11 @@ export default function CurveLogsPage() {
 
   useEffect(() => {
     setLoading(true);
-    const params = { page, limit: PER_PAGE };
     const tabDef = TABS.find((t) => t.id === tab);
-    if (tabDef?.param) params.type = tabDef.param;
+    // Spread tab-specific params (type, uncategorised, ...) into the
+    // base page/limit so a tab can contribute any filter without the
+    // effect having to know which keys exist.
+    const params = { page, limit: PER_PAGE, ...(tabDef?.params ?? {}) };
     api
       .getCurveLogs(params)
       .then((res) => {
@@ -112,10 +123,23 @@ export default function CurveLogsPage() {
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-curve-300 border-t-curve-700" />
         </div>
       ) : logs.length === 0 ? (
-        <EmptyState
-          title="Sem logs"
-          description="Os logs aparecerão após a primeira sincronização."
-        />
+        // Tab-aware empty state — the generic "Sem logs" copy is right
+        // for Tudo / Sincronizações / Auditoria, but lands wrong on
+        // the uncategorised tab where "empty" is the success state
+        // (everything got classified). The celebratory variant nudges
+        // the user toward `/categories` in case they want to see *why*
+        // everything matched.
+        tab === 'uncategorised' ? (
+          <EmptyState
+            title="Tudo categorizado"
+            description="Não há despesas sem categoria — todas as sincronizações recentes tocaram uma regra pessoal ou o catálogo global."
+          />
+        ) : (
+          <EmptyState
+            title="Sem logs"
+            description="Os logs aparecerão após a primeira sincronização."
+          />
+        )
       ) : (
         <div className="animate-fade-in overflow-hidden rounded-2xl border border-sand-200 bg-white">
           <table className="w-full text-sm">
