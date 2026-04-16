@@ -242,7 +242,7 @@ export default function CategoryPickerPopover({
                 style={{ animationDelay: `${i * 30}ms` }}
               >
                 <span
-                  className={`flex h-6 w-6 items-center justify-center rounded-full ${
+                  className={`flex h-7 w-7 items-center justify-center rounded-full ${
                     isCurrent
                       ? 'bg-curve-500 text-white'
                       : 'bg-sand-200 text-sand-700'
@@ -251,7 +251,7 @@ export default function CategoryPickerPopover({
                 >
                   <CategoryIcon
                     name={iconByCategory?.get(id) ?? null}
-                    className="h-3.5 w-3.5"
+                    className="h-4 w-4"
                   />
                 </span>
                 <span className="line-clamp-2 text-[11px] font-medium leading-tight text-sand-900">
