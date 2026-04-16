@@ -864,38 +864,54 @@ function AddGlobalEntitiesForm({
             autoComplete="off"
             aria-label="Adicionar entidade ao catálogo global"
             role="combobox"
-            aria-expanded={open && filteredSuggestions.length > 0}
+            aria-expanded={open && !isBatchInput}
             aria-autocomplete="list"
             aria-controls="global-entity-suggestions"
           />
-          {open && filteredSuggestions.length > 0 && (
+          {open && !isBatchInput && (
             <ul
               id="global-entity-suggestions"
               role="listbox"
               className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-xl border border-sand-200 bg-white py-1 shadow-lg animate-fade-in"
             >
-              {filteredSuggestions.map((entity, i) => {
-                const isActive = i === highlightIdx;
-                return (
-                  <li
-                    key={entity}
-                    role="option"
-                    aria-selected={isActive}
-                    onMouseDown={(ev) => {
-                      ev.preventDefault();
-                      pickSuggestion(entity);
-                    }}
-                    onMouseEnter={() => setHighlightIdx(i)}
-                    className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
-                      isActive
-                        ? 'bg-curve-50 text-curve-800'
-                        : 'text-sand-800 hover:bg-sand-50'
-                    }`}
-                  >
-                    {entity}
-                  </li>
-                );
-              })}
+              {filteredSuggestions.length === 0 ? (
+                <li
+                  role="option"
+                  aria-disabled="true"
+                  className="cursor-default px-3 py-2 text-xs text-sand-400"
+                >
+                  {entitySuggestions.length === 0
+                    ? 'Sem entidades nas tuas despesas ainda.'
+                    : availableEntities.length === 0
+                      ? 'Todas as tuas entidades já estão no catálogo global.'
+                      : text
+                        ? `Nenhuma sugestão para "${text}".`
+                        : 'Sem sugestões disponíveis.'}
+                </li>
+              ) : (
+                filteredSuggestions.map((entity, i) => {
+                  const isActive = i === highlightIdx;
+                  return (
+                    <li
+                      key={entity}
+                      role="option"
+                      aria-selected={isActive}
+                      onMouseDown={(ev) => {
+                        ev.preventDefault();
+                        pickSuggestion(entity);
+                      }}
+                      onMouseEnter={() => setHighlightIdx(i)}
+                      className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
+                        isActive
+                          ? 'bg-curve-50 text-curve-800'
+                          : 'text-sand-800 hover:bg-sand-50'
+                      }`}
+                    >
+                      {entity}
+                    </li>
+                  );
+                })
+              )}
             </ul>
           )}
         </div>

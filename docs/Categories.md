@@ -2117,7 +2117,23 @@ comporta-se como o de §9.5.1.
 - **Focus/typing** abre o dropdown (excepto em batch mode);
   empty input mostra os 8 mais recentes; input com texto filtra
   via `includes(normalized)`; cap de 8.
-- **↑/↓** + **Enter** + **Esc** idem §9.5.1 (mesmo handler).
+- **Dropdown sempre visível em foco (fora do batch mode).**
+  Diferença deliberada face ao §9.5.1: mesmo quando
+  `filteredSuggestions` vem vazio, o painel abre com uma row
+  `aria-disabled` que dá feedback ao admin. A mensagem
+  ramifica em três estados distintos — "Sem entidades nas tuas
+  despesas ainda" (nada a sugerir), "Todas as tuas entidades já
+  estão no catálogo global" (filtro apanhou tudo), "Nenhuma
+  sugestão para '<needle>'" (texto não casou nada). O estado
+  "empty results" é silencioso no §9.5.1 porque o user tem a
+  garantia de ter regras pessoais a criar; no admin flow o mesmo
+  silêncio faz parecer que a autocomplete não está ligada — daí
+  a row informativa.
+- **↑/↓** + **Enter** + **Esc** idem §9.5.1 (mesmo handler). A
+  row informativa **não é** navegável — `handleKeyDown` usa
+  `filteredSuggestions.length === 0` como short-circuit, logo
+  arrow keys no estado vazio são no-ops (sem wrap-around em cima
+  de uma row não-accionável).
 - **Click no rato** usa `onMouseDown` com `preventDefault` para
   disparar antes do blur do input, mesma técnica do §9.5.1.
 - **Click-to-create.** Picar uma sugestão dispara
@@ -2131,9 +2147,10 @@ comporta-se como o de §9.5.1.
   preservando o draft para retry (tal como o submit livre).
 
 **Degradation graceful.** `entitySuggestions = []` ou
-`existingGlobalNorms = null` caem silenciosamente para
-"sem dropdown" — o input continua a funcionar em free-form +
-modo batch sem regressão face à forma pre-autocomplete.
+`existingGlobalNorms = null` já não escondem o dropdown — em vez
+disso o admin vê a row informativa do estado apropriado. O input
+continua a funcionar em free-form + modo batch sem regressão
+face à forma pre-autocomplete.
 
 ### 9.6 Painel de despesas recentes (tab alternativa)
 
