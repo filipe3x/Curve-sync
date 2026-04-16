@@ -138,12 +138,21 @@ function pickBetter(a, b) {
  *        allowed — `userRules` comes back empty and only the global
  *        catalogue is consulted. The sync orchestrator always passes
  *        the config owner; route handlers always pass `req.userId`.
- * @returns {Promise<{userRules: Rule[], globalRules: Rule[]}>}
+ * @returns {Promise<{userRules: Rule[], globalRules: Rule[],
+ *                    categoriesById: Map<string, string>}>}
  *
  * A Rule is `{ category_id, pattern_normalized, match_type, priority,
  * created_at }`. Global rules always have `priority: 0` and
  * `match_type: 'contains'` — the `Category.entities[]` schema has no
  * way to express anything else.
+ *
+ * `categoriesById` is a `id → name` lookup built from the same
+ * `Category.find()` we already issue. It costs us nothing extra at
+ * load time and lets `resolveCategoryDetailed` (and any other caller
+ * that needs the human-readable name alongside the id) avoid a second
+ * DB round-trip per resolved expense. The keys are stringified ids so
+ * callers can look up by either ObjectId or string without first
+ * coercing.
  */
 export async function loadContext(userId) {
   // Run the two reads in parallel — they are independent and the
@@ -159,7 +168,9 @@ export async function loadContext(userId) {
   // entity string. Pre-normalise once so per-despesa matching stays
   // free of string work beyond the substring compare.
   const globalRules = [];
+  const categoriesById = new Map();
   for (const cat of categories) {
+    categoriesById.set(cat._id.toString(), cat.name);
     if (!Array.isArray(cat.entities)) continue;
     for (const entity of cat.entities) {
       const norm = normalize(entity);
@@ -185,7 +196,7 @@ export async function loadContext(userId) {
     created_at: o.created_at ?? null,
   }));
 
-  return { userRules, globalRules };
+  return { userRules, globalRules, categoriesById };
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -225,4 +236,76 @@ export function resolveCategory(raw, ctx) {
     if (matches(norm, r)) best = pickBetter(best, r);
   }
   return best?.category_id ?? null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// §5.4 / §13 — Detailed resolver (audit-aware)
+//
+// Same pipeline as `resolveCategory` but surfaces *which* tier won
+// and the human-readable category name. Built for callers that need
+// to log the classification path — currently the sync orchestrator's
+// `writeLog({ status: 'ok' })` site, which records `error_detail`
+// values like `override → Mercados`, `global → Restaurantes`, or
+// `uncategorised` so `/curve/logs` can show the resolution path
+// without a second DB lookup per row.
+//
+// Existing callers that only need the id (POST /api/expenses,
+// apply-to-all) keep using `resolveCategory` unchanged — keeping the
+// two entry points avoids forcing every site to destructure an
+// object when all they want is the id.
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve an entity string and report the matching tier.
+ *
+ * @param {string|null|undefined} raw  entity from the expense
+ * @param {{userRules: Rule[], globalRules: Rule[],
+ *          categoriesById: Map<string, string>}} ctx
+ *        from `loadContext()`
+ * @returns {{
+ *   category_id: import('mongoose').Types.ObjectId|null,
+ *   source: 'override'|'global'|null,
+ *   category_name: string|null,
+ * }}
+ *
+ * `source` is `'override'` when a personal rule won, `'global'` when
+ * a catalogue entity won, and `null` when nothing matched (in which
+ * case `category_id` and `category_name` are both `null`).
+ *
+ * `category_name` is looked up via `ctx.categoriesById`; if the
+ * winning rule points at a category that was deleted between
+ * `loadContext` and resolution (rare but possible), the name comes
+ * back `null` rather than throwing — the caller should treat it as
+ * "we know the id, we just don't have a friendly label".
+ */
+export function resolveCategoryDetailed(raw, ctx) {
+  const empty = { category_id: null, source: null, category_name: null };
+  if (!raw) return empty;
+  const norm = normalize(raw);
+  if (!norm) return empty;
+
+  // Personal tier first. Same short-circuit semantics as
+  // `resolveCategory` — global rules never get a chance once any
+  // user rule matches.
+  let best = null;
+  for (const r of ctx.userRules) {
+    if (matches(norm, r)) best = pickBetter(best, r);
+  }
+  if (best) {
+    return {
+      category_id: best.category_id,
+      source: 'override',
+      category_name: ctx.categoriesById?.get(best.category_id.toString()) ?? null,
+    };
+  }
+
+  for (const r of ctx.globalRules) {
+    if (matches(norm, r)) best = pickBetter(best, r);
+  }
+  if (!best) return empty;
+  return {
+    category_id: best.category_id,
+    source: 'global',
+    category_name: ctx.categoriesById?.get(best.category_id.toString()) ?? null,
+  };
 }
