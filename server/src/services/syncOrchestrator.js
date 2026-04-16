@@ -394,19 +394,32 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       // We use the *detailed* variant so the audit row can record the
       // resolution path (`override → <name>` / `global → <name>` /
       // `uncategorised`). The id is the only field that flows into
-      // `Expense.create`; `source` and `category_name` only feed the
+      // `Expense.create`; the tier + category name only feed the
       // `error_detail` line on the `ok` log row.
-      const { category_id, source, category_name } = resolveCategoryDetailed(
-        parsed.entity,
-        resolverContext,
+      //
+      // The tier field is destructured as `resolutionSource` — not
+      // `source` — on purpose: the outer `for await (const { uid,
+      // source } of …)` already binds `source` to the email body.
+      // A same-block `const source` would hoist into TDZ, fire
+      // "Cannot access 'source' before initialization" inside
+      // `parseEmail(source)` above, and land every email in the
+      // parse-error bucket. The rename keeps the two bindings
+      // lexically disjoint.
+      const {
+        category_id,
+        source: resolutionSource,
+        category_name,
+      } = resolveCategoryDetailed(parsed.entity, resolverContext);
+      const resolutionDetail = formatResolutionDetail(
+        resolutionSource,
+        category_name,
       );
-      const resolutionDetail = formatResolutionDetail(source, category_name);
       // Structured mirror of the "no tier matched" state for the
       // dashboard stat card + /curve/logs filter (§11.3 Fase 7). The
       // free-text `resolutionDetail` already carries the same signal
       // ("uncategorised"), but the boolean is indexable and survives
       // future renaming of the detail string.
-      const isUncategorised = source === null;
+      const isUncategorised = resolutionSource === null;
 
       // ---- 3. Dry run: check-only path, no writes ----
       if (dryRun) {
