@@ -2710,11 +2710,16 @@ toca na relaxação de `expenses`.
   por uma StatCard interactiva, animada com `useCountUp`
   (convenção §9.8), que deep-linka para
   `/curve/logs?tab=uncategorised`.
-- Seed script (opcional) de entidades comuns portuguesas
+- ~~Seed script (opcional) de entidades comuns portuguesas
   (Continente, Lidl, Pingo Doce, Auchan, Mercadona, Galp, BP,
   Repsol, MBWay, Via Verde) no catálogo global — acelera a
   experiência de onboarding sem obrigar o admin a escrever
-  tudo à mão.
+  tudo à mão.~~ **Feito.** `server/scripts/seed-categories-pt.js`
+  — aditivo, idempotente, default em dry-run (`--apply` para
+  commitar). Cobre Groceries (5), Fuel (3), Transport (1),
+  Payments (1); reusa o `normalize()` do resolver para dedup
+  e deixa em paz qualquer entity que já pertença a outra
+  categoria global (report de conflito, nunca move).
 
 ### 11.4 Riscos e mitigação
 
