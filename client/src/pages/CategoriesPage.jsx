@@ -592,8 +592,25 @@ function GlobalEntitiesList({
 
   if (!entities.length) {
     return (
-      <div className="rounded-2xl border-2 border-dashed border-sand-200 py-8 text-center text-sm text-sand-500">
-        Esta categoria ainda não tem entidades no catálogo global.
+      <div className="rounded-2xl border-2 border-dashed border-sand-200 py-8 text-center">
+        <p className="text-sm text-sand-500">
+          Esta categoria ainda não tem entidades no catálogo global.
+        </p>
+        <p className="mt-1 text-xs text-sand-400">
+          {isAdmin ? (
+            <>
+              Adiciona um padrão (e.g. <span className="font-mono">lidl</span>)
+              para catalogar automaticamente as despesas de todos os
+              utilizadores.
+            </>
+          ) : (
+            <>
+              Pede ao admin para adicionar um padrão, ou cria uma{' '}
+              <span className="font-medium text-sand-600">regra pessoal</span>{' '}
+              acima.
+            </>
+          )}
+        </p>
       </div>
     );
   }
@@ -669,6 +686,17 @@ function GlobalEntitiesList({
 // and forwarded to `onSubmit(entities)` which is expected to call
 // `api.addCategoryEntities`.
 //
+// Autocomplete parity with `OverridesList` (personal rules): when the
+// admin types a single token (no comma/newline), a dropdown shows
+// distinct expense entities that are not yet in any global category
+// — picking one (click or Enter on the highlighted row) immediately
+// submits as a single-entity batch. Typing a comma or newline flips
+// the input back into free-form batch mode and hides the dropdown,
+// preserving the original "paste several at once" flow. The filter
+// uses normalised equality against `existingGlobalNorms` — same key
+// the server uses for its conflict check, so suggestions can never
+// surface an entry that would 409.
+//
 // The 409 `entity_conflict` path renders inline under the form: the
 // parent re-throws the augmented Error (`err.body.conflicts`) so this
 // component can list the collisions ("<entity> está em <other>") and
@@ -680,10 +708,19 @@ function GlobalEntitiesList({
 // the admin can fix-and-retry without re-typing. The parent handles
 // the apply-to-all banner (pushed after a successful add, keyed off
 // `{ kind: 'admin' }` — see pendingApplies).
-function AddGlobalEntitiesForm({ categoryId, categoryName, onSubmit, busy }) {
+function AddGlobalEntitiesForm({
+  categoryId,
+  categoryName,
+  entitySuggestions = [],
+  existingGlobalNorms = null,
+  onSubmit,
+  busy,
+}) {
   const [text, setText] = useState('');
   const [conflicts, setConflicts] = useState([]);
   const [error, setError] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(-1);
 
   const parseEntities = (raw) =>
     raw
@@ -696,6 +733,89 @@ function AddGlobalEntitiesForm({ categoryId, categoryName, onSubmit, busy }) {
     if (conflicts.length) setConflicts([]);
   };
 
+  // A comma or newline in the input means "I'm typing a batch" — hide
+  // the dropdown so the admin isn't distracted mid-paste. Matches the
+  // mental model of the helper text below ("Várias de uma vez? …").
+  const isBatchInput = /[,\n]/.test(text);
+
+  // Candidate suggestions = caller's distinct expense entities MINUS
+  // anything whose normalised form already lives in some global
+  // category's `entities[]`. The check mirrors the server's 409
+  // conflict test in `routes/categories.js :: normaliseEntityInput` —
+  // filtering here means a picked suggestion can't bounce off a
+  // conflict. When `existingGlobalNorms` is null (parent didn't wire
+  // it in) the filter degrades to "no filter" rather than throwing.
+  const availableEntities = useMemo(() => {
+    if (!entitySuggestions.length) return [];
+    if (!existingGlobalNorms) return entitySuggestions;
+    return entitySuggestions.filter((e) => {
+      const norm = normalizeEntity(e);
+      return norm && !existingGlobalNorms.has(norm);
+    });
+  }, [entitySuggestions, existingGlobalNorms]);
+
+  const filteredSuggestions = useMemo(() => {
+    if (isBatchInput) return [];
+    if (!availableEntities.length) return [];
+    const needle = normalizeEntity(text);
+    if (!needle) return availableEntities.slice(0, 8);
+    const hits = [];
+    for (const e of availableEntities) {
+      const norm = normalizeEntity(e);
+      if (!norm) continue;
+      if (norm.includes(needle)) hits.push(e);
+      if (hits.length >= 8) break;
+    }
+    return hits;
+  }, [availableEntities, text, isBatchInput]);
+
+  useEffect(() => {
+    if (highlightIdx >= filteredSuggestions.length) setHighlightIdx(-1);
+  }, [filteredSuggestions, highlightIdx]);
+
+  // Single-click (or Enter on highlight) from the dropdown commits the
+  // picked entity as a one-element batch. Error mapping mirrors the
+  // free-form submit below so conflicts still render inline.
+  const pickSuggestion = async (entity) => {
+    if (busy) return;
+    setOpen(false);
+    setHighlightIdx(-1);
+    clearFeedback();
+    try {
+      await onSubmit([entity.trim()]);
+      setText('');
+    } catch (err) {
+      if (err?.message === 'entity_conflict' && err?.body?.conflicts) {
+        setConflicts(err.body.conflicts);
+      } else if (err?.message === 'invalid_entities') {
+        setError('Entidade inválida.');
+      } else if (err?.message === 'category_not_found') {
+        setError('Categoria não encontrada — recarrega a página.');
+      } else {
+        setError(err?.message ?? 'Erro a adicionar entidade.');
+      }
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (!open || filteredSuggestions.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightIdx((i) => (i + 1) % filteredSuggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightIdx((i) =>
+        i <= 0 ? filteredSuggestions.length - 1 : i - 1,
+      );
+    } else if (e.key === 'Enter' && highlightIdx >= 0) {
+      e.preventDefault();
+      pickSuggestion(filteredSuggestions[highlightIdx]);
+    } else if (e.key === 'Escape') {
+      setOpen(false);
+      setHighlightIdx(-1);
+    }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     const entities = parseEntities(text);
@@ -705,6 +825,7 @@ function AddGlobalEntitiesForm({ categoryId, categoryName, onSubmit, busy }) {
     }
     setError(null);
     setConflicts([]);
+    setOpen(false);
     try {
       await onSubmit(entities);
       setText('');
@@ -723,19 +844,61 @@ function AddGlobalEntitiesForm({ categoryId, categoryName, onSubmit, busy }) {
 
   return (
     <form onSubmit={submit} className="space-y-2">
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            clearFeedback();
-          }}
-          placeholder={`Nova entidade para ${categoryName ?? 'esta categoria'}…`}
-          className="input flex-1"
-          disabled={busy}
-          aria-label="Adicionar entidade ao catálogo global"
-        />
+      <div className="relative flex gap-2">
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setOpen(true);
+              setHighlightIdx(-1);
+              clearFeedback();
+            }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setTimeout(() => setOpen(false), 120)}
+            onKeyDown={handleKeyDown}
+            placeholder={`Nova entidade para ${categoryName ?? 'esta categoria'}…`}
+            className="input w-full"
+            disabled={busy}
+            autoComplete="off"
+            aria-label="Adicionar entidade ao catálogo global"
+            role="combobox"
+            aria-expanded={open && filteredSuggestions.length > 0}
+            aria-autocomplete="list"
+            aria-controls="global-entity-suggestions"
+          />
+          {open && filteredSuggestions.length > 0 && (
+            <ul
+              id="global-entity-suggestions"
+              role="listbox"
+              className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-xl border border-sand-200 bg-white py-1 shadow-lg animate-fade-in"
+            >
+              {filteredSuggestions.map((entity, i) => {
+                const isActive = i === highlightIdx;
+                return (
+                  <li
+                    key={entity}
+                    role="option"
+                    aria-selected={isActive}
+                    onMouseDown={(ev) => {
+                      ev.preventDefault();
+                      pickSuggestion(entity);
+                    }}
+                    onMouseEnter={() => setHighlightIdx(i)}
+                    className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
+                      isActive
+                        ? 'bg-curve-50 text-curve-800'
+                        : 'text-sand-800 hover:bg-sand-50'
+                    }`}
+                  >
+                    {entity}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
         <button
           type="submit"
           className="btn-primary"
@@ -1564,6 +1727,23 @@ export default function CategoriesPage() {
   const cycleLabel = statsCurrent?.cycle
     ? `${prettyDate(statsCurrent.cycle.start)} – ${prettyDate(statsCurrent.cycle.end)}`
     : '';
+
+  // Normalised forms of every entity already present in the global
+  // catalogue (across all categories). Feeds `AddGlobalEntitiesForm`'s
+  // autocomplete filter so suggestions never surface an entry that
+  // would 409 `entity_conflict` server-side. Keyed the same way as
+  // the server's normaliseEntityInput() check — same function (client
+  // mirror), same key space.
+  const allGlobalEntityNorms = useMemo(() => {
+    const set = new Set();
+    for (const c of categories) {
+      for (const e of c.entities ?? []) {
+        const norm = normalizeEntity(e);
+        if (norm) set.add(norm);
+      }
+    }
+    return set;
+  }, [categories]);
 
   // ── override helpers ────────────────────────────────────────────────
 
@@ -2622,6 +2802,8 @@ export default function CategoriesPage() {
                         <AddGlobalEntitiesForm
                           categoryId={selectedRow.category_id}
                           categoryName={selectedRow.category_name}
+                          entitySuggestions={entitySuggestions}
+                          existingGlobalNorms={allGlobalEntityNorms}
                           onSubmit={handleAddGlobalEntities}
                           busy={globalEntityBusy}
                         />
