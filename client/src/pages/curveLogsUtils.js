@@ -60,6 +60,13 @@ export function describeLog(log) {
       'category_deleted',
       'category_entity_added',
       'category_entity_removed',
+      // Admin icon change on `curve_category_icons` — Curve-Sync-
+      // owned collection, totally independent of the Paperclip
+      // `icon_*` metadata on the shared `categories` row (which we
+      // deliberately ignore, see server/src/models/CategoryIcon.js).
+      // Shares the Catálogo badge because from the user's view
+      // it's still catalogue admin surgery.
+      'category_icon_updated',
     ];
     const type = auth.includes(log.action)
       ? 'auth'
@@ -348,6 +355,38 @@ export function describeLog(log) {
           title: category
             ? `Entidade removida de ${category}: ${removed}`
             : `Entidade removida: ${removed}`,
+        };
+      }
+      case 'category_icon_updated': {
+        // Curve-Sync-owned icon mapping (`curve_category_icons`),
+        // independent from the shared `categories.icon_*` Paperclip
+        // metadata which we never touch. Covers both set-or-change
+        // (PUT /api/category-icons/:id) and clear (DELETE) — the
+        // server writes a sentinel `icon=none` for the clear path,
+        // so the same enum value carries both variants and we
+        // discriminate in the renderer below.
+        //
+        // Server detail: `category=<name> icon=<new|none> previous=<old|none>`
+        // Canonical pt-PT:
+        //   "Ícone de <category> alterado: <previous> → <new>"
+        //   "Ícone de <category> removido"                    (icon=none)
+        //   "Ícone de <category> definido: <new>"             (previous=none)
+        const catMatch = log.error_detail?.match(/category=(.+?)(?: icon=|$)/);
+        const iconMatch = log.error_detail?.match(/icon=(\S+)/);
+        const prevMatch = log.error_detail?.match(/previous=(\S+)/);
+        const category = catMatch ? catMatch[1] : null;
+        const icon = iconMatch ? iconMatch[1] : null;
+        const previous = prevMatch ? prevMatch[1] : null;
+        if (!category) return { type, title: 'Ícone de categoria alterado' };
+        if (icon === 'none') {
+          return { type, title: `Ícone de ${category} removido` };
+        }
+        if (previous === 'none' || previous == null) {
+          return { type, title: `Ícone de ${category} definido: ${icon}` };
+        }
+        return {
+          type,
+          title: `Ícone de ${category} alterado: ${previous} → ${icon}`,
         };
       }
       case 'admin_access_failed': {

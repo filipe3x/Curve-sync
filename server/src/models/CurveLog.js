@@ -108,6 +108,17 @@ const curveLogSchema = new mongoose.Schema(
       'category_entity_added',
       'category_entity_removed',
       'category_entity_moved',
+      // Admin icon change (curve_category_icons, Curve-Sync-owned
+      // collection — separate from the Paperclip `icon_*` fields on
+      // the shared `categories` row, which we never touch). Fires on
+      // both PUT (set/change) and DELETE (clear) — the detail
+      // discriminates via `icon=<name|none> previous=<old|none>`, so
+      // the curveLogsUtils renderer picks the right pt-PT message
+      // without needing a second enum value. §13.4 no-op
+      // suppression applies: a PUT whose new name equals the
+      // current name is silent, and a DELETE on a category that
+      // had no icon is also silent.
+      'category_icon_updated',
       // Admin-gate rejection fired by `middleware/requireAdmin.js`
       // when a non-admin hits an admin-only route (§13.2 #35,
       // renamed per §13.7 #2 to include the `failed` suffix so
