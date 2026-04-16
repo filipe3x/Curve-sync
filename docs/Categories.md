@@ -2424,32 +2424,53 @@ no success path e `CurveLog.create` via `writeLog()`.
 
 ### 10.5 Auditoria e logs
 
-O `writeLog({ status: 'ok', ... })` do path de sucesso não muda.
-O `category_id` resolvido fica no documento `Expense` e é
-linkado pelo `CurveLogsPage` através do expense, não de um
-campo novo no log. Não é preciso inventar `status: 'categorised'`
-— a informação já está acessível pela cadeia
-`curve_logs → expense → category`.
+O `writeLog({ status: 'ok', ... })` do path de sucesso **escreve
+sempre** `error_detail` com o trilho de resolução. O `category_id`
+resolvido continua a viver no documento `Expense` — o detail é
+apenas um atalho human-readable para o `/curve/logs` mostrar
+*porque é que* esta despesa caiu na categoria X sem ter de seguir
+a cadeia `curve_logs → expense → category`.
 
-Dois casos onde faz sentido adicionar detail ao log:
+Três valores possíveis, produzidos pelo
+`formatResolutionDetail(source, category_name)` no
+`services/syncOrchestrator.js`:
 
-- **Match por override (ciclo normal).** `detail: "override →
-  <category_name>"` num log `ok` facilita debug de "porque é
-  que esta despesa caiu em Coffee?". Campo opcional,
-  truncado a 120 chars pelo `truncateDetail` existente.
-- **No match (fallback `null`).** Hoje uma despesa sem match
-  fica com `category_id = null` silenciosamente. Propõe-se
-  acrescentar um flag `uncategorised: true` ao log `ok`
-  correspondente, para o `/curve/logs` conseguir filtrar e
-  mostrar "N despesas sem categoria este ciclo — adiciona uma
-  regra".
+- `override → <category_name>` — matchou uma regra pessoal.
+- `global → <category_name>` — matchou o catálogo global.
+- `uncategorised` — nenhum tier matchou, `category_id = null`.
 
-Ambos são *opcionais* para o rollout inicial — o pipeline
-funciona sem eles. O catálogo completo de `action` values novos
-que **são** obrigatórios (apply-to-all, CRUD de categorias,
-CRUD de overrides, quick-edit) está consolidado no §13.2 — este
-capítulo só cobre as anotações ao sync path já existente, não os
-eventos administrativos.
+O orchestrator chama `resolveCategoryDetailed(entity, ctx)` (ver
+§5.5) que devolve `{ category_id, source, category_name }` numa
+única pass, sem lookups adicionais — o `categoriesById: Map`
+que o `loadContext` já constrói resolve o nome em O(1).
+
+`error_detail` é reutilizado com semântica diferente consoante o
+`status` (o campo é free-text, sem enum no schema):
+
+- `ok` → trilho de classificação (acima).
+- `parse_error` / `error` → mensagem de erro humana, como antes.
+- `duplicate` → vazio (nada útil a dizer).
+
+O renderer do `/curve/logs` (§13.5) parseia o prefixo
+`override → ` / `global → ` / `uncategorised` para decidir entre
+mostrar pílula colorida vs texto cru — qualquer outro conteúdo
+em `error_detail` continua a cair no fallback mono actual, o que
+preserva a compatibilidade com rows legadas escritas antes deste
+campo existir.
+
+Um último gancho está documentado mas **não implementado** neste
+ciclo: um flag `uncategorised: true` separado no schema do
+CurveLog para o filtro `?uncategorised=true` do `/curve/logs`
+listar num clique as despesas que ninguém cobre. Hoje a mesma
+informação está acessível via `error_detail = "uncategorised"`
+como string-match, o que é suficiente para debug ad-hoc; a
+indexação dedicada fica para quando houver uma stat card
+"N despesas sem categoria" no dashboard (§11.3 Fase 7).
+
+O catálogo completo de `action` values novos (apply-to-all, CRUD
+de categorias, CRUD de overrides, quick-edit) está consolidado no
+§13.2 — este capítulo só cobre as anotações ao sync path já
+existente, não os eventos administrativos.
 
 ### 10.6 Backwards-compat e shape idêntico
 
@@ -2663,9 +2684,18 @@ toca na relaxação de `expenses`.
   read-only actual, sem tocar no backend.
 
 **Fase 7 — Polimento e observabilidade.**
-- Campo `detail: "override → <name>"` nos logs `ok` (§10.5).
+- ~~Campo `detail: "override → <name>"` nos logs `ok` (§10.5).~~
+  **Feito.** `resolveCategoryDetailed` no resolver +
+  `formatResolutionDetail` no orchestrator escrevem
+  `override → <cat>` / `global → <cat>` / `uncategorised` em
+  `error_detail`, e o `ResolutionPill` em `curveLogsUtils.js` +
+  `CurveLogsPage.jsx` mostra a pílula colorida no `/curve/logs`
+  (§10.5, §13.5).
 - Flag `uncategorised: true` nos logs para o filtro do
-  `/curve/logs`.
+  `/curve/logs`. **Ainda não.** A string-match em
+  `error_detail = "uncategorised"` já permite filtrar ad-hoc —
+  o campo dedicado indexado só vale a pena quando ligarmos a
+  stat card do dashboard abaixo.
 - Métricas no dashboard: "N overrides activos" como stat card
   opcional.
 - Seed script (opcional) de entidades comuns portuguesas
@@ -3320,6 +3350,40 @@ admin está a debugar. Extensão pequena, não bloqueante.
 com o padrão de `CURVE_LOGS.md §6.3`. As criações (`created`,
 `added`) ficam com o neutral `bg-sand-100` — o acto em si é
 benigno.
+
+**Pílula de resolução nos rows sync `ok`.** O `describeLog`
+parseia `error_detail` nos rows sync de sucesso (§10.5) com o
+helper `parseResolutionDetail(detail)` e devolve um campo
+estruturado `resolution: { source, categoryName }` a que o
+renderer atribui uma pílula `ResolutionPill` em três tons:
+
+| Source          | Classe Tailwind                       | Label pt-PT           |
+|-----------------|---------------------------------------|-----------------------|
+| `override`      | `bg-violet-50 text-violet-700`        | `Regra pessoal · <cat>` |
+| `global`        | `bg-sand-100 text-sand-600`           | `Catálogo · <cat>`    |
+| `uncategorised` | `bg-amber-50 text-amber-700`          | `Sem categoria`       |
+
+O violeta do `override` espelha o badge Catálogo do §13.2 —
+uma regra pessoal é, na prática, o catálogo do próprio user — e
+o amber do `uncategorised` reusa o tom do staging banner do
+§9.7.1 e do undo banner do §12.8, para manter a linguagem visual
+"precisa de atenção" consistente em todas as superfícies. O
+`attr title` da pílula expõe o texto cru `override → Mercados`
+para correlação em tooling externo.
+
+A pílula aparece em duas superfícies dentro do `/curve/logs`:
+
+- **`SingleRow`** (sync row isolado) — na meta line secundária,
+  junto de entity/amount/digest. Flex-wrap para não rebentar em
+  viewports estreitos.
+- **`BatchRow`** expandido (cluster de vários sync rows) — na
+  mesma linha, substituindo o dump mono que o `error_detail`
+  produzia antes. Rows com `status != 'ok'` continuam a mostrar
+  o texto cru em mono (mensagem de erro real).
+
+Rows antigas escritas antes deste campo existir devolvem
+`parseResolutionDetail() === null` e caem silenciosamente no
+path anterior — a feature é aditiva.
 
 ### 13.6 Retenção — consistente com `CURVE_LOGS.md §7`
 
