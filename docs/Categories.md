@@ -2458,14 +2458,24 @@ em `error_detail` continua a cair no fallback mono actual, o que
 preserva a compatibilidade com rows legadas escritas antes deste
 campo existir.
 
-Um último gancho está documentado mas **não implementado** neste
-ciclo: um flag `uncategorised: true` separado no schema do
-CurveLog para o filtro `?uncategorised=true` do `/curve/logs`
-listar num clique as despesas que ninguém cobre. Hoje a mesma
-informação está acessível via `error_detail = "uncategorised"`
-como string-match, o que é suficiente para debug ad-hoc; a
-indexação dedicada fica para quando houver uma stat card
-"N despesas sem categoria" no dashboard (§11.3 Fase 7).
+Um último gancho ficou documentado nesta mesma secção e foi
+implementado logo a seguir: o flag `uncategorised: true` no schema
+do `CurveLog`, escrito em paralelo com o `error_detail = "uncategorised"`
+pelo orchestrator. A duplicação é intencional — o detail é
+human-readable para a pílula (§13.5), o boolean é indexado (partial
+compound index `{ user_id: 1, uncategorised: 1, created_at: -1 }`
+filtrado em `uncategorised: true`) para count queries sub-ms que
+alimentam:
+
+- `GET /api/curve/logs?uncategorised=true` — tab deep-linkável
+  **"Sem categoria"** no `/curve/logs` (`?tab=uncategorised`),
+  compõe com `?type=sync` implícito (só rows sync carregam o flag).
+- `GET /api/curve/stats/uncategorised` — `{ count, cycle: { start,
+  end } }` sobre o ciclo day-22 actual via `cycleBoundsFor(new
+  Date())` partilhado com `/api/categories/stats` em
+  `services/cycle.js`. Alimenta a StatCard **"Sem categoria"** do
+  dashboard, que substituiu o placeholder "Emails processados" e
+  deep-linka para `/curve/logs?tab=uncategorised`.
 
 O catálogo completo de `action` values novos (apply-to-all, CRUD
 de categorias, CRUD de overrides, quick-edit) está consolidado no
@@ -2785,6 +2795,44 @@ Embers sem exigir nenhuma alteração ao lado Embers — e abre a
 porta às melhorias opcionais (detalhe nos logs, métricas no
 dashboard, undo de apply-to-all) que ficaram conscientemente
 fora do MVP.
+
+### 11.7 Seed de entidades PT
+
+`server/scripts/seed-categories-pt.js` popula o catálogo global
+com os retalhistas que um utilizador Curve típico em Portugal vê
+no primeiro mês de extracto. Quatro categorias e dez entidades —
+Groceries (Continente, Lidl, Pingo Doce, Auchan, Mercadona),
+Fuel (Galp, BP, Repsol), Transport (Via Verde) e Payments
+(MBWay) — o suficiente para a primeira sincronização não parecer
+vazia sem obrigar o admin a digitar à mão. Uso:
+
+```bash
+cd server && node scripts/seed-categories-pt.js            # dry-run
+cd server && node scripts/seed-categories-pt.js --apply    # commit
+```
+
+Garantias, todas alinhadas com o resto do §4 e §8:
+
+- **Aditivo e idempotente.** Categorias ausentes criam-se com
+  `Category.create({ name, entities })`; categorias existentes
+  (match case-insensitive em `name`) recebem as entidades em falta
+  via `$addToSet`. Entidades já presentes são silenciosamente
+  ignoradas — o dedup key é o `normalize()` do resolver (§5.2),
+  mesmo contrato que a rota admin `POST /categories/:id/entities`.
+- **Cross-category conflicts report-not-move.** Se uma entidade do
+  seed já vive noutra categoria global, é reportada no briefing e
+  deixada em paz — o invariante de unicidade (§4.1) ganha sobre
+  o seed. O admin pode mover à mão se quiser.
+- **Dry-run por defeito.** O briefing imprime antes de qualquer
+  write; só com `--apply` o script commita. Mantém-se o estilo
+  dos outros dev helpers em `server/scripts/` (`reset-seen.js`,
+  `cleanup-sync.js`).
+- **Campos Embers-compatíveis.** Só `name` e `entities` — os
+  campos Paperclip (`icon_*`) nunca são tocados, em linha com a
+  regra "never modify the schema" do `CLAUDE.md`. Ícones vivem
+  na colecção paralela `curve_category_icons` (Curve-Sync-owned,
+  ver `server/src/models/CategoryIcon.js`) e esse mapping é
+  separado — o seed não o preenche, por agora.
 
 ## 12. Quick edit inline nas tabelas de despesas
 
@@ -3401,6 +3449,18 @@ A pílula aparece em duas superfícies dentro do `/curve/logs`:
 Rows antigas escritas antes deste campo existir devolvem
 `parseResolutionDetail() === null` e caem silenciosamente no
 path anterior — a feature é aditiva.
+
+**Tab "Sem categoria".** O `TABS` array do `CurveLogsPage.jsx`
+evoluiu de um `param: string` fechado para um `params: {}` aberto
+que expande directamente para a query string. A quarta tab
+`{ id: 'uncategorised', params: { uncategorised: 'true' } }` faz
+o fetch hit no partial compound index (ver §10.5), o `useSearchParams`
+sincroniza o `?tab=<id>` no URL (`replace: true` para não poluir
+o histórico), e o empty state da tab é celebratório — "Tudo
+categorizado" em vez do genérico "sem registos" — porque lista
+vazia neste bucket é a condição feliz. A tab é o destino único de
+três entry points: link directo do utilizador, pílula amber
+`Sem categoria` numa row `ok`, e a StatCard do dashboard.
 
 ### 13.6 Retenção — consistente com `CURVE_LOGS.md §7`
 
