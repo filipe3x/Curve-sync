@@ -50,6 +50,12 @@ export default function DashboardPage() {
   // "Despesas recentes" table. Mirrors ExpensesPage so the same
   // component handles both entry points from docs/Categories.md §12.
   const [categories, setCategories] = useState([]);
+  // Map `category_id -> icon_name` forwarded to the quick-edit
+  // popover so each tile renders its Lucide glyph. Failures fall
+  // through to an empty map — the popover's <CategoryIcon> falls
+  // back to the Tag glyph per-tile, which keeps the picker usable
+  // even if `/api/category-icons` is down.
+  const [iconByCategory, setIconByCategory] = useState(() => new Map());
   const [pickerExpenseId, setPickerExpenseId] = useState(null);
   const [pickerSaving, setPickerSaving] = useState(false);
   const [categoryToast, setCategoryToast] = useState(null);
@@ -91,6 +97,20 @@ export default function DashboardPage() {
       .getCategories()
       .then((res) => setCategories(res.data ?? []))
       .catch(() => setCategories([]));
+
+    // Icon mapping for the popover tiles. Same parallel-and-silent
+    // shape as the catalogue fetch — a 500 here must not break the
+    // dashboard, the popover just falls back to Tag glyphs.
+    api
+      .getCategoryIcons()
+      .then((res) => {
+        const entries = (res.data ?? []).map((row) => [
+          String(row.category_id),
+          row.icon_name,
+        ]);
+        setIconByCategory(new Map(entries));
+      })
+      .catch(() => setIconByCategory(new Map()));
   }, []);
 
   // Quick-edit save with optimistic update + rollback. Mirrors the
@@ -363,6 +383,7 @@ export default function DashboardPage() {
                           <CategoryPickerPopover
                             expense={exp}
                             categories={categories}
+                            iconByCategory={iconByCategory}
                             saving={pickerSaving}
                             onSelect={(newId) =>
                               handleCategorySave(exp._id, newId)

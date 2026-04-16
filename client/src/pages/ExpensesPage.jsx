@@ -27,6 +27,12 @@ export default function ExpensesPage() {
   // within a page lifetime, so there's no reason to refetch per click.
   // Failures are silent — the popover's empty-state covers them.
   const [categories, setCategories] = useState([]);
+  // Companion `category_id -> icon_name` map fetched from
+  // `/api/category-icons`. Forwarded to the picker so each tile
+  // renders a Lucide glyph instead of the first-letter fallback.
+  // Failures yield an empty map — <CategoryIcon> degrades to the
+  // Tag fallback per-tile, so the popover stays usable.
+  const [iconByCategory, setIconByCategory] = useState(() => new Map());
   // Which row has the single-row popover open. Single-open-at-a-time
   // by design; the popover is a focused modal-ish interaction and two
   // of them on screen would muddle the "click outside to dismiss"
@@ -79,6 +85,20 @@ export default function ExpensesPage() {
       .getCategories()
       .then((res) => setCategories(res.data ?? []))
       .catch(() => setCategories([]));
+
+    // Icon mapping for the popover tiles — fetched in parallel with
+    // the catalogue, silent on failure. See <CategoryPickerPopover>'s
+    // iconByCategory prop doc for the shape.
+    api
+      .getCategoryIcons()
+      .then((res) => {
+        const entries = (res.data ?? []).map((row) => [
+          String(row.category_id),
+          row.icon_name,
+        ]);
+        setIconByCategory(new Map(entries));
+      })
+      .catch(() => setIconByCategory(new Map()));
   }, []);
 
   // Shift-click range support: when the user clicks a checkbox with
@@ -351,6 +371,7 @@ export default function ExpensesPage() {
                   <CategoryPickerPopover
                     context={{ kind: 'bulk', count: selectedIds.size }}
                     categories={categories}
+                    iconByCategory={iconByCategory}
                     saving={bulkSaving}
                     onSelect={(newId) => handleBulkMove(newId)}
                     onCancel={() => {
@@ -494,6 +515,7 @@ export default function ExpensesPage() {
                         <CategoryPickerPopover
                           expense={exp}
                           categories={categories}
+                          iconByCategory={iconByCategory}
                           saving={pickerSaving}
                           onSelect={(newId) =>
                             handleCategorySave(exp._id, newId)

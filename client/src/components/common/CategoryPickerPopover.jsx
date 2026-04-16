@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { MagnifyingGlassIcon } from '../layout/Icons';
+import { CategoryIcon } from './CategoryIcon';
 
 /**
  * <CategoryPickerPopover>
@@ -70,6 +71,14 @@ import { MagnifyingGlassIcon } from '../layout/Icons';
  *   @param {boolean} [saving]
  *     Parent-controlled busy state. The popover disables every tile
  *     and shows an inline "A guardar…" indicator while truthy.
+ *   @param {Map<string,string>} [iconByCategory]
+ *     Optional map `category_id -> icon_name` so each tile renders a
+ *     Lucide glyph instead of the first-letter fallback circle. Missing
+ *     entries (or missing map entirely) fall through to the fallback
+ *     `<CategoryIcon>` behaviour (Tag glyph), so callers that haven't
+ *     loaded icons yet still render cleanly. The map is pulled from
+ *     `GET /api/category-icons` by the parent page (ExpensesPage /
+ *     DashboardPage) and passed in to avoid a per-popover round-trip.
  */
 export default function CategoryPickerPopover({
   expense,
@@ -78,6 +87,7 @@ export default function CategoryPickerPopover({
   onSelect,
   onCancel,
   saving = false,
+  iconByCategory = null,
 }) {
   const panelRef = useRef(null);
   const searchRef = useRef(null);
@@ -232,14 +242,17 @@ export default function CategoryPickerPopover({
                 style={{ animationDelay: `${i * 30}ms` }}
               >
                 <span
-                  className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold uppercase ${
+                  className={`flex h-6 w-6 items-center justify-center rounded-full ${
                     isCurrent
                       ? 'bg-curve-500 text-white'
                       : 'bg-sand-200 text-sand-700'
                   }`}
                   aria-hidden
                 >
-                  {cat.name.slice(0, 1)}
+                  <CategoryIcon
+                    name={iconByCategory?.get(id) ?? null}
+                    className="h-3.5 w-3.5"
+                  />
                 </span>
                 <span className="line-clamp-2 text-[11px] font-medium leading-tight text-sand-900">
                   {cat.name}

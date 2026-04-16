@@ -6,6 +6,11 @@ import { PlusIcon, MagnifyingGlassIcon } from '../components/layout/Icons';
 import { useCountUp } from '../hooks/useCountUp';
 import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
+import { CategoryIcon } from '../components/common/CategoryIcon';
+import {
+  IconPickerGrid,
+  IconPickerDialog,
+} from '../components/common/IconPickerPopover';
 
 /**
  * /categories — master-detail category management screen.
@@ -34,19 +39,26 @@ import * as api from '../services/api';
  *     and hide the "Anular regra" escape hatch (undo lives on the
  *     per-entity DELETE button, not a whole-batch rollback).
  *
- * Icon picker is explicitly NOT in this slice — the Category model
- * has no `icon` field today and adding one collides with Embers'
- * Paperclip schema (CLAUDE.md "never modify the schema of
- * categories"). A follow-up spike clarifies whether we can write
- * Paperclip-compat images from Curve Sync or introduce an
- * `icon_emoji` Curve-Sync-only field. Until then the header renders
- * without an icon for every user.
+ * Icon picker (`curve_category_icons`): a Curve-Sync-owned mapping
+ * `category_id → icon_name` (PascalCase Lucide component), wired to
+ * `GET/PUT/DELETE /api/category-icons` and rendered via
+ * `<CategoryIcon>` + `<IconPickerDialog>`. Kept separate from
+ * Embers' Paperclip `icon_*` fields on the shared `categories` row —
+ * those stay untouched (CLAUDE.md "never modify the schema of
+ * categories"). Three surfaces:
+ *   - master list rows          — glyph inside the swatch dot
+ *   - detail header             — glyph inside a larger swatch
+ *   - CreateCategoryDialog      — inline picker at creation time
+ * Regular users see the glyphs; only admins can change them via the
+ * detail-header "Ícone" button (server-enforced via requireAdmin).
  *
  * Data sources:
  *   - GET /api/categories         — full read-only catalogue
  *   - GET /api/categories/stats   — current + previous day-22 cycle
  *                                   aggregates (§8.6)
  *   - GET /api/category-overrides — caller's personal rules (§8.4)
+ *   - GET /api/category-icons     — Curve-Sync-owned icon mapping
+ *                                   (§Categories.md, `CategoryIcon.js`)
  *   - GET /api/expenses           — last 10 expenses when a category is
  *                                   selected and the user flips to the
  *                                   "Despesas recentes" tab (§9.6)
@@ -228,7 +240,7 @@ function DeltaBadge({ delta }) {
   );
 }
 
-function CategoryRow({ row, index, selected, onClick }) {
+function CategoryRow({ row, index, selected, iconName, onClick }) {
   return (
     <button
       type="button"
@@ -241,10 +253,24 @@ function CategoryRow({ row, index, selected, onClick }) {
       style={{ animationDelay: `${index * 60}ms`, animationFillMode: 'backwards' }}
     >
       <div className="flex min-w-0 flex-1 items-start gap-3">
-        <span
-          className="mt-1.5 h-2.5 w-2.5 flex-none rounded-full"
-          style={{ backgroundColor: swatchColor(row.category_id) }}
-        />
+        {/* Swatch dot doubles as an icon pedestal — the Lucide glyph
+            sits white-on-color inside a small circle. Uncategorised
+            rows (no category_id) skip the glyph so the synthetic
+            "Sem categoria" bucket reads as "empty" rather than
+            "tagged with Tag". */}
+        {row.category_id ? (
+          <span
+            className="mt-0.5 flex h-5 w-5 flex-none items-center justify-center rounded-full text-white"
+            style={{ backgroundColor: swatchColor(row.category_id) }}
+          >
+            <CategoryIcon name={iconName ?? null} className="h-3 w-3" />
+          </span>
+        ) : (
+          <span
+            className="mt-1.5 h-2.5 w-2.5 flex-none rounded-full"
+            style={{ backgroundColor: swatchColor(row.category_id) }}
+          />
+        )}
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-sand-900">
             {row.category_name ?? 'Sem categoria'}
@@ -963,12 +989,13 @@ function DeleteGlobalEntityDialog({ target, onCancel, onConfirm, busy }) {
 // Admin-only: create a new global catalogue category. Name is
 // required; entities is an optional newline-separated list that lets
 // the admin seed the category with a starter pattern set in a single
-// click. The form is deliberately skeletal — no icon picker until the
-// Paperclip / schema question is resolved (see the commit that
-// introduces this component and CLAUDE.md "never modify the schema
-// of categories" — the `Category` model today only has `name` and
-// `entities[]`). When a new `icon` field is wired server-side we
-// reopen this dialog to add the picker.
+// click. An inline `<IconPickerGrid>` field lets the admin pick the
+// category glyph up front — the parent drops the selection into a
+// follow-up `PUT /api/category-icons/:id` after the POST succeeds,
+// so both writes land together from the user's point of view.
+// Leaving the picker untouched is fine: the renderer falls back to
+// the Tag glyph until an admin later sets one via the detail
+// header's "Ícone" button.
 //
 // Error handling is split between the dialog and the parent:
 //   - `error` prop renders inline under the form (used for
@@ -976,17 +1003,24 @@ function DeleteGlobalEntityDialog({ target, onCancel, onConfirm, busy }) {
 //   - Network / unexpected failures surface via the global toast
 //     stack, handled by the parent's `handleCreateCategoryConfirm`.
 //
-// The controlled name / entitiesText state resets when the dialog
-// closes (via `open` prop falling to false) so reopening always
-// lands on a fresh form instead of the last-submitted values.
+// The controlled name / entitiesText / icon state resets when the
+// dialog closes (via `open` prop falling to false) so reopening
+// always lands on a fresh form instead of the last-submitted values.
 function CreateCategoryDialog({ open, busy, error, onCancel, onConfirm }) {
   const [name, setName] = useState('');
   const [entitiesText, setEntitiesText] = useState('');
+  // Icon picked in the inline grid. `null` means "don't write an
+  // icon" — the parent skips the follow-up PUT and the renderer
+  // falls back to the Tag default. Clicking the same tile twice
+  // toggles back to null so the admin can "unpick" without
+  // cancelling the whole dialog.
+  const [iconName, setIconName] = useState(null);
 
   useEffect(() => {
     if (!open) {
       setName('');
       setEntitiesText('');
+      setIconName(null);
     }
   }, [open]);
 
@@ -1003,7 +1037,7 @@ function CreateCategoryDialog({ open, busy, error, onCancel, onConfirm }) {
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
-    onConfirm({ name: trimmedName, entities });
+    onConfirm({ name: trimmedName, entities, iconName });
   };
 
   return (
@@ -1012,7 +1046,10 @@ function CreateCategoryDialog({ open, busy, error, onCancel, onConfirm }) {
       role="dialog"
       aria-modal="true"
     >
-      <form onSubmit={handleSubmit} className="card w-full max-w-md">
+      <form
+        onSubmit={handleSubmit}
+        className="card max-h-[90vh] w-full max-w-md overflow-y-auto"
+      >
         <h2 className="text-lg font-semibold text-sand-900">
           Nova categoria
         </h2>
@@ -1049,6 +1086,26 @@ function CreateCategoryDialog({ open, busy, error, onCancel, onConfirm }) {
               disabled={busy}
             />
           </label>
+          <div>
+            <span className="text-xs font-medium uppercase tracking-wide text-sand-500">
+              Ícone (opcional)
+            </span>
+            <div className="mt-2 rounded-xl border border-sand-200 bg-sand-50 p-3">
+              {/* Click-to-toggle: picking the currently-selected tile
+                  clears the selection so the admin can back out of a
+                  mistaken pick without cancelling the whole dialog.
+                  Leaving the field blank is a valid final state —
+                  parent skips the follow-up PUT and the renderer falls
+                  back to the Tag default. */}
+              <IconPickerGrid
+                value={iconName}
+                onChange={(name) =>
+                  setIconName((prev) => (prev === name ? null : name))
+                }
+                busy={busy}
+              />
+            </div>
+          </div>
         </div>
         {error && (
           <p className="mt-3 text-sm text-curve-700" role="alert">
@@ -1371,11 +1428,27 @@ export default function CategoriesPage() {
   const [deleteCategoryTarget, setDeleteCategoryTarget] = useState(null);
   const [deleteCategoryBlock, setDeleteCategoryBlock] = useState(null);
   const [deleteCategoryBusy, setDeleteCategoryBusy] = useState(false);
+  // ── Icon state ─────────────────────────────────────────────────
+  // `iconByCategory` is a `category_id -> icon_name` map populated
+  // from `GET /api/category-icons` alongside the other page data.
+  // Used in the master list rows (CategoryRow), the detail header,
+  // and forwarded to the popover flow. Missing entries fall through
+  // to <CategoryIcon>'s Tag fallback, so a 500 on this endpoint
+  // only costs the custom glyphs — the page still renders.
+  const [iconByCategory, setIconByCategory] = useState(() => new Map());
+  // Admin-only detail-header picker. `open` toggles the
+  // <IconPickerDialog>; `busy` locks both the dialog and the opener
+  // button while a PUT/DELETE round-trips. The picker is controlled
+  // — the current icon comes from `iconByCategory.get(selectedId)`
+  // so parallel edits from another tab would be reflected on next
+  // refresh without a stale draft.
+  const [iconDialogOpen, setIconDialogOpen] = useState(false);
+  const [iconBusy, setIconBusy] = useState(false);
 
   const refreshAll = async () => {
     setLoading(true);
     try {
-      const [cats, statsC, statsP, ovs, ents] = await Promise.all([
+      const [cats, statsC, statsP, ovs, ents, icons] = await Promise.all([
         api.getCategories({ withMatchCounts: true }),
         api.getCategoryStats({ cycle: 'current' }),
         api.getCategoryStats({ cycle: 'previous' }).catch(() => ({ data: { totals: [] } })),
@@ -1384,12 +1457,20 @@ export default function CategoriesPage() {
         // break the page, so swallow and fall back to an empty list
         // (which the form handles as "just a plain text input").
         api.autocomplete('entity').catch(() => ({ data: [] })),
+        // Icons, same treatment — a 500 just leaves every row with
+        // the Tag fallback glyph, no user-visible error.
+        api.getCategoryIcons().catch(() => ({ data: [] })),
       ]);
       setCategories(cats.data ?? []);
       setStatsCurrent(statsC.data);
       setStatsPrevious(statsP.data ?? { totals: [] });
       setOverrides(ovs.data ?? []);
       setEntitySuggestions(ents.data ?? []);
+      const iconEntries = (icons.data ?? []).map((row) => [
+        String(row.category_id),
+        row.icon_name,
+      ]);
+      setIconByCategory(new Map(iconEntries));
     } catch (err) {
       setToast({ type: 'error', text: err.message ?? 'Erro a carregar categorias.' });
     } finally {
@@ -1668,7 +1749,7 @@ export default function CategoriesPage() {
   //   name_required     — UI normally blocks submit on empty names,
   //                       so this is defence-in-depth
   //   invalid_entities  — UI normally normalises, ditto
-  const handleCreateCategoryConfirm = async ({ name, entities }) => {
+  const handleCreateCategoryConfirm = async ({ name, entities, iconName }) => {
     setCreateBusy(true);
     setCreateError(null);
     try {
@@ -1676,16 +1757,39 @@ export default function CategoriesPage() {
         name,
         entities: entities.length ? entities : undefined,
       });
+      // Follow-up PUT to write the chosen icon — fire-and-forget from
+      // the dialog's point of view. A failure here would leave the
+      // category created without an icon (recoverable via the detail
+      // header picker), so we log to the toast but still close the
+      // dialog and keep the happy path visible. `refreshAll` below
+      // will reconcile whatever landed on the server.
+      if (iconName) {
+        try {
+          await api.setCategoryIcon(res.data._id.toString(), iconName);
+        } catch (iconErr) {
+          setToast({
+            type: 'error',
+            text:
+              iconErr.message === 'invalid_icon_name'
+                ? 'Ícone inválido — a categoria foi criada sem ícone.'
+                : 'Categoria criada, mas falhou a guardar o ícone.',
+          });
+        }
+      }
       await refreshAll();
       // Auto-select the newly created category so the admin lands
       // straight on its detail pane and can keep editing without
       // scrolling the master list.
       setSelectedId(res.data._id.toString());
       setCreateDialogOpen(false);
-      setToast({
-        type: 'ok',
-        text: `Categoria "${res.data.name}" criada.`,
-      });
+      // Only push the success toast if we didn't already push an
+      // icon-write failure above. `setToast` is last-write-wins, so
+      // an unconditional call here would swallow the icon error.
+      setToast((prev) =>
+        prev?.type === 'error'
+          ? prev
+          : { type: 'ok', text: `Categoria "${res.data.name}" criada.` },
+      );
     } catch (err) {
       // Surface known error codes as human copy, unknown ones
       // verbatim. The inline message stays under the form so the
@@ -1815,6 +1919,97 @@ export default function CategoriesPage() {
     if (deleteCategoryBusy) return;
     setDeleteCategoryTarget(null);
     setDeleteCategoryBlock(null);
+  };
+
+  // Admin-only: set the icon for the currently-selected category.
+  // Optimistic — the new value lands in `iconByCategory` immediately
+  // so the list row + detail header repaint before the PUT settles.
+  // Snapshot + rollback on failure keeps the UI honest when the
+  // server refuses (403 for regular users, 400 `invalid_icon_name`
+  // for a whitelist drift, 404 if the category vanished between
+  // open and click).
+  //
+  // Same-name re-pick is a no-op (server-side §13.4 also suppresses
+  // the audit row) — we still short-circuit the request here to save
+  // a round-trip and spare the detail header a flicker.
+  const handlePickIcon = async (iconName) => {
+    if (!isAdmin || !selectedRow?.category_id || !iconName) return;
+    const categoryId = selectedRow.category_id;
+    const previous = iconByCategory.get(categoryId) ?? null;
+    if (previous === iconName) {
+      setIconDialogOpen(false);
+      return;
+    }
+    setIconBusy(true);
+    // Optimistic write to the local map — new Map() to keep React
+    // reference-equality happy.
+    setIconByCategory((prev) => {
+      const next = new Map(prev);
+      next.set(categoryId, iconName);
+      return next;
+    });
+    try {
+      await api.setCategoryIcon(categoryId, iconName);
+      setIconDialogOpen(false);
+      setToast({ type: 'ok', text: 'Ícone actualizado.' });
+    } catch (err) {
+      // Rollback. `previous === null` means "no entry existed" — we
+      // delete the key so the UI is indistinguishable from pre-click.
+      setIconByCategory((prev) => {
+        const next = new Map(prev);
+        if (previous === null) next.delete(categoryId);
+        else next.set(categoryId, previous);
+        return next;
+      });
+      const msg =
+        err.message === 'invalid_icon_name'
+          ? 'Ícone inválido.'
+          : err.message === 'admin_required'
+            ? 'Apenas admins podem alterar ícones.'
+            : err.message ?? 'Erro a guardar ícone.';
+      setToast({ type: 'error', text: msg });
+    } finally {
+      setIconBusy(false);
+    }
+  };
+
+  // Admin-only: clear the currently-selected category's icon. Same
+  // optimistic + rollback shape as `handlePickIcon`. Idempotent on
+  // the server — clearing an already-empty row just returns 204,
+  // but we short-circuit before the request for consistency with
+  // the same-name guard above.
+  const handleClearIcon = async () => {
+    if (!isAdmin || !selectedRow?.category_id) return;
+    const categoryId = selectedRow.category_id;
+    const previous = iconByCategory.get(categoryId) ?? null;
+    if (previous === null) {
+      setIconDialogOpen(false);
+      return;
+    }
+    setIconBusy(true);
+    setIconByCategory((prev) => {
+      const next = new Map(prev);
+      next.delete(categoryId);
+      return next;
+    });
+    try {
+      await api.clearCategoryIcon(categoryId);
+      setIconDialogOpen(false);
+      setToast({ type: 'ok', text: 'Ícone removido.' });
+    } catch (err) {
+      setIconByCategory((prev) => {
+        const next = new Map(prev);
+        next.set(categoryId, previous);
+        return next;
+      });
+      const msg =
+        err.message === 'admin_required'
+          ? 'Apenas admins podem alterar ícones.'
+          : err.message ?? 'Erro a remover ícone.';
+      setToast({ type: 'error', text: msg });
+    } finally {
+      setIconBusy(false);
+    }
   };
 
   // Admin batch-add of global entities. Called from
@@ -2135,6 +2330,11 @@ export default function CategoriesPage() {
                 row={row}
                 index={i}
                 selected={(row.category_id ?? '__null__') === selectedId}
+                iconName={
+                  row.category_id
+                    ? iconByCategory.get(row.category_id) ?? null
+                    : null
+                }
                 onClick={() =>
                   setSelectedId(row.category_id ?? '__null__')
                 }
@@ -2151,10 +2351,32 @@ export default function CategoriesPage() {
           {selectedRow ? (
             <>
               <div className="flex items-center gap-3">
-                <span
-                  className="h-3 w-3 rounded-full"
-                  style={{ backgroundColor: swatchColor(selectedRow.category_id) }}
-                />
+                {/* Larger icon pedestal in the detail header — 28px
+                    tile so the glyph is the dominant visual instead
+                    of the old 12px colour dot. The uncategorised
+                    bucket (no category_id) still uses the plain dot
+                    so the synthetic row doesn't pretend to have an
+                    icon. */}
+                {selectedRow.category_id ? (
+                  <span
+                    className="flex h-7 w-7 flex-none items-center justify-center rounded-xl text-white"
+                    style={{
+                      backgroundColor: swatchColor(selectedRow.category_id),
+                    }}
+                  >
+                    <CategoryIcon
+                      name={
+                        iconByCategory.get(selectedRow.category_id) ?? null
+                      }
+                      className="h-4 w-4"
+                    />
+                  </span>
+                ) : (
+                  <span
+                    className="h-3 w-3 rounded-full"
+                    style={{ backgroundColor: swatchColor(selectedRow.category_id) }}
+                  />
+                )}
                 {isAdmin && selectedRow.category_id ? (
                   // Uncontrolled — the ref reads the canonical value at
                   // commit time and the `<section key={selectedId}>`
@@ -2186,15 +2408,26 @@ export default function CategoriesPage() {
                 )}
                 <DeltaBadge delta={selectedRow.delta} />
                 {isAdmin && selectedRow.category_id && (
-                  <button
-                    type="button"
-                    onClick={handleRequestDeleteCategory}
-                    disabled={renameBusy || deleteCategoryBusy}
-                    className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
-                    title="Apagar esta categoria do catálogo global"
-                  >
-                    Apagar
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setIconDialogOpen(true)}
+                      disabled={iconBusy}
+                      className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
+                      title="Escolher ícone para esta categoria"
+                    >
+                      Ícone
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRequestDeleteCategory}
+                      disabled={renameBusy || deleteCategoryBusy}
+                      className="rounded-lg px-2 py-1 text-xs font-medium text-sand-500 hover:bg-sand-100 hover:text-curve-700"
+                      title="Apagar esta categoria do catálogo global"
+                    >
+                      Apagar
+                    </button>
+                  </>
                 )}
               </div>
 
@@ -2462,6 +2695,26 @@ export default function CategoriesPage() {
         onCancel={handleCloseDeleteCategoryDialog}
         onConfirm={handleDeleteCategoryConfirm}
       />
+
+      {/* Admin icon picker — only mounted while open so the Escape /
+          click-outside listeners aren't armed on every /categories
+          visit. Wired to the currently-selected category id; guards
+          on `isAdmin` + real category_id (not the synthetic "Sem
+          categoria" bucket) are duplicated in handlePickIcon /
+          handleClearIcon so the handlers are safe even if the gate
+          changes. */}
+      {iconDialogOpen && isAdmin && selectedRow?.category_id && (
+        <IconPickerDialog
+          value={iconByCategory.get(selectedRow.category_id) ?? null}
+          onSelect={handlePickIcon}
+          onClear={handleClearIcon}
+          onCancel={() => {
+            if (iconBusy) return;
+            setIconDialogOpen(false);
+          }}
+          busy={iconBusy}
+        />
+      )}
     </div>
   );
 }
