@@ -5,9 +5,11 @@
  *
  *     reader.fetchUnseen()
  *       → parseEmail(source)
- *         → resolveCategory(entity, resolverContext)
+ *         → resolveCategoryDetailed(entity, resolverContext)
  *           → Expense.create(...)  (duplicate? → log + markSeen)
- *             → CurveLog.create(...)
+ *             → CurveLog.create(...)  (ok rows carry the resolution
+ *                                      path: `override → <cat>` /
+ *                                      `global → <cat>` / `uncategorised`)
  *               → reader.markSeen(uid)
  *
  * This module is deliberately NOT coupled to the IMAP transport. It
@@ -26,12 +28,19 @@
  * silent-failure canary, recovery invariants).
  *
  * Category resolution (docs/Categories.md §5): `loadContext(user_id)`
- * runs ONCE per sync, producing a `{userRules, globalRules}` bundle
- * that's reused for every email in the loop. This keeps the per-email
- * match a pure function with zero DB reads, so thousands of receipts
- * in one backlog stay cheap. Personal overrides short-circuit the
- * global catalogue per §3.4 — that tier-ordering is enforced inside
- * `resolveCategory`, not here.
+ * runs ONCE per sync, producing a `{userRules, globalRules,
+ * categoriesById}` bundle that's reused for every email in the loop.
+ * This keeps the per-email match a pure function with zero DB reads,
+ * so thousands of receipts in one backlog stay cheap. Personal
+ * overrides short-circuit the global catalogue per §3.4 — that
+ * tier-ordering is enforced inside `resolveCategoryDetailed`, not here.
+ *
+ * The detailed variant also surfaces *which* tier won so the `ok`
+ * audit row can record `override → <name>` / `global → <name>` /
+ * `uncategorised` in `error_detail`. That field is repurposed as a
+ * generic "free-text classification trail" on success rows — same
+ * column, different semantic per `status`. See docs/Categories.md
+ * §13 and the renderer in `client/src/utils/curveLogsUtils.js`.
  */
 
 import fs from 'node:fs';
@@ -41,7 +50,7 @@ import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import Expense from '../models/Expense.js';
 import { parseEmail, ParseError } from './emailParser.js';
-import { loadContext, resolveCategory } from './categoryResolver.js';
+import { loadContext, resolveCategoryDetailed } from './categoryResolver.js';
 import { ImapReader } from './imapReader.js';
 import { audit } from './audit.js';
 
@@ -103,6 +112,37 @@ function truncateDetail(value) {
   return str.length > MAX_ERROR_DETAIL
     ? `${str.slice(0, MAX_ERROR_DETAIL)}…`
     : str;
+}
+
+/**
+ * Format the classification path for the `error_detail` column on
+ * `ok`-status CurveLog rows. The field is repurposed as a free-text
+ * trail on success rows — `/curve/logs` parses the prefix to render
+ * a coloured pill (purple for override, slate for global, amber for
+ * uncategorised) without needing a separate schema field.
+ *
+ *   override → Mercados
+ *   global   → Restaurantes
+ *   uncategorised
+ *
+ * Kept separate from `truncateDetail` because these strings are tiny
+ * (a category name max ~40 chars) and can never approach the 2000-
+ * char cap. Skipping the truncation pass keeps the renderer's prefix
+ * match exact even in the pathological case of an absurdly long
+ * category name (we'd rather log the full name than chop it mid-word).
+ *
+ * @param {'override'|'global'|null} source
+ * @param {string|null} categoryName
+ * @returns {string}
+ */
+function formatResolutionDetail(source, categoryName) {
+  if (!source) return 'uncategorised';
+  // Defensive: if the category was deleted between loadContext and
+  // resolution, `categoryName` comes back null. Fall back to the
+  // bare tier label so the audit row still tells the operator
+  // *something* about how the match happened.
+  const name = categoryName ?? '?';
+  return `${source} → ${name}`;
 }
 
 /**
@@ -264,7 +304,11 @@ export async function syncEmails({ config, reader, dryRun = false }) {
   // Overrides are scoped to the config owner — the sync pass runs
   // with that user's personal rules in play and falls back to the
   // global catalogue when none match (docs/Categories.md §3.4, §5.4).
-  let resolverContext = { userRules: [], globalRules: [] };
+  let resolverContext = {
+    userRules: [],
+    globalRules: [],
+    categoriesById: new Map(),
+  };
   try {
     resolverContext = await loadContext(config.user_id);
   } catch (e) {
@@ -346,7 +390,23 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       // Two-tier resolution (personal overrides → global catalogue),
       // pure and synchronous once `resolverContext` is loaded. See
       // docs/Categories.md §5 for the pipeline.
-      const category_id = resolveCategory(parsed.entity, resolverContext);
+      //
+      // We use the *detailed* variant so the audit row can record the
+      // resolution path (`override → <name>` / `global → <name>` /
+      // `uncategorised`). The id is the only field that flows into
+      // `Expense.create`; `source` and `category_name` only feed the
+      // `error_detail` line on the `ok` log row.
+      const { category_id, source, category_name } = resolveCategoryDetailed(
+        parsed.entity,
+        resolverContext,
+      );
+      const resolutionDetail = formatResolutionDetail(source, category_name);
+      // Structured mirror of the "no tier matched" state for the
+      // dashboard stat card + /curve/logs filter (§11.3 Fase 7). The
+      // free-text `resolutionDetail` already carries the same signal
+      // ("uncategorised"), but the boolean is indexable and survives
+      // future renaming of the detail string.
+      const isUncategorised = source === null;
 
       // ---- 3. Dry run: check-only path, no writes ----
       if (dryRun) {
@@ -386,6 +446,8 @@ export async function syncEmails({ config, reader, dryRun = false }) {
             entity: parsed.entity,
             amount: parsed.amount,
             digest: parsed.digest,
+            error_detail: resolutionDetail,
+            uncategorised: isUncategorised,
           });
         }
         consecutiveParseErrors = 0;
@@ -456,6 +518,8 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         amount: parsed.amount,
         digest: parsed.digest,
         expense_id: expenseDoc._id,
+        error_detail: resolutionDetail,
+        uncategorised: isUncategorised,
       });
       seenUids.push(uid);
     }
@@ -585,6 +649,7 @@ async function writeLog(entry) {
     digest,
     expense_id,
     error_detail,
+    uncategorised,
   } = entry;
   try {
     await CurveLog.create({
@@ -597,6 +662,7 @@ async function writeLog(entry) {
       expense_id,
       error_detail,
       dry_run: Boolean(dryRun),
+      uncategorised: Boolean(uncategorised),
     });
   } catch (e) {
     // CurveLog write failure is bad but non-fatal — we still want the

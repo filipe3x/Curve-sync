@@ -1,10 +1,18 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import Category from '../models/Category.js';
+import CategoryOverride from '../models/CategoryOverride.js';
 import Expense from '../models/Expense.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
-import { matches, normalize } from '../services/categoryResolver.js';
+import {
+  loadContext,
+  matches,
+  normalize,
+  resolveCategory,
+} from '../services/categoryResolver.js';
+import { reassignCategoryBulk } from '../services/expense.js';
 import { audit, clientIp } from '../services/audit.js';
+import { cycleBoundsFor, formatISODate } from '../services/cycle.js';
 
 const router = Router();
 
@@ -144,33 +152,6 @@ async function countGlobalEntityMatches(userId, categories) {
 //   expenses/user, §6.7) a full user scan is fine — the same pattern
 //   is used by routes/categoryOverrides apply-to-all.
 // ─────────────────────────────────────────────────────────────────────
-
-// Compute the start/end of a day-22 cycle as UTC Date objects.
-// - `start` is inclusive at 00:00:00 UTC of the 22nd.
-// - `end`   is inclusive at 23:59:59.999 UTC of the 21st (next month).
-// Anchored on UTC so cycle boundaries don't drift with server TZ.
-function cycleBoundsFor(anchor) {
-  const y = anchor.getUTCFullYear();
-  const m = anchor.getUTCMonth();
-  const d = anchor.getUTCDate();
-  // If we're on/after day 22, the current cycle starts THIS month on
-  // the 22nd; otherwise it started LAST month on the 22nd.
-  const startY = d >= 22 ? y : (m === 0 ? y - 1 : y);
-  const startM = d >= 22 ? m : (m === 0 ? 11 : m - 1);
-  const start = new Date(Date.UTC(startY, startM, 22, 0, 0, 0, 0));
-  // End = the 21st of the following month, inclusive through EOD.
-  const endY = startM === 11 ? startY + 1 : startY;
-  const endM = startM === 11 ? 0 : startM + 1;
-  const end = new Date(Date.UTC(endY, endM, 21, 23, 59, 59, 999));
-  return { start, end };
-}
-
-function formatISODate(date) {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(date.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
 
 // Parse "06 April 2026 08:53:31" (the format emitted by the Curve
 // email parser) into a JS Date. Node's Date constructor handles this
@@ -381,6 +362,845 @@ router.delete('/:id/entities/:entity', requireAdmin, async (req, res) => {
     });
 
     res.status(204).end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Case-insensitive name collision check for POST / and PUT /:id.
+//
+// The unique index on `categories.name` is case-sensitive (standard
+// Mongo behaviour, and we can't switch it to a collation-aware form
+// without rewriting the shared `categories` schema Embers expects to
+// read). §8.2 of docs/Categories.md requires case-insensitive
+// uniqueness, so we pre-check with a regex before writing and still
+// catch the race-condition 11000 error at write time as a safety belt.
+//
+// `excludeId` is used by PUT to allow a no-op rename ("Groceries" →
+// "groceries") that would otherwise collide with its own row.
+// ─────────────────────────────────────────────────────────────────────
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function nameCollides(name, excludeId) {
+  const filter = {
+    name: { $regex: `^${escapeRegex(name)}$`, $options: 'i' },
+  };
+  if (excludeId) filter._id = { $ne: excludeId };
+  const hit = await Category.findOne(filter).select('_id').lean();
+  return !!hit;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Normalise + dedupe a caller-supplied `entities` payload.
+//
+// Used by POST / and POST /:id/entities to collapse cosmetic variants
+// ("Lidl", "LIDL", " lidl ") onto a single entry before we touch the
+// DB. Dedup key is `normalize()` (§5.2) so the collision surface
+// matches the matcher's — two forms that the resolver treats as
+// identical never both land in `entities[]`.
+//
+// Input:  raw array (may contain non-strings, blanks, unicode noise)
+// Output: { raw: <trimmed>, norm: <normalized> }[] — only well-formed
+//         entries survive, order preserved for deterministic audits.
+// ─────────────────────────────────────────────────────────────────────
+function normaliseEntityInput(entities) {
+  const seen = new Set();
+  const out = [];
+  for (const e of entities) {
+    if (typeof e !== 'string') continue;
+    const trimmed = e.trim();
+    if (!trimmed) continue;
+    const norm = normalize(trimmed);
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push({ raw: trimmed, norm });
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/categories   (admin only)
+//
+// Creates a new global catalogue category. This is the first of the
+// admin CRUD endpoints specified in docs/Categories.md §8.2, and the
+// gating item that unblocks Fase 5 (admin mode in /categories screen,
+// §11.3). The schema stays identical to Embers' Mongoid `Category`
+// (name + entities[] + timestamps) — no new fields are introduced,
+// per CLAUDE.md's "never modify the schema of categories" rule.
+//
+// Auth: `authenticate` (router-level, mounted in index.js) +
+// `requireAdmin` (per-route). Non-admins get 403 + an
+// `admin_access_failed` audit row handled by the middleware.
+//
+// Body:
+//   { name: string, entities?: string[] }
+//
+// Validation:
+//   400 name_required        — name missing or empty after trim
+//   400 invalid_entities     — entities is present but not an array
+//   409 name_taken           — case-insensitive collision with an
+//                              existing category (pre-check by regex,
+//                              plus 11000 catch for race safety)
+//
+// Entities are normalised and deduped server-side: blanks, non-string
+// entries, and repeated normalised forms are dropped silently before
+// the insert. The raw trimmed form is persisted — consistent with how
+// DELETE /:id/entities/:entity matches on the raw string (§8.3).
+//
+// Response: 201 { data: Category }
+//
+// Audit (§13.2 #23):
+//   action: 'category_created'
+//   detail: `name=<name> entity_count=<n>`
+//   Canonical pt-PT (curveLogsUtils): "Categoria criada: <name>"
+// ─────────────────────────────────────────────────────────────────────
+router.post('/', requireAdmin, async (req, res) => {
+  try {
+    const { name, entities } = req.body ?? {};
+
+    if (typeof name !== 'string' || name.trim() === '') {
+      return res.status(400).json({ error: 'name_required' });
+    }
+    const trimmedName = name.trim();
+
+    let entityArr = [];
+    if (entities !== undefined) {
+      if (!Array.isArray(entities)) {
+        return res.status(400).json({ error: 'invalid_entities' });
+      }
+      entityArr = normaliseEntityInput(entities).map((e) => e.raw);
+    }
+
+    // Pre-check for case-insensitive collision. The unique index on
+    // `name` is case-sensitive, so "Groceries" and "groceries" would
+    // both succeed without this guard.
+    if (await nameCollides(trimmedName)) {
+      return res.status(409).json({ error: 'name_taken' });
+    }
+
+    let doc;
+    try {
+      doc = await Category.create({
+        name: trimmedName,
+        entities: entityArr,
+      });
+    } catch (err) {
+      // Race condition: another admin created a colliding name between
+      // our pre-check and the insert. Translate the Mongo duplicate
+      // key error into the documented 409 response.
+      if (err?.code === 11000) {
+        return res.status(409).json({ error: 'name_taken' });
+      }
+      throw err;
+    }
+
+    audit({
+      action: 'category_created',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `name=${doc.name} entity_count=${doc.entities.length}`,
+    });
+
+    res.status(201).json({ data: doc.toObject() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// PUT /api/categories/:id   (admin only)
+//
+// Partial update of a global catalogue category. Only `name` is
+// actually persisted in this slice — the `entities[]` array is NOT
+// editable here (use the granular §8.3 endpoints), and `icon_url`
+// is accepted-but-dropped until the schema question is resolved
+// (see the comment inside the handler). Together with POST and
+// DELETE, this is the second of the five admin CRUD endpoints from
+// docs/Categories.md §8.2.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id  — category _id (validated as ObjectId, 404 otherwise)
+//
+// Body:
+//   { name?: string, icon_url?: string }
+//
+// Validation:
+//   404 category_not_found   — invalid id or no such row
+//   400 name_required        — name is present but empty after trim
+//   409 name_taken           — case-insensitive collision against ANY
+//                              OTHER category (pre-check via
+//                              nameCollides() + 11000 catch as a
+//                              safety belt for concurrent renames)
+//
+// No-op PUTs (identical name, or a request that carries only a
+// dropped icon_url) return 200 with the current document and skip
+// the audit row entirely — §13.4 discourages audit noise from
+// autosave-style writes that don't actually change state.
+//
+// Response: 200 { data: Category }
+//
+// Audit (§13.2 #24):
+//   action: 'category_updated'
+//   detail: `name=<name> changed=<fields>`
+//   Canonical pt-PT (curveLogsUtils): "Categoria actualizada: <name>"
+// ─────────────────────────────────────────────────────────────────────
+router.put('/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const existing = await Category.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const { name, icon_url } = req.body ?? {};
+    const changed = [];
+
+    if (name !== undefined) {
+      if (typeof name !== 'string' || name.trim() === '') {
+        return res.status(400).json({ error: 'name_required' });
+      }
+      const trimmedName = name.trim();
+      if (trimmedName !== existing.name) {
+        // Collision check against every OTHER row. Case-insensitive
+        // to match POST / behaviour, with `excludeId` so a cosmetic
+        // case-only rename ("Groceries" → "groceries") doesn't
+        // self-collide with the row being edited.
+        if (await nameCollides(trimmedName, id)) {
+          return res.status(409).json({ error: 'name_taken' });
+        }
+        existing.name = trimmedName;
+        changed.push('name');
+      }
+    }
+
+    // `icon_url` is part of the documented contract (§8.2) but the
+    // Mongoose `Category` model has no `icon` field — Embers stores
+    // the icon as a Paperclip attachment (icon_file_name +
+    // icon_content_type + icon_file_size + icon_updated_at), and
+    // CLAUDE.md forbids adding fields to the shared `categories`
+    // schema. Until the schema question is resolved (follow-up PR),
+    // the parameter is accepted to keep the contract stable but
+    // never persisted, so writes never diverge from Embers' read
+    // expectations. The frontend can POST icon_url into the wind
+    // without getting a 400 or a silent "unknown field" error —
+    // it just won't stick yet.
+    if (icon_url !== undefined) {
+      void icon_url;
+    }
+
+    if (changed.length === 0) {
+      // No-op PUT: nothing to persist and nothing to audit (§13.4).
+      // Return the current document so clients that PUT {name:same}
+      // as part of an autosave flow still see a coherent response.
+      return res.json({ data: existing.toObject() });
+    }
+
+    try {
+      await existing.save();
+    } catch (err) {
+      // Race condition: another admin renamed a sibling into our
+      // target between nameCollides() and save(). The unique index
+      // on `name` is case-sensitive, so 11000 only fires on an
+      // exact-case collision — the case-insensitive variant is
+      // already caught above. Translate either to the documented
+      // 409 so the client path is uniform.
+      if (err?.code === 11000) {
+        return res.status(409).json({ error: 'name_taken' });
+      }
+      throw err;
+    }
+
+    audit({
+      action: 'category_updated',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `name=${existing.name} changed=${changed.join(',')}`,
+    });
+
+    res.json({ data: existing.toObject() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// DELETE /api/categories/:id   (admin only)
+//
+// Deletes a global catalogue category, with a hard guard against
+// dangling references: the delete is refused with `409 category_in_use`
+// when there are any `expenses` or `curve_category_overrides` still
+// pointing at the category. The 409 body carries both counts so the
+// frontend modal can tell the admin exactly what needs to be
+// reassigned before the delete goes through (§11.4 risk #3).
+//
+// This is the only admin CRUD endpoint that gets a pre-delete scan —
+// POST and PUT work on the row in isolation, but DELETE has to
+// protect the invariant that every `expense.category_id` and every
+// `override.category_id` points at a row that exists. Embers never
+// writes either field, but it does read them, so a dangling id would
+// silently produce a `null` category on the shared app.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id  — category _id (validated as ObjectId, 404 otherwise)
+//
+// Responses:
+//   204 on success (no body)
+//   404 category_not_found
+//   409 category_in_use  — body: `{ error, expenses_count, overrides_count }`
+//
+// Audit (§13.2 #25):
+//   action: 'category_deleted'
+//   detail: `name=<name> expense_count=0`
+//   Canonical pt-PT (curveLogsUtils): "Categoria apagada: <name>"
+//
+// `expense_count` is always `0` at audit time because the 409 guard
+// above blocks any delete where expenses still reference the row.
+// The field is retained in the detail for shape-parity with §13.2
+// and forensic clarity ("yes, we confirmed zero references before
+// the drop"). Future variants that allow force-delete with cascade
+// would carry a non-zero count here.
+// ─────────────────────────────────────────────────────────────────────
+router.delete('/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    // Load first so the audit row can capture the category name, and
+    // so a missing category returns a clean 404 before we run the
+    // in-use scan (which would otherwise succeed vacuously with zero
+    // references for a non-existent id).
+    const category = await Category.findById(id).select('_id name').lean();
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    // Parallel count of references. Both collections index
+    // `category_id` (expenses via its own field, overrides via the
+    // user_id compound index fallback), so at MVP scale this is two
+    // cheap round trips.
+    const [expensesCount, overridesCount] = await Promise.all([
+      Expense.countDocuments({ category_id: id }),
+      CategoryOverride.countDocuments({ category_id: id }),
+    ]);
+
+    if (expensesCount > 0 || overridesCount > 0) {
+      return res.status(409).json({
+        error: 'category_in_use',
+        expenses_count: expensesCount,
+        overrides_count: overridesCount,
+      });
+    }
+
+    // Safe to drop: zero references in both collections. `deleteOne`
+    // instead of `findByIdAndDelete` because we already have the doc
+    // in memory — no need for a second round trip to reload it.
+    await Category.deleteOne({ _id: id });
+
+    audit({
+      action: 'category_deleted',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `name=${category.name} expense_count=0`,
+    });
+
+    res.status(204).end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/categories/:id/entities   (admin only)
+//
+// Batch-adds N entity strings to a global catalogue category's
+// `entities[]` array. Complements DELETE /:id/entities/:entity
+// (which removes one at a time) and avoids a heavy full-category
+// PUT when the admin just wants to append — §8.3 of
+// docs/Categories.md is the spec.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id — category _id (validated as ObjectId, 404 otherwise)
+//
+// Body:
+//   { entities: string[] }  — non-empty array of raw strings
+//
+// Input handling:
+//   - Non-string entries, blanks, and `normalize()` duplicates are
+//     dropped silently (via `normaliseEntityInput()`). This matches
+//     the behaviour of POST / for the same dedup surface — two
+//     variants the resolver treats as identical never both end up in
+//     `entities[]`.
+//   - Entries whose normalised form already exists in THIS
+//     category's `entities[]` are skipped silently (idempotent —
+//     re-POSTing the same list is a no-op).
+//   - Entries whose normalised form exists in ANY OTHER category
+//     trigger `409 entity_conflict` with `{ conflicts: [...] }` so
+//     the admin can decide explicitly whether to move. "Move" is an
+//     out-of-band decision (remove-from-origin + add-here), not an
+//     implicit side effect of this endpoint (§8.3).
+//
+// Validation:
+//   404 category_not_found   — invalid id or missing row
+//   400 invalid_entities     — missing / not an array / empty array /
+//                              every entry dropped by normalisation
+//   409 entity_conflict      — at least one entry collides with
+//                              another category. Body:
+//                              `{ conflicts: [{ entity, category_id,
+//                              category_name }] }`
+//
+// Response: 200 { data: Category }  — the full updated row so the
+// caller can drop the result straight into the category detail
+// pane without a refetch.
+//
+// Audit (§13.2 #26):
+//   action: 'category_entity_added'
+//   detail: `category=<name> entities=<first>[,+<k>]`
+//   Canonical pt-PT (curveLogsUtils): "Entidades adicionadas a <name>: <lista>"
+//
+// One audit row per POST regardless of batch size (the doc's §13.2
+// note #2 specifies this). The detail is truncated to first +
+// count to keep it under the 120-char `truncateDetail` cap.
+// ─────────────────────────────────────────────────────────────────────
+router.post('/:id/entities', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const { entities } = req.body ?? {};
+    if (!Array.isArray(entities) || entities.length === 0) {
+      return res.status(400).json({ error: 'invalid_entities' });
+    }
+
+    // Normalise + dedupe the caller's payload. Drops blanks, non-
+    // strings, and `normalize()` duplicates within the same request.
+    const incoming = normaliseEntityInput(entities);
+    if (incoming.length === 0) {
+      return res.status(400).json({ error: 'invalid_entities' });
+    }
+
+    // Build the set of THIS category's existing normalised entities
+    // so we can silently drop duplicates that are already present
+    // (idempotent re-POSTs). The raw form is preserved in storage —
+    // normalise only here on the check side.
+    const currentNormalised = new Set(
+      (category.entities ?? []).map((e) => normalize(e)).filter(Boolean),
+    );
+
+    // Scan every OTHER category for conflicts. At MVP scale the
+    // catalogue is small (~50 categories × ~10 entities each), so a
+    // full fetch + in-memory map is cheaper than N round trips. We
+    // key by normalised form so "Lidl" in Groceries still conflicts
+    // with an incoming "lidl".
+    const others = await Category.find({ _id: { $ne: id } })
+      .select('_id name entities')
+      .lean();
+    const conflictMap = new Map(); // norm → { category_id, category_name, entity }
+    for (const c of others) {
+      if (!Array.isArray(c.entities)) continue;
+      for (const e of c.entities) {
+        const norm = normalize(e);
+        if (!norm || conflictMap.has(norm)) continue;
+        conflictMap.set(norm, {
+          category_id: c._id.toString(),
+          category_name: c.name,
+          entity: e,
+        });
+      }
+    }
+
+    // Partition the incoming list into additions vs conflicts. A
+    // single conflict aborts the whole batch with 409 — §8.3 is
+    // explicit that we never half-apply, because "the admin decides
+    // explicitly on the frontend whether to move".
+    const conflicts = [];
+    const additions = [];
+    for (const { raw, norm } of incoming) {
+      const conflict = conflictMap.get(norm);
+      if (conflict) {
+        conflicts.push({
+          entity: raw,
+          category_id: conflict.category_id,
+          category_name: conflict.category_name,
+        });
+        continue;
+      }
+      if (currentNormalised.has(norm)) continue; // idempotent: already present
+      additions.push(raw);
+    }
+
+    if (conflicts.length > 0) {
+      return res.status(409).json({
+        error: 'entity_conflict',
+        conflicts,
+      });
+    }
+
+    if (additions.length === 0) {
+      // Everything was an already-present duplicate — idempotent 200.
+      // No audit row because nothing actually changed (§13.4).
+      return res.json({ data: category.toObject() });
+    }
+
+    category.entities = [...(category.entities ?? []), ...additions];
+    await category.save();
+
+    // Detail format matches §13.2 note #2: the first entry verbatim,
+    // plus `+<k>` for the remaining count, so the whole string stays
+    // under the 120-char truncateDetail cap even for large batches.
+    const detailList =
+      additions.length === 1
+        ? additions[0]
+        : `${additions[0]},+${additions.length - 1}`;
+    audit({
+      action: 'category_entity_added',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `category=${category.name} entities=${detailList}`,
+    });
+
+    res.json({ data: category.toObject() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/categories/:id/apply-to-all   (admin only)
+//
+// Retroactive cross-user recategorisation for a global catalogue
+// category. Mirror of `POST /api/category-overrides/:id/apply-to-all`
+// but operates over EVERY user's expenses — this is the admin's
+// counterpart, spec'd in docs/Categories.md §6.5 (global case) and
+// §8.5 (API contract). The exact semantics are identical to the
+// personal variant; the only difference is the scope of the scan.
+//
+// Auth: `authenticate` + `requireAdmin`.
+//
+// Route params:
+//   :id — category _id (validated as ObjectId, 404 otherwise)
+//
+// Body / query:
+//   { dry_run?: boolean, scope?: 'affected' | 'missing' }
+//   - `dry_run: true`   — no writes, no audit row; response carries
+//                         the preview counts so the frontend modal
+//                         can render "would update N despesas" before
+//                         the admin commits.
+//   - `scope: 'affected'` (default) — every expense whose entity
+//                         matches AT LEAST ONE of this category's
+//                         patterns (via the real `matches()` verdict).
+//   - `scope: 'missing'` — only expenses with `category_id: null`.
+//                         First-run / backfill case (§8.5).
+//   Both flags accept the query-string form (`?dry_run=true`) for
+//   curl probing — same convention as the personal variant.
+//
+// Invariants (§6.5, §6.8, "personal is sacred"):
+//   - Re-runs the FULL resolver (§5) with each owner's context, so
+//     a pre-existing personal override naturally beats the admin's
+//     new global rule and the expense is left untouched.
+//   - Idempotent: two consecutive runs produce the same state because
+//     the second run finds `current === verdict` on every candidate.
+//   - `reassignCategoryBulk` (§4.4) is the ONLY write surface —
+//     `Expense.updateMany` is never called directly from this
+//     handler, matching the discipline of the personal variant.
+//
+// Candidate set: full scan of `expenses` (optionally pre-filtered by
+// `category_id: null` for `scope: 'missing'`), then a post-filter in
+// memory against every entity in this category's `entities[]` using
+// the real `matches()`. No coarse regex pre-filter — §6.7 and
+// routes/categoryOverrides.js explain why: a naive regex over
+// `entity` produces false NEGATIVES on the `normalize()` pipeline
+// (accent-fold + punctuation-to-space + lowercase), and at MVP
+// scale (<10k expenses × ~100 users, §6.7) a full scan + in-memory
+// match is both simpler and provably correct.
+//
+// Per-user grouping: the scan is cross-user, but the resolver needs
+// the OWNING user's overrides to make the right decision for each
+// row (§6.5). We group candidates by `user_id` and call
+// `loadContext(userId)` once per owner, then run `resolveCategory`
+// per candidate with the right context. Buckets:
+//
+//   verdict === category._id  && current !== verdict  → update
+//   verdict === category._id  && current === verdict  → no-op
+//   verdict !== category._id                          → skipped_personal
+//
+// The third bucket captures both cases where a personal override
+// redirects the expense away from the admin's target AND cases where
+// another global rule with a longer pattern already claims it. From
+// the admin's viewpoint, both are "the new rule didn't win", which
+// is exactly the metric `skipped_personal` is measuring.
+//
+// Writes: one `reassignCategoryBulk({ _id: { $in: ids }, user_id },
+// targetId)` per `(user, target)` bucket. The per-user `user_id`
+// filter is a safety belt — the candidate set already guarantees
+// ownership — matching the defence-in-depth pattern used in
+// routes/expenses.js and the personal apply-to-all variant.
+//
+// Response (§8.5):
+//   200 { data: { dry_run, scope, matched, updated, skipped_personal } }
+//     - `matched`          — rows whose verdict differs from current
+//                            (i.e. rows we would write in a real run)
+//     - `updated`          — rows actually rewritten (0 on dry_run;
+//                            equals `matched` on a clean real run)
+//     - `skipped_personal` — rows where the resolver verdict is NOT
+//                            this category (personal or longer-match
+//                            interception, "personal is sacred")
+//   400 invalid_scope
+//   404 category_not_found
+//   500 — partial-failure path: any already-applied bucket stays
+//         applied (idempotent on retry), plus an `apply_to_all_failed`
+//         audit row captures the reason for forensics.
+//
+// Rate limiting (§8.5 → `429 apply_to_all_rate_limited`) is NOT
+// implemented in the MVP — no rate-limit scaffolding exists yet and
+// apply-to-all is a human-initiated single click. Same posture as
+// the personal variant. Add when scaffolding lands.
+//
+// Audit (§13.2 #32):
+//   action: 'apply_to_all'
+//   detail: `scope=global target=category affected=<n> skipped_personal=<n> category=<name>`
+//   Canonical pt-PT (curveLogsUtils): "Aplicado a <n> despesas: <pattern> → <category>"
+//
+// Failure path (§13.2 #33):
+//   action: 'apply_to_all_failed'
+//   detail: `reason=<msg> target=category category=<name>`
+// ─────────────────────────────────────────────────────────────────────
+router.post('/:id/apply-to-all', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const category = await Category.findById(id)
+      .select('_id name entities')
+      .lean();
+    if (!category) {
+      return res.status(404).json({ error: 'category_not_found' });
+    }
+
+    const dryRun =
+      req.body?.dry_run === true ||
+      req.query?.dry_run === 'true' ||
+      req.query?.dry_run === '1';
+    const scope = req.body?.scope ?? req.query?.scope ?? 'affected';
+    if (scope !== 'affected' && scope !== 'missing') {
+      return res.status(400).json({ error: 'invalid_scope' });
+    }
+
+    // Pre-normalise every entity in this category once. These form
+    // the rule set that drives the candidate post-filter below. The
+    // shape mirrors `loadContext`'s global rules (contains-type,
+    // priority 0) so the same `matches()` verdict applies.
+    const categoryPatterns = (category.entities ?? [])
+      .map((e) => normalize(e))
+      .filter(Boolean)
+      .map((p) => ({ pattern_normalized: p, match_type: 'contains' }));
+
+    // No entities → nothing to match → short-circuit with a no-op
+    // response. Still honours the dry_run / scope flags so the
+    // frontend modal can render consistent "0 afectadas" feedback.
+    if (categoryPatterns.length === 0) {
+      return res.json({
+        data: {
+          dry_run: dryRun,
+          scope,
+          matched: 0,
+          updated: 0,
+          skipped_personal: 0,
+        },
+      });
+    }
+
+    // Cross-user candidate scan. `scope: missing` adds the
+    // `category_id: null` pre-filter so the backfill case doesn't
+    // walk the whole expense table when most of it is already
+    // categorised. `select` keeps the payload to the four fields
+    // the resolver needs.
+    const baseFilter = scope === 'missing' ? { category_id: null } : {};
+    const candidates = await Expense.find(baseFilter)
+      .select('_id entity category_id user_id')
+      .lean();
+
+    // Post-filter with the real matcher. A candidate enters the
+    // reconciliation pass only if its normalised entity matches AT
+    // LEAST ONE of the category's patterns — the same verdict the
+    // resolver would apply, so we can't accidentally drop anything
+    // `resolveCategory` would have claimed.
+    const targetCategoryId = category._id.toString();
+    const matchedCandidates = [];
+    for (const e of candidates) {
+      const norm = normalize(e.entity);
+      if (!norm) continue;
+      if (categoryPatterns.some((rule) => matches(norm, rule))) {
+        matchedCandidates.push(e);
+      }
+    }
+
+    // Group by owner so `loadContext` is called once per user. At
+    // MVP scale (tens of users × tens of candidates each) the extra
+    // allocation is trivial, and the per-user context reuse means
+    // the reconciliation loop stays O(candidates × (G + U) × L_e)
+    // from §5.6, not O(candidates × loadContext_round_trip).
+    const byUser = new Map();
+    for (const e of matchedCandidates) {
+      const key = e.user_id.toString();
+      if (!byUser.has(key)) byUser.set(key, []);
+      byUser.get(key).push(e);
+    }
+
+    // Reconciliation pass. Three buckets per candidate — update,
+    // no-op, or `skipped_personal`. Updates are keyed
+    // `userKey → targetKey → [expenseIds]` so each bulk write stays
+    // scoped to a single user + single target category (safety belt
+    // against cross-user writes, and one round trip per bucket).
+    //
+    // `NULL_KEY` is the sentinel for "target is null" — shouldn't
+    // happen in practice on this endpoint because the admin's
+    // category always resolves to a non-null id, but we keep the
+    // sentinel for parity with the personal variant so the write
+    // loop has one code path.
+    const NULL_KEY = '__null__';
+    const updatesByUser = new Map();
+    let matched = 0;
+    let skippedPersonal = 0;
+
+    for (const [userKey, userCandidates] of byUser) {
+      // One loadContext per owner, reused for every one of their
+      // candidates. Mirrors §5.7's "2 queries at caller start,
+      // reused for N expenses" contract.
+      // eslint-disable-next-line no-await-in-loop
+      const ctx = await loadContext(userKey);
+
+      for (const e of userCandidates) {
+        const verdict = resolveCategory(e.entity, ctx);
+        const verdictStr = verdict ? verdict.toString() : null;
+        const currentStr = e.category_id ? e.category_id.toString() : null;
+
+        if (verdictStr !== targetCategoryId) {
+          // The admin's new rule doesn't win for this row — a
+          // personal override or a longer-matching global rule
+          // already claims the entity. "Personal is sacred"
+          // emerges naturally from reusing the resolver, and this
+          // counter surfaces the exclusion to the admin so the
+          // modal can say "5 rows untouched due to personal
+          // rules".
+          skippedPersonal += 1;
+          continue;
+        }
+        if (currentStr === verdictStr) {
+          // Already in the right place — no write, no counter bump.
+          continue;
+        }
+
+        matched += 1;
+        if (!updatesByUser.has(userKey)) {
+          updatesByUser.set(userKey, new Map());
+        }
+        const bucket = updatesByUser.get(userKey);
+        const tkey = verdictStr ?? NULL_KEY;
+        if (!bucket.has(tkey)) bucket.set(tkey, []);
+        bucket.get(tkey).push(e._id);
+      }
+    }
+
+    if (dryRun) {
+      // Preview path. No writes, no audit row (§13.4). The caller
+      // gets the same shape as the real-run response so the modal
+      // can reuse the same renderer.
+      return res.json({
+        data: {
+          dry_run: true,
+          scope,
+          matched,
+          updated: 0,
+          skipped_personal: skippedPersonal,
+        },
+      });
+    }
+
+    // Real run. One `reassignCategoryBulk` per `(user, target)`
+    // bucket — typically one bucket per user because the admin's
+    // target is almost always the same category across all
+    // candidates, but the nested map supports the fan-out case
+    // cleanly (e.g. a user has a longer-match override that wins
+    // and the admin's pass touches their non-override rows
+    // separately).
+    let updated = 0;
+    try {
+      for (const [userKey, byTarget] of updatesByUser) {
+        for (const [tkey, ids] of byTarget) {
+          const target = tkey === NULL_KEY ? null : tkey;
+          // eslint-disable-next-line no-await-in-loop
+          const result = await reassignCategoryBulk(
+            {
+              _id: { $in: ids },
+              user_id: new mongoose.Types.ObjectId(userKey),
+            },
+            target,
+          );
+          updated += result.modified ?? 0;
+        }
+      }
+    } catch (err) {
+      // Partial failure: any bucket that already landed stays
+      // applied (idempotent on retry — the next run finds
+      // `current === verdict` for those rows). Emit the failure
+      // row with enough context to correlate against the category
+      // + the calling admin.
+      audit({
+        action: 'apply_to_all_failed',
+        userId: req.userId,
+        ip: clientIp(req),
+        detail: `reason=${err.message} target=category category=${category.name}`,
+      });
+      return res.status(500).json({ error: err.message });
+    }
+
+    // Success audit. `scope=global` distinguishes this from the
+    // personal variant's `scope=personal`; `target=category` mirrors
+    // the personal path's `target=override`. The curveLogsUtils
+    // parser case splits on these two keys to render the right
+    // pt-PT message.
+    audit({
+      action: 'apply_to_all',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail:
+        `scope=global target=category affected=${updated} ` +
+        `skipped_personal=${skippedPersonal} category=${category.name}`,
+    });
+
+    res.json({
+      data: {
+        dry_run: false,
+        scope,
+        matched,
+        updated,
+        skipped_personal: skippedPersonal,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

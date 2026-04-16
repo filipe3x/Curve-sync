@@ -1,11 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import StatCard from '../components/common/StatCard';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
+import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
+import { useCountUp } from '../hooks/useCountUp';
 import * as api from '../services/api';
+
+// Per-entry auto-dismiss window for the undo banner. Matches the
+// ExpensesPage constant so /expenses and / feel consistent when
+// users jump between them.
+const UNDO_WINDOW_MS = 6000;
 
 /**
  * Re-auth banner visibility rule (see docs/EMAIL_AUTH_MVP.md §8 items
@@ -46,13 +53,34 @@ export default function DashboardPage() {
   const [error, setError] = useState(null);
   const [syncStatus, setSyncStatus] = useState(null);
   const [oauthStatus, setOauthStatus] = useState(null);
+  // "Sem categoria" count over the current day-22 cycle. Backs the
+  // dashboard stat card that deep-links to /curve/logs?tab=uncategorised
+  // — see docs/Categories.md §10.5 / §11.3 Fase 7. `null` while
+  // loading; a failed fetch falls through to `null` and the card
+  // renders `—` the same way the other placeholders do, so the
+  // dashboard never blocks on this endpoint.
+  const [uncategorisedCount, setUncategorisedCount] = useState(null);
   // Category catalogue + popover state for the quick-edit chip on the
   // "Despesas recentes" table. Mirrors ExpensesPage so the same
   // component handles both entry points from docs/Categories.md §12.
   const [categories, setCategories] = useState([]);
+  // Map `category_id -> icon_name` forwarded to the quick-edit
+  // popover so each tile renders its Lucide glyph. Failures fall
+  // through to an empty map — the popover's <CategoryIcon> falls
+  // back to the Tag glyph per-tile, which keeps the picker usable
+  // even if `/api/category-icons` is down.
+  const [iconByCategory, setIconByCategory] = useState(() => new Map());
   const [pickerExpenseId, setPickerExpenseId] = useState(null);
   const [pickerSaving, setPickerSaving] = useState(false);
+  // After the undo-banner refactor `categoryToast` only carries errors
+  // (single-row quick-edit failures + undo-PUT failures). Successes
+  // stage on `categoryEdits` instead so the user gets a short grace
+  // window to reverse a wrong-row click.
   const [categoryToast, setCategoryToast] = useState(null);
+  // Pending undo entries for single-row quick-edits. Mirrors the
+  // ExpensesPage state so /expenses and / share a consistent feel.
+  const [categoryEdits, setCategoryEdits] = useState([]);
+  const editTimersRef = useRef(new Map());
   // Short-lived inline message for the sync button — success summary
   // or non-banner error. The re-auth banner handles OAuth breakage;
   // this covers everything else (parse errors, IMAP folder gone, etc.)
@@ -91,12 +119,84 @@ export default function DashboardPage() {
       .getCategories()
       .then((res) => setCategories(res.data ?? []))
       .catch(() => setCategories([]));
+
+    // Icon mapping for the popover tiles. Same parallel-and-silent
+    // shape as the catalogue fetch — a 500 here must not break the
+    // dashboard, the popover just falls back to Tag glyphs.
+    api
+      .getCategoryIcons()
+      .then((res) => {
+        const entries = (res.data ?? []).map((row) => [
+          String(row.category_id),
+          row.icon_name,
+        ]);
+        setIconByCategory(new Map(entries));
+      })
+      .catch(() => setIconByCategory(new Map()));
+
+    // Uncategorised count for the current day-22 cycle. Failures are
+    // silent — the card just stays on `—`.
+    api
+      .getUncategorisedStats()
+      .then((res) => setUncategorisedCount(res?.count ?? null))
+      .catch(() => setUncategorisedCount(null));
+  }, []);
+
+  // ─── Undo-banner plumbing ───────────────────────────────────────
+  // Mirrors ExpensesPage: per-entry timer map kept outside state, push
+  // dedupes per expenseId (preserving the *original* prevCategory so
+  // Anular always reverts to the true pre-edit state), scheduleEditDismiss
+  // re-arms the ~6 s timer when the user re-edits the same row.
+  const clearEditTimer = (id) => {
+    const t = editTimersRef.current.get(id);
+    if (t) {
+      clearTimeout(t);
+      editTimersRef.current.delete(id);
+    }
+  };
+  const scheduleEditDismiss = (id) => {
+    clearEditTimer(id);
+    const t = setTimeout(() => {
+      setCategoryEdits((prev) => prev.filter((e) => e.id !== id));
+      editTimersRef.current.delete(id);
+    }, UNDO_WINDOW_MS);
+    editTimersRef.current.set(id, t);
+  };
+  const pushCategoryEdit = (entry) => {
+    setCategoryEdits((prev) => {
+      const existing = prev.find((e) => e.expenseId === entry.expenseId);
+      if (existing) clearEditTimer(existing.id);
+      const merged = existing
+        ? {
+            ...entry,
+            prevCategoryId: existing.prevCategoryId,
+            prevCategoryName: existing.prevCategoryName,
+          }
+        : entry;
+      const rest = prev.filter((e) => e.expenseId !== entry.expenseId);
+      return [...rest, merged];
+    });
+    scheduleEditDismiss(entry.id);
+  };
+  useEffect(() => {
+    const timers = editTimersRef.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+    };
   }, []);
 
   // Quick-edit save with optimistic update + rollback. Mirrors the
-  // ExpensesPage helper; see docs/Categories.md §12.4.
+  // ExpensesPage helper; see docs/Categories.md §12.4. Success stages
+  // an undo entry instead of firing a "saved" toast — the chip already
+  // changed in place, so what the user actually needs is a short
+  // grace window to catch a wrong-row click.
   const handleCategorySave = async (expenseId, newCategoryId) => {
     const prev = recentExpenses;
+    const prevRow = prev.find((e) => e._id === expenseId);
+    const entity = prevRow?.entity ?? '';
+    const prevCategoryId = prevRow?.category_id ?? null;
+    const prevCategoryName = prevRow?.category_name ?? null;
     const newCategoryName = newCategoryId
       ? categories.find((c) => String(c._id) === String(newCategoryId))?.name ?? null
       : null;
@@ -113,7 +213,14 @@ export default function DashboardPage() {
       setRecentExpenses((rows) =>
         rows.map((e) => (e._id === expenseId ? { ...e, ...res.data } : e)),
       );
-      setCategoryToast({ type: 'ok', text: 'Categoria actualizada.' });
+      pushCategoryEdit({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        expenseId,
+        entity,
+        prevCategoryId,
+        prevCategoryName,
+        nextCategoryName: res.data?.category_name ?? newCategoryName,
+      });
       setPickerExpenseId(null);
     } catch (err) {
       setRecentExpenses(prev);
@@ -126,6 +233,52 @@ export default function DashboardPage() {
     }
   };
 
+  // Anular handler — optimistic revert + PUT back to prevCategoryId.
+  // Symmetric with the forward save: rollback on failure, re-arm the
+  // banner so the user can try again, and surface an error toast.
+  const handleUndoCategoryEdit = async (entry) => {
+    clearEditTimer(entry.id);
+    setCategoryEdits((prev) =>
+      prev.map((e) => (e.id === entry.id ? { ...e, undoing: true } : e)),
+    );
+    const prevRows = recentExpenses;
+    setRecentExpenses((rows) =>
+      rows.map((e) =>
+        e._id === entry.expenseId
+          ? {
+              ...e,
+              category_id: entry.prevCategoryId,
+              category_name: entry.prevCategoryName,
+            }
+          : e,
+      ),
+    );
+    try {
+      const res = await api.updateExpenseCategory(
+        entry.expenseId,
+        entry.prevCategoryId,
+      );
+      setRecentExpenses((rows) =>
+        rows.map((e) =>
+          e._id === entry.expenseId ? { ...e, ...res.data } : e,
+        ),
+      );
+      setCategoryEdits((prev) => prev.filter((e) => e.id !== entry.id));
+    } catch (err) {
+      setRecentExpenses(prevRows);
+      setCategoryEdits((prev) =>
+        prev.map((e) => (e.id === entry.id ? { ...e, undoing: false } : e)),
+      );
+      setCategoryToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível anular a alteração.',
+      });
+      scheduleEditDismiss(entry.id);
+    }
+  };
+
+  // Errors stay up until the next action so the user can read them;
+  // there is no ok branch anymore (successes stage on categoryEdits).
   useEffect(() => {
     if (categoryToast?.type !== 'ok') return;
     const t = setTimeout(() => setCategoryToast(null), 4000);
@@ -172,6 +325,14 @@ export default function DashboardPage() {
       } catch {
         /* best-effort — the banner will catch up on next mount */
       }
+      // Re-pull the uncategorised count too — a successful sync may
+      // have added new "Sem categoria" rows (or the user re-categorised
+      // them via the popover, in which case the count should drop).
+      // Silent on failure — the card keeps the stale number.
+      api
+        .getUncategorisedStats()
+        .then((res) => setUncategorisedCount(res?.count ?? null))
+        .catch(() => {});
       // Keep the message visible but slightly longer on success so
       // the user can read it. Error messages stay until the next
       // click because dismissing them silently would just recreate
@@ -183,6 +344,13 @@ export default function DashboardPage() {
   };
 
   const showReauth = needsReauth({ syncStatus, oauthStatus });
+
+  // KPI-strip convention per docs/Categories.md §9.8: tween numeric
+  // stats from 0 → target on first paint so the dashboard feels alive
+  // rather than teleporting values in. Passing 0 while loading keeps
+  // the tween target deterministic; the card itself shows `—` until
+  // the fetch resolves, so the user never sees a spurious "0".
+  const uncategorisedDisplay = useCountUp(uncategorisedCount ?? 0);
 
   return (
     <>
@@ -263,10 +431,29 @@ export default function DashboardPage() {
           value={stats?.savings_score != null ? stats.savings_score : '—'}
           accent
         />
-        <StatCard
-          label="Emails processados"
-          value={stats?.emails_processed ?? '—'}
-        />
+        {/*
+          "Sem categoria" card — the one interactive stat on the
+          dashboard. Wrapping StatCard in a Link rather than teaching
+          StatCard about href keeps the component dumb (it's used in
+          four other places, none of which should light up on hover).
+          Deep-links to /curve/logs with the tab param so the user
+          lands directly on the uncategorised bucket, scoped to the
+          current day-22 cycle by the server.
+         */}
+        <Link
+          to="/curve/logs?tab=uncategorised"
+          className="block rounded-2xl transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+        >
+          <StatCard
+            label="Sem categoria"
+            value={
+              uncategorisedCount == null
+                ? '—'
+                : Math.round(uncategorisedDisplay).toLocaleString('pt-PT')
+            }
+            sub="ciclo actual"
+          />
+        </Link>
         <StatCard
           label="Último sync"
           value={stats?.last_sync ?? '—'}
@@ -280,8 +467,9 @@ export default function DashboardPage() {
           Despesas recentes
         </h2>
 
-        {/* Quick-edit popover feedback — mirrors ExpensesPage so the
-            two entry points surface identically (§12.8). */}
+        {/* Quick-edit error toast — mirrors ExpensesPage so the two
+            entry points surface identically (§12.8). Successes are
+            rendered as an undo banner below instead of a toast. */}
         {categoryToast && (
           <div
             className={`mb-4 animate-slide-in-right rounded-2xl px-4 py-3 text-sm ${
@@ -294,6 +482,14 @@ export default function DashboardPage() {
             {categoryToast.text}
           </div>
         )}
+
+        {/* Staging banner(s) for single-row quick-edits — same shape
+            as the /expenses banner; each entry auto-dismisses after
+            ~6 s unless the user clicks Anular. */}
+        <CategoryEditUndoBanner
+          edits={categoryEdits}
+          onUndo={handleUndoCategoryEdit}
+        />
 
         {error && (
           <p className="mb-4 text-sm text-curve-600">{error}</p>
@@ -363,6 +559,7 @@ export default function DashboardPage() {
                           <CategoryPickerPopover
                             expense={exp}
                             categories={categories}
+                            iconByCategory={iconByCategory}
                             saving={pickerSaving}
                             onSelect={(newId) =>
                               handleCategorySave(exp._id, newId)

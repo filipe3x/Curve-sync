@@ -14,6 +14,25 @@ const curveLogSchema = new mongoose.Schema(
     // from real syncs. Dry runs still write CurveLog entries for visibility, but
     // the audit UI should filter them out of normal views by default.
     dry_run: { type: Boolean, default: false },
+    // Structured mirror of the "uncategorised" signal that the
+    // orchestrator also writes as the literal string
+    // `error_detail = "uncategorised"` on sync `ok` rows where no
+    // tier matched (see services/syncOrchestrator.js ::
+    // formatResolutionDetail). Having a dedicated indexed boolean
+    // — rather than relying on a string-equality check over
+    // error_detail — lets downstream consumers answer "how many
+    // uncategorised this cycle?" with a covered count query
+    // instead of a full-collection scan, and keeps the filter path
+    // forward-compatible if we ever change the free-text detail
+    // wording (the boolean stays stable).
+    //
+    // Only ever true on `status: 'ok'` sync rows. All other rows
+    // (duplicates, errors, parse_errors, audit entries) leave it
+    // false by default. The string in error_detail is the source of
+    // truth for the /curve/logs pill renderer (§13.5); this field is
+    // the source of truth for the dashboard stat card + filter
+    // endpoint (§11.3 Fase 7).
+    uncategorised: { type: Boolean, default: false },
     // Audit logging fields (MU-5). When `action` is set, the entry represents
     // a security/admin event rather than a sync result.
     action: { type: String, enum: [
@@ -85,14 +104,40 @@ const curveLogSchema = new mongoose.Schema(
       'override_created', 'override_updated', 'override_deleted',
       'apply_to_all', 'apply_to_all_failed',
       // Admin-only catalogue surgery on the shared `categories`
-      // collection (docs/Categories.md §13.2 #27). Only the
-      // entity-removal variant ships in PR #6 — the rest of the
-      // §13.2 admin catalogue (category_created/updated/deleted,
-      // category_entity_added, category_entity_moved) will land
-      // when the admin full-CRUD slice does. Carries the category
-      // name + removed entity in `error_detail` as
-      // `category=<name> entity=<value>`.
+      // collection (docs/Categories.md §13.2 #23-28). The full
+      // admin CRUD slice now exposes create/update/delete of
+      // categories plus batch entity add/remove on
+      // `POST /api/categories`, `PUT /api/categories/:id`,
+      // `DELETE /api/categories/:id`, `POST /:id/entities`, and
+      // `DELETE /:id/entities/:entity`. Each handler writes a
+      // single `audit()` row with `error_detail` following the
+      // k=v convention from §13.2:
+      //   category_created       — `name=<name> entity_count=<n>`
+      //   category_updated       — `name=<name> changed=<fields>`
+      //   category_deleted       — `name=<name> expense_count=<n>`
+      //   category_entity_added  — `category=<name> entities=<first>[,+<k>]`
+      //   category_entity_removed — `category=<name> entity=<value>`
+      // `category_entity_moved` (§13.2 #28) is not yet exposed —
+      // no bulk-move handler lands with this slice — but the
+      // enum value is added proactively so the audit helper can
+      // accept it when the route ships.
+      'category_created',
+      'category_updated',
+      'category_deleted',
+      'category_entity_added',
       'category_entity_removed',
+      'category_entity_moved',
+      // Admin icon change (curve_category_icons, Curve-Sync-owned
+      // collection — separate from the Paperclip `icon_*` fields on
+      // the shared `categories` row, which we never touch). Fires on
+      // both PUT (set/change) and DELETE (clear) — the detail
+      // discriminates via `icon=<name|none> previous=<old|none>`, so
+      // the curveLogsUtils renderer picks the right pt-PT message
+      // without needing a second enum value. §13.4 no-op
+      // suppression applies: a PUT whose new name equals the
+      // current name is silent, and a DELETE on a category that
+      // had no icon is also silent.
+      'category_icon_updated',
       // Admin-gate rejection fired by `middleware/requireAdmin.js`
       // when a non-admin hits an admin-only route (§13.2 #35,
       // renamed per §13.7 #2 to include the `failed` suffix so
@@ -110,5 +155,17 @@ const curveLogSchema = new mongoose.Schema(
 
 // TTL index: auto-delete logs older than 90 days
 curveLogSchema.index({ created_at: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
+
+// Compound index for the "uncategorised this cycle" stat query
+// (docs/Categories.md §11.3 Fase 7). The dashboard card and the
+// /curve/logs filter both hit `{ user_id, uncategorised: true,
+// created_at: {$gte: cycleStart} }` — user + flag + range — so a
+// compound on the same three fields makes it covered. Partial
+// filter so only the ~5-10% of rows with the flag set occupy
+// space; the false/undefined rows stay out of the index.
+curveLogSchema.index(
+  { user_id: 1, uncategorised: 1, created_at: -1 },
+  { partialFilterExpression: { uncategorised: true } },
+);
 
 export default mongoose.model('CurveLog', curveLogSchema);

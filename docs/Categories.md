@@ -639,7 +639,11 @@ proibido:
   `global_vs_user_flag`, `regex_pattern` — nada disso entra aqui. A
   riqueza de metadados vive em `curve_category_overrides` (§4.3).
 - Alterar índices existentes.
-- Tocar nos campos `icon_*` que o Paperclip do Embers gere.
+- Tocar nos campos `icon_*` que o Paperclip do Embers gere. O
+  Curve-Sync tem o seu próprio mapeamento de ícones numa colecção à
+  parte (`curve_category_icons`, ver §8.9) — os cinco campos
+  Paperclip ficam como ghost data, nunca lidos nem escritos por este
+  serviço.
 
 **Como o catálogo global é interpretado pelo matcher.** Cada entry
 do array `entities[]` é tratado pelo Curve Sync como um padrão
@@ -1407,13 +1411,18 @@ dos handlers de overrides (ver §7.3).
       "id": "65f…",
       "name": "Groceries",
       "entities": ["lidl", "continente", "pingo doce"],
-      "icon_url": "/images/categories/groceries.png",
       "created_at": "2024-01-12T…",
       "updated_at": "2024-03-04T…"
     }
   ]
 }
 ```
+
+O payload **não inclui** o ícone. O glyph rendered vem de um mapping
+Curve-Sync-owned à parte — ver §8.9. Os campos Paperclip dormentes
+(`icon_file_name`, `icon_content_type`, …) continuam no documento
+mas não são projectados pelo handler e o Mongoose schema de §2.1
+nem sequer os conhece.
 
 `POST /api/categories` — cria categoria global (admin). Body:
 
@@ -1427,9 +1436,9 @@ dos handlers de overrides (ver §7.3).
   (case-insensitive)
 - `403` — sem `role: 'admin'`
 
-`PUT /api/categories/:id` — edita nome e/ou ícone (o array
-`entities` é mexido pelos endpoints granulares de §8.3, não aqui).
-Body aceita `{ name?: string, icon_url?: string }`.
+`PUT /api/categories/:id` — edita nome (o array `entities` é mexido
+pelos endpoints granulares de §8.3, não aqui; o ícone tem endpoint
+próprio em §8.9). Body aceita `{ name?: string }`.
 
 - `200` → `{ data: Category }`
 - `404 category_not_found`
@@ -1698,9 +1707,111 @@ filtro" (§12.12).
 | `expense_not_found` | 404 | PUT expenses/:id/category |
 | `invalid_body` | 400 | PUT expenses/bulk-category (ids shape) |
 | `bulk_too_large` | 400 | GET expenses?fields=_id (>500 rows) |
+| `invalid_icon_name` | 400 | PUT category-icons/:id (§8.9) |
 
 Os 401 e 403 genéricos (§7.5) não entram na tabela — são contratos
 dos middlewares, não dos handlers.
+
+### 8.9 Ícones por categoria — `curve_category_icons` (admin-only escrita)
+
+O ícone rendered ao lado do nome da categoria (nos chips de despesas,
+na lista do `/categories`, no picker) **não vive em `categories`**.
+Vive numa colecção Curve-Sync-owned, `curve_category_icons`, com um
+documento por categoria que guarda apenas o nome do glyph Lucide a
+render pelo cliente.
+
+**Porque não reutilizámos o Paperclip do Embers.** O `Category` do
+Embers (`docs/embers-reference/models/category.rb:16`) tem um
+attachment Paperclip com cinco campos (`icon_file_name`,
+`icon_content_type`, `icon_file_size`, `icon_fingerprint`,
+`icon_updated_at`) e os bytes vivem no filesystem do servidor
+Embers, em `public/system/…`. Curve-Sync corre como serviço
+separado: partilha a BD mas não tem acesso a esse filesystem, não
+sabe servir os ficheiros e não tem pipeline de upload. Portar
+Paperclip para Mongoose significava replicar pipeline de upload,
+adapter de storage e URLs assinadas — custo real que para um
+catálogo de ~50 categorias entrega zero valor face a uma biblioteca
+de glyphs vectoriais já disponível no cliente (Lucide).
+
+Decisão: os cinco campos Paperclip ficam como *ghost data*
+dormente no documento (Embers ainda os lê — não renomear, não
+apagar — ver §4.2 regra "Tocar nos campos `icon_*`"), o Mongoose
+schema do §2.1 nem sequer os projecta, e o Curve-Sync passa a
+tratar o ícone como uma associação separada:
+
+```javascript
+// server/src/models/CategoryIcon.js
+const categoryIconSchema = new mongoose.Schema(
+  {
+    category_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Category',
+      required: true,
+      unique: true,  // uma linha por categoria
+    },
+    icon_name: { type: String, required: true, trim: true },
+  },
+  {
+    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+    collection: 'curve_category_icons',
+  },
+);
+```
+
+`icon_name` é o nome do componente Lucide tal como exportado pelo
+`lucide-react` (p.ex. `"ShoppingCart"`, `"Coffee"`, `"Tag"`). O
+servidor valida contra uma whitelist fechada em
+`server/src/services/iconRegistry.js` — o cliente carrega um picker
+com o mesmo catálogo, portanto só aceitamos nomes que o cliente sabe
+renderizar. Um PUT com um nome fora da lista falha com
+`400 invalid_icon_name` em vez de escrever um valor que mais tarde
+não teria glyph.
+
+**Endpoints.**
+
+`GET /api/category-icons` — leitura para **qualquer user
+autenticado**. Ícones são catalogue-level, não per-user.
+
+```json
+// 200 OK
+{
+  "data": [
+    { "category_id": "65f…", "icon_name": "ShoppingCart" },
+    { "category_id": "65e…", "icon_name": "Coffee" }
+  ]
+}
+```
+
+O frontend carrega o mapping uma vez por página em paralelo com
+`GET /api/categories` e mantém-no num `Map<category_id, icon_name>`
+passado a todos os renderers de chip.
+
+`PUT /api/category-icons/:category_id` (admin) — upsert idempotente:
+cria a linha se a categoria ainda não tem ícone, actualiza caso
+contrário. Body `{ icon_name: string }`. Um PUT com o mesmo
+`icon_name` já persistido devolve `200` sem escrever em `curve_logs`
+(autosave path — alinhado com §13.4).
+
+- `200` → `{ data: { category_id, icon_name } }`
+- `404 category_not_found` — id inválido ou categoria inexistente
+- `400 invalid_icon_name` — nome em falta, não-string, ou fora da
+  whitelist
+- `403` — sem `role: 'admin'`
+
+`DELETE /api/category-icons/:category_id` (admin) — apaga a
+associação. Idempotente: apagar um ícone já ausente devolve `204`
+sem auditar. O handler aceita apagar ícones cuja categoria tenha
+sido eliminada num tab paralelo (a categoria pode já não existir;
+só o id é validado como ObjectId).
+
+- `204` em sucesso (sem body)
+- `404 category_not_found` — id não é ObjectId válido
+
+**Auditoria.** Ambos os writes partilham a mesma acção
+`category_icon_updated` no `CurveLog` enum — o DELETE grava
+`icon=none previous=<old>`, permitindo ao renderer de
+`/curve/logs` traduzir as duas operações numa linha única "Ícone
+de X alterado (→ Lucide / → nenhum)" sem um 13º caso no enum.
 
 ## 9. UIX — ecrã único de gestão de categorias
 
@@ -2313,32 +2424,63 @@ no success path e `CurveLog.create` via `writeLog()`.
 
 ### 10.5 Auditoria e logs
 
-O `writeLog({ status: 'ok', ... })` do path de sucesso não muda.
-O `category_id` resolvido fica no documento `Expense` e é
-linkado pelo `CurveLogsPage` através do expense, não de um
-campo novo no log. Não é preciso inventar `status: 'categorised'`
-— a informação já está acessível pela cadeia
-`curve_logs → expense → category`.
+O `writeLog({ status: 'ok', ... })` do path de sucesso **escreve
+sempre** `error_detail` com o trilho de resolução. O `category_id`
+resolvido continua a viver no documento `Expense` — o detail é
+apenas um atalho human-readable para o `/curve/logs` mostrar
+*porque é que* esta despesa caiu na categoria X sem ter de seguir
+a cadeia `curve_logs → expense → category`.
 
-Dois casos onde faz sentido adicionar detail ao log:
+Três valores possíveis, produzidos pelo
+`formatResolutionDetail(source, category_name)` no
+`services/syncOrchestrator.js`:
 
-- **Match por override (ciclo normal).** `detail: "override →
-  <category_name>"` num log `ok` facilita debug de "porque é
-  que esta despesa caiu em Coffee?". Campo opcional,
-  truncado a 120 chars pelo `truncateDetail` existente.
-- **No match (fallback `null`).** Hoje uma despesa sem match
-  fica com `category_id = null` silenciosamente. Propõe-se
-  acrescentar um flag `uncategorised: true` ao log `ok`
-  correspondente, para o `/curve/logs` conseguir filtrar e
-  mostrar "N despesas sem categoria este ciclo — adiciona uma
-  regra".
+- `override → <category_name>` — matchou uma regra pessoal.
+- `global → <category_name>` — matchou o catálogo global.
+- `uncategorised` — nenhum tier matchou, `category_id = null`.
 
-Ambos são *opcionais* para o rollout inicial — o pipeline
-funciona sem eles. O catálogo completo de `action` values novos
-que **são** obrigatórios (apply-to-all, CRUD de categorias,
-CRUD de overrides, quick-edit) está consolidado no §13.2 — este
-capítulo só cobre as anotações ao sync path já existente, não os
-eventos administrativos.
+O orchestrator chama `resolveCategoryDetailed(entity, ctx)` (ver
+§5.5) que devolve `{ category_id, source, category_name }` numa
+única pass, sem lookups adicionais — o `categoriesById: Map`
+que o `loadContext` já constrói resolve o nome em O(1).
+
+`error_detail` é reutilizado com semântica diferente consoante o
+`status` (o campo é free-text, sem enum no schema):
+
+- `ok` → trilho de classificação (acima).
+- `parse_error` / `error` → mensagem de erro humana, como antes.
+- `duplicate` → vazio (nada útil a dizer).
+
+O renderer do `/curve/logs` (§13.5) parseia o prefixo
+`override → ` / `global → ` / `uncategorised` para decidir entre
+mostrar pílula colorida vs texto cru — qualquer outro conteúdo
+em `error_detail` continua a cair no fallback mono actual, o que
+preserva a compatibilidade com rows legadas escritas antes deste
+campo existir.
+
+Um último gancho ficou documentado nesta mesma secção e foi
+implementado logo a seguir: o flag `uncategorised: true` no schema
+do `CurveLog`, escrito em paralelo com o `error_detail = "uncategorised"`
+pelo orchestrator. A duplicação é intencional — o detail é
+human-readable para a pílula (§13.5), o boolean é indexado (partial
+compound index `{ user_id: 1, uncategorised: 1, created_at: -1 }`
+filtrado em `uncategorised: true`) para count queries sub-ms que
+alimentam:
+
+- `GET /api/curve/logs?uncategorised=true` — tab deep-linkável
+  **"Sem categoria"** no `/curve/logs` (`?tab=uncategorised`),
+  compõe com `?type=sync` implícito (só rows sync carregam o flag).
+- `GET /api/curve/stats/uncategorised` — `{ count, cycle: { start,
+  end } }` sobre o ciclo day-22 actual via `cycleBoundsFor(new
+  Date())` partilhado com `/api/categories/stats` em
+  `services/cycle.js`. Alimenta a StatCard **"Sem categoria"** do
+  dashboard, que substituiu o placeholder "Emails processados" e
+  deep-linka para `/curve/logs?tab=uncategorised`.
+
+O catálogo completo de `action` values novos (apply-to-all, CRUD
+de categorias, CRUD de overrides, quick-edit) está consolidado no
+§13.2 — este capítulo só cobre as anotações ao sync path já
+existente, não os eventos administrativos.
 
 ### 10.6 Backwards-compat e shape idêntico
 
@@ -2520,6 +2662,13 @@ toca na relaxação de `expenses`.
   multi-admin.
 - **Reversível:** flag `enableAdminCategoryEditing` no frontend
   ou hide do botão, sem remover código.
+- **Estado na implementação:** o gate ficou em `user.role === 'admin'`
+  — a flag `enableAdminCategoryEditing` não foi introduzida. Para o
+  admin único do MVP o custo de toggle dinâmico não compensa o
+  overhead de mais uma config; rollback é remover a condição ou
+  `git revert` dos commits da fase. Se passarmos a multi-admin (ou
+  a staging rollouts), o backlog é trocar a condição por uma flag
+  real — mantido aqui para referência futura.
 
 **Fase 6 — Apply-to-all + quick-edit inline (endpoint + UX).**
 - Primeira fase que **requer** a relaxação do §4.4 (UPDATE de
@@ -2545,16 +2694,42 @@ toca na relaxação de `expenses`.
   read-only actual, sem tocar no backend.
 
 **Fase 7 — Polimento e observabilidade.**
-- Campo `detail: "override → <name>"` nos logs `ok` (§10.5).
-- Flag `uncategorised: true` nos logs para o filtro do
-  `/curve/logs`.
-- Métricas no dashboard: "N overrides activos" como stat card
-  opcional.
-- Seed script (opcional) de entidades comuns portuguesas
+- ~~Campo `detail: "override → <name>"` nos logs `ok` (§10.5).~~
+  **Feito.** `resolveCategoryDetailed` no resolver +
+  `formatResolutionDetail` no orchestrator escrevem
+  `override → <cat>` / `global → <cat>` / `uncategorised` em
+  `error_detail`, e o `ResolutionPill` em `curveLogsUtils.js` +
+  `CurveLogsPage.jsx` mostra a pílula colorida no `/curve/logs`
+  (§10.5, §13.5).
+- ~~Flag `uncategorised: true` nos logs para o filtro do
+  `/curve/logs`.~~ **Feito.** `CurveLog.uncategorised` (boolean)
+  escrito pelo orchestrator em paralelo com o `error_detail`,
+  com índice parcial composto
+  `{ user_id: 1, uncategorised: 1, created_at: -1 }` (filtro
+  parcial `uncategorised: true`) para count queries sub-ms.
+  `GET /api/curve/logs?uncategorised=true` compõe com
+  `?type=sync`, e o `/curve/logs` ganhou a tab **"Sem
+  categoria"** deep-linkável via `?tab=uncategorised` com empty
+  state celebratório quando a lista está vazia.
+- ~~Métricas no dashboard: stat card "Sem categoria" do ciclo
+  actual.~~ **Feito.** `GET /api/curve/stats/uncategorised`
+  devolve `{ count, cycle: { start, end } }` usando o índice
+  parcial + `cycleBoundsFor(new Date())` partilhado com
+  `/api/categories/stats` via `services/cycle.js`. O
+  `DashboardPage` substituiu o placeholder "Emails processados"
+  por uma StatCard interactiva, animada com `useCountUp`
+  (convenção §9.8), que deep-linka para
+  `/curve/logs?tab=uncategorised`.
+- ~~Seed script (opcional) de entidades comuns portuguesas
   (Continente, Lidl, Pingo Doce, Auchan, Mercadona, Galp, BP,
   Repsol, MBWay, Via Verde) no catálogo global — acelera a
   experiência de onboarding sem obrigar o admin a escrever
-  tudo à mão.
+  tudo à mão.~~ **Feito.** `server/scripts/seed-categories-pt.js`
+  — aditivo, idempotente, default em dry-run (`--apply` para
+  commitar). Cobre Groceries (5), Fuel (3), Transport (1),
+  Payments (1); reusa o `normalize()` do resolver para dedup
+  e deixa em paz qualquer entity que já pertença a outra
+  categoria global (report de conflito, nunca move).
 
 ### 11.4 Riscos e mitigação
 
@@ -2620,6 +2795,44 @@ Embers sem exigir nenhuma alteração ao lado Embers — e abre a
 porta às melhorias opcionais (detalhe nos logs, métricas no
 dashboard, undo de apply-to-all) que ficaram conscientemente
 fora do MVP.
+
+### 11.7 Seed de entidades PT
+
+`server/scripts/seed-categories-pt.js` popula o catálogo global
+com os retalhistas que um utilizador Curve típico em Portugal vê
+no primeiro mês de extracto. Quatro categorias e dez entidades —
+Groceries (Continente, Lidl, Pingo Doce, Auchan, Mercadona),
+Fuel (Galp, BP, Repsol), Transport (Via Verde) e Payments
+(MBWay) — o suficiente para a primeira sincronização não parecer
+vazia sem obrigar o admin a digitar à mão. Uso:
+
+```bash
+cd server && node scripts/seed-categories-pt.js            # dry-run
+cd server && node scripts/seed-categories-pt.js --apply    # commit
+```
+
+Garantias, todas alinhadas com o resto do §4 e §8:
+
+- **Aditivo e idempotente.** Categorias ausentes criam-se com
+  `Category.create({ name, entities })`; categorias existentes
+  (match case-insensitive em `name`) recebem as entidades em falta
+  via `$addToSet`. Entidades já presentes são silenciosamente
+  ignoradas — o dedup key é o `normalize()` do resolver (§5.2),
+  mesmo contrato que a rota admin `POST /categories/:id/entities`.
+- **Cross-category conflicts report-not-move.** Se uma entidade do
+  seed já vive noutra categoria global, é reportada no briefing e
+  deixada em paz — o invariante de unicidade (§4.1) ganha sobre
+  o seed. O admin pode mover à mão se quiser.
+- **Dry-run por defeito.** O briefing imprime antes de qualquer
+  write; só com `--apply` o script commita. Mantém-se o estilo
+  dos outros dev helpers em `server/scripts/` (`reset-seen.js`,
+  `cleanup-sync.js`).
+- **Campos Embers-compatíveis.** Só `name` e `entities` — os
+  campos Paperclip (`icon_*`) nunca são tocados, em linha com a
+  regra "never modify the schema" do `CLAUDE.md`. Ícones vivem
+  na colecção paralela `curve_category_icons` (Curve-Sync-owned,
+  ver `server/src/models/CategoryIcon.js`) e esse mapping é
+  separado — o seed não o preenche, por agora.
 
 ## 12. Quick edit inline nas tabelas de despesas
 
@@ -3202,6 +3415,52 @@ admin está a debugar. Extensão pequena, não bloqueante.
 com o padrão de `CURVE_LOGS.md §6.3`. As criações (`created`,
 `added`) ficam com o neutral `bg-sand-100` — o acto em si é
 benigno.
+
+**Pílula de resolução nos rows sync `ok`.** O `describeLog`
+parseia `error_detail` nos rows sync de sucesso (§10.5) com o
+helper `parseResolutionDetail(detail)` e devolve um campo
+estruturado `resolution: { source, categoryName }` a que o
+renderer atribui uma pílula `ResolutionPill` em três tons:
+
+| Source          | Classe Tailwind                       | Label pt-PT           |
+|-----------------|---------------------------------------|-----------------------|
+| `override`      | `bg-violet-50 text-violet-700`        | `Regra pessoal · <cat>` |
+| `global`        | `bg-sand-100 text-sand-600`           | `Catálogo · <cat>`    |
+| `uncategorised` | `bg-amber-50 text-amber-700`          | `Sem categoria`       |
+
+O violeta do `override` espelha o badge Catálogo do §13.2 —
+uma regra pessoal é, na prática, o catálogo do próprio user — e
+o amber do `uncategorised` reusa o tom do staging banner do
+§9.7.1 e do undo banner do §12.8, para manter a linguagem visual
+"precisa de atenção" consistente em todas as superfícies. O
+`attr title` da pílula expõe o texto cru `override → Mercados`
+para correlação em tooling externo.
+
+A pílula aparece em duas superfícies dentro do `/curve/logs`:
+
+- **`SingleRow`** (sync row isolado) — na meta line secundária,
+  junto de entity/amount/digest. Flex-wrap para não rebentar em
+  viewports estreitos.
+- **`BatchRow`** expandido (cluster de vários sync rows) — na
+  mesma linha, substituindo o dump mono que o `error_detail`
+  produzia antes. Rows com `status != 'ok'` continuam a mostrar
+  o texto cru em mono (mensagem de erro real).
+
+Rows antigas escritas antes deste campo existir devolvem
+`parseResolutionDetail() === null` e caem silenciosamente no
+path anterior — a feature é aditiva.
+
+**Tab "Sem categoria".** O `TABS` array do `CurveLogsPage.jsx`
+evoluiu de um `param: string` fechado para um `params: {}` aberto
+que expande directamente para a query string. A quarta tab
+`{ id: 'uncategorised', params: { uncategorised: 'true' } }` faz
+o fetch hit no partial compound index (ver §10.5), o `useSearchParams`
+sincroniza o `?tab=<id>` no URL (`replace: true` para não poluir
+o histórico), e o empty state da tab é celebratório — "Tudo
+categorizado" em vez do genérico "sem registos" — porque lista
+vazia neste bucket é a condição feliz. A tab é o destino único de
+três entry points: link directo do utilizador, pílula amber
+`Sem categoria` numa row `ok`, e a StatCard do dashboard.
 
 ### 13.6 Retenção — consistente com `CURVE_LOGS.md §7`
 

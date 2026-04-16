@@ -1,16 +1,26 @@
 import { Fragment, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import { ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
-import { describeLog, groupSyncBatches } from './curveLogsUtils';
+import { describeLog, groupSyncBatches, parseResolutionDetail } from './curveLogsUtils';
 
 const PER_PAGE = 30;
 
+// The `param` shape is open: `type` still drives the sync/audit split,
+// and individual tabs can add extra query params (e.g. `uncategorised`)
+// that compose server-side. Keeping each tab declarative means the
+// fetch layer stays a single URLSearchParams expansion.
 const TABS = [
-  { id: 'all',   label: 'Tudo',           param: undefined },
-  { id: 'sync',  label: 'Sincronizações', param: 'sync' },
-  { id: 'audit', label: 'Auditoria',      param: 'audit' },
+  { id: 'all',           label: 'Tudo',           params: {} },
+  { id: 'sync',          label: 'Sincronizações', params: { type: 'sync' } },
+  { id: 'audit',         label: 'Auditoria',      params: { type: 'audit' } },
+  // "Sem categoria" — filtered view of sync `ok` rows where
+  // `resolveCategoryDetailed` returned `source: null` (docs/Categories.md
+  // §11.3 Fase 7). Hits the partial compound index added in the model
+  // for sub-ms counts even at year-scale log volumes.
+  { id: 'uncategorised', label: 'Sem categoria',  params: { uncategorised: 'true' } },
 ];
 
 const TYPE_BADGE = {
@@ -27,8 +37,45 @@ const TYPE_LABEL = {
   catalogo: 'Catálogo',
 };
 
+// Classification-path pill shown on sync `ok` rows. The three
+// branches map 1:1 to the tier labels the orchestrator records in
+// `error_detail` (docs/Categories.md §13, server's
+// `formatResolutionDetail`):
+//
+//   override       — personal rule won           → violet (matches
+//                    the Catálogo audit badge, since an override is
+//                    a user-owned catalogue entry)
+//   global         — curated catalogue won       → sand (neutral;
+//                    the "default" path, nothing surprising to see)
+//   uncategorised  — nothing matched             → amber (the call
+//                    to action — matches the staging-edit banner on
+//                    /expenses so the visual language lines up)
+//
+// The pill is intentionally tiny (text-[10px]) and sits on the
+// secondary meta line so the primary title stays uncluttered for
+// users who don't care about matching internals.
+const RESOLUTION_STYLE = {
+  override:      'bg-violet-50 text-violet-700',
+  global:        'bg-sand-100 text-sand-600',
+  uncategorised: 'bg-amber-50 text-amber-700',
+};
+
+const RESOLUTION_LABEL = {
+  override:      'Regra pessoal',
+  global:        'Catálogo',
+  uncategorised: 'Sem categoria',
+};
+
 export default function CurveLogsPage() {
-  const [tab, setTab] = useState('all');
+  // Deep-linkable tab state — `/curve/logs?tab=uncategorised` lands
+  // directly on the filtered view, used by the dashboard's
+  // "Sem categoria" stat card and by any sharable URL. Falls back to
+  // 'all' when the query is absent or names an unknown tab.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = TABS.some((t) => t.id === searchParams.get('tab'))
+    ? searchParams.get('tab')
+    : 'all';
+  const [tab, setTab] = useState(initialTab);
   const [logs, setLogs] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -36,9 +83,11 @@ export default function CurveLogsPage() {
 
   useEffect(() => {
     setLoading(true);
-    const params = { page, limit: PER_PAGE };
     const tabDef = TABS.find((t) => t.id === tab);
-    if (tabDef?.param) params.type = tabDef.param;
+    // Spread tab-specific params (type, uncategorised, ...) into the
+    // base page/limit so a tab can contribute any filter without the
+    // effect having to know which keys exist.
+    const params = { page, limit: PER_PAGE, ...(tabDef?.params ?? {}) };
     api
       .getCurveLogs(params)
       .then((res) => {
@@ -66,6 +115,16 @@ export default function CurveLogsPage() {
             onClick={() => {
               setTab(t.id);
               setPage(1);
+              // Keep the URL in sync so the tab is sharable and so a
+              // browser-back from /categories lands back on the same
+              // filter. Omit `?tab=all` to keep URLs clean for the
+              // default view.
+              if (t.id === 'all') {
+                searchParams.delete('tab');
+              } else {
+                searchParams.set('tab', t.id);
+              }
+              setSearchParams(searchParams, { replace: true });
             }}
             className={`flex-1 rounded-lg px-3 py-1.5 font-medium transition-colors ${
               tab === t.id
@@ -83,10 +142,23 @@ export default function CurveLogsPage() {
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-curve-300 border-t-curve-700" />
         </div>
       ) : logs.length === 0 ? (
-        <EmptyState
-          title="Sem logs"
-          description="Os logs aparecerão após a primeira sincronização."
-        />
+        // Tab-aware empty state — the generic "Sem logs" copy is right
+        // for Tudo / Sincronizações / Auditoria, but lands wrong on
+        // the uncategorised tab where "empty" is the success state
+        // (everything got classified). The celebratory variant nudges
+        // the user toward `/categories` in case they want to see *why*
+        // everything matched.
+        tab === 'uncategorised' ? (
+          <EmptyState
+            title="Tudo categorizado"
+            description="Não há despesas sem categoria — todas as sincronizações recentes tocaram uma regra pessoal ou o catálogo global."
+          />
+        ) : (
+          <EmptyState
+            title="Sem logs"
+            description="Os logs aparecerão após a primeira sincronização."
+          />
+        )
       ) : (
         <div className="animate-fade-in overflow-hidden rounded-2xl border border-sand-200 bg-white">
           <table className="w-full text-sm">
@@ -142,8 +214,14 @@ export default function CurveLogsPage() {
 // ---------- Row components ----------
 
 function SingleRow({ log }) {
-  const { type, title, hideDetail } = describeLog(log);
+  const { type, title, hideDetail, resolution } = describeLog(log);
   const isExpense = type === 'despesa' && log.entity;
+  // `ok` sync rows now hold the resolution path in `error_detail`
+  // (not an error). Hiding it from the generic `!isExpense` fallback
+  // stops the raw "override → Mercados" text from double-rendering
+  // alongside the pill on the SECOND line. The pill itself lives
+  // inside the `isExpense` block below.
+  const detailIsResolution = log.status === 'ok' && resolution != null;
   return (
     <tr className="border-b border-sand-50 transition-colors hover:bg-sand-50/60">
       <DateCell value={log.created_at} />
@@ -151,20 +229,24 @@ function SingleRow({ log }) {
       <td className="px-5 py-3">
         <div className="text-sand-900">{title}</div>
         {isExpense && (
-          <div className="mt-0.5 text-xs text-sand-500">
-            {log.entity}
-            {log.amount != null && <> · €{Number(log.amount).toFixed(2)}</>}
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-sand-500">
+            <span>{log.entity}</span>
+            {log.amount != null && <span>· €{Number(log.amount).toFixed(2)}</span>}
             {log.digest && (
-              <> · <code className="font-mono text-[11px] text-sand-400">{log.digest.slice(0, 12)}…</code></>
+              <>
+                <span>·</span>
+                <code className="font-mono text-[11px] text-sand-400">{log.digest.slice(0, 12)}…</code>
+              </>
             )}
+            {resolution && <ResolutionPill resolution={resolution} />}
             {log.dry_run && (
-              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-indigo-600">
+              <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-indigo-600">
                 simulação
               </span>
             )}
           </div>
         )}
-        {!isExpense && !hideDetail && log.error_detail && !title.includes(log.error_detail) && (
+        {!isExpense && !hideDetail && !detailIsResolution && log.error_detail && !title.includes(log.error_detail) && (
           <div className="mt-0.5 break-all font-mono text-xs text-sand-400">{log.error_detail}</div>
         )}
       </td>
@@ -214,32 +296,48 @@ function BatchRow({ batch }) {
         </td>
       </tr>
       {open &&
-        batch.logs.map((log) => (
-          <tr key={log._id} className="border-b border-sand-50 bg-sand-50/40">
-            <td className="px-5 py-2 pl-12 text-xs text-sand-400">
-              {formatDate(log.created_at)}
-            </td>
-            <td className="px-5 py-2">
-              <StatusDot status={log.status} />
-            </td>
-            <td className="px-5 py-2 text-xs">
-              <span className="text-sand-800">{log.entity ?? '—'}</span>
-              {log.amount != null && (
-                <span className="ml-2 text-sand-500">€{Number(log.amount).toFixed(2)}</span>
-              )}
-              {log.digest && (
-                <code className="ml-2 font-mono text-[11px] text-sand-400">
-                  {log.digest.slice(0, 12)}…
-                </code>
-              )}
-              {log.error_detail && (
-                <div className="mt-0.5 break-all font-mono text-[11px] text-curve-700">
-                  {log.error_detail}
+        batch.logs.map((log) => {
+          // `ok` rows carry the classification path in `error_detail`.
+          // We parse it inline here — batch children skip describeLog
+          // on purpose (the batch only needs the summary), so we
+          // reach into the shared parser directly to keep the two
+          // row renderers consistent.
+          const resolution =
+            log.status === 'ok' ? parseResolutionDetail(log.error_detail) : null;
+          // Only show the raw mono detail when it's NOT a resolution
+          // string — on failure rows that's a real error message we
+          // want to surface verbatim; on ok rows the pill replaces it.
+          const showRawDetail = log.error_detail && !resolution;
+          return (
+            <tr key={log._id} className="border-b border-sand-50 bg-sand-50/40">
+              <td className="px-5 py-2 pl-12 text-xs text-sand-400">
+                {formatDate(log.created_at)}
+              </td>
+              <td className="px-5 py-2">
+                <StatusDot status={log.status} />
+              </td>
+              <td className="px-5 py-2 text-xs">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-sand-800">{log.entity ?? '—'}</span>
+                  {log.amount != null && (
+                    <span className="text-sand-500">€{Number(log.amount).toFixed(2)}</span>
+                  )}
+                  {log.digest && (
+                    <code className="font-mono text-[11px] text-sand-400">
+                      {log.digest.slice(0, 12)}…
+                    </code>
+                  )}
+                  {resolution && <ResolutionPill resolution={resolution} />}
                 </div>
-              )}
-            </td>
-          </tr>
-        ))}
+                {showRawDetail && (
+                  <div className="mt-0.5 break-all font-mono text-[11px] text-curve-700">
+                    {log.error_detail}
+                  </div>
+                )}
+              </td>
+            </tr>
+          );
+        })}
     </Fragment>
   );
 }
@@ -257,6 +355,31 @@ function TypeCell({ type }) {
         {TYPE_LABEL[type] ?? type}
       </span>
     </td>
+  );
+}
+
+function ResolutionPill({ resolution }) {
+  const style = RESOLUTION_STYLE[resolution.source] ?? RESOLUTION_STYLE.global;
+  const label = RESOLUTION_LABEL[resolution.source] ?? resolution.source;
+  return (
+    <span
+      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${style}`}
+      // The tooltip gives power users the raw `source → category`
+      // string the server wrote, for correlation with logs tooling
+      // and the admin audit trail. Harmless for regular users —
+      // hover on a mobile doesn't reveal anything and the label +
+      // colour already carry the meaning.
+      title={
+        resolution.categoryName
+          ? `${resolution.source} → ${resolution.categoryName}`
+          : resolution.source
+      }
+    >
+      {label}
+      {resolution.categoryName && (
+        <span className="ml-1 font-normal opacity-80">· {resolution.categoryName}</span>
+      )}
+    </span>
   );
 }
 

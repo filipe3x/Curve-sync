@@ -245,7 +245,8 @@ Curve sync:
 - `POST /api/curve/sync` — Trigger manual sync (used by dashboard's "Sincronizar agora")
 - `GET /api/curve/sync/status` — Lightweight `last_sync_*` snapshot consumed by the dashboard re-auth banner
 - `POST /api/curve/test-connection` — Opens IMAP, returns the folder list (used by both the wizard's folder step and the config page)
-- `GET /api/curve/logs` — Audit trail (backed by `curve_logs`)
+- `GET /api/curve/logs` — Audit trail (backed by `curve_logs`). `?type=sync|audit` splits the two streams; `?uncategorised=true` filters to sync `ok` rows where the resolver returned `source: null` (see `docs/Categories.md` §10.5 and §13.5).
+- `GET /api/curve/stats/uncategorised` — `{ count, cycle: { start, end } }` over the current day-22 cycle. Backs the dashboard "Sem categoria" StatCard; uses the partial compound index on `CurveLog.uncategorised` for sub-ms counts.
 
 OAuth wizard (`server/src/routes/curveOAuth.js`):
 - `POST /api/curve/oauth/check-email` — Classifies an email domain → `{ provider: 'microsoft' | 'google' | null }`
