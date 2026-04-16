@@ -5,7 +5,10 @@
 //   - audit events → action != null, carry ip/error_detail
 //
 // describeLog() turns a single log into the user-facing { type, title }
-// pair shown in the "Tipo" + "Detalhe" columns.
+// pair shown in the "Tipo" + "Detalhe" columns. For `ok`-status sync
+// rows it also returns a structured `resolution` field describing the
+// classification path the orchestrator recorded — see
+// parseResolutionDetail() below and docs/Categories.md §13.
 //
 // groupSyncBatches() collapses runs of consecutive expense rows that
 // landed within BATCH_WINDOW_MS into a single expandable entry — when
@@ -14,6 +17,37 @@
 // see "5 despesas importadas" instead of 5 near-duplicate rows.
 
 const BATCH_WINDOW_MS = 5_000;
+
+/**
+ * Parse the `error_detail` column for sync `ok` rows into its
+ * structured parts. The orchestrator's `formatResolutionDetail`
+ * (server/src/services/syncOrchestrator.js) writes one of:
+ *
+ *   override → <category name>
+ *   global → <category name>
+ *   uncategorised
+ *
+ * into the same column that carries error strings on failure rows.
+ * Returns `null` for anything that doesn't match so existing callers
+ * (legacy rows written before this field existed, or future free-
+ * text details) fall through cleanly.
+ *
+ * Returned shape: `{ source: 'override'|'global'|'uncategorised',
+ *                    categoryName: string|null }`. `categoryName` is
+ * null on `uncategorised` and on the degenerate `<source> → ?`
+ * fallback the server emits when a category vanished between
+ * loadContext and resolution.
+ */
+export function parseResolutionDetail(detail) {
+  if (!detail) return null;
+  if (detail === 'uncategorised') {
+    return { source: 'uncategorised', categoryName: null };
+  }
+  const match = detail.match(/^(override|global) → (.+)$/);
+  if (!match) return null;
+  const categoryName = match[2] === '?' ? null : match[2];
+  return { source: match[1], categoryName };
+}
 
 // Maps a CurveLog to a human-readable { type, title }.
 // `type` drives the badge colour. `title` is the leading description
@@ -448,9 +482,16 @@ export function describeLog(log) {
   // ---- Sync events (action == null) ----
   // Rows with a parsed body are "despesa" type; the bodyless ones
   // (parse_error, circuit breaker, sync aborted) are "sistema".
+  //
+  // `ok` rows (real and dry-run) now carry a structured `resolution`
+  // alongside the title so the row renderer can show a coloured pill
+  // with the classification path — `error_detail` holds the raw
+  // `override → <name>` / `global → <name>` / `uncategorised` string
+  // written by the orchestrator, and we parse it once here so
+  // SingleRow / BatchRow don't each repeat the regex.
   if (log.entity) {
     if (log.dry_run) {
-      return {
+      const base = {
         type: 'despesa',
         title: log.status === 'ok'
           ? 'Importaria nova despesa (simulação)'
@@ -458,9 +499,18 @@ export function describeLog(log) {
             ? 'Já existia (simulação)'
             : `Falhou verificação${log.error_detail ? `: ${log.error_detail}` : ''}`,
       };
+      if (log.status === 'ok') {
+        base.resolution = parseResolutionDetail(log.error_detail);
+      }
+      return base;
     }
     switch (log.status) {
-      case 'ok':        return { type: 'despesa', title: 'Despesa importada' };
+      case 'ok':
+        return {
+          type: 'despesa',
+          title: 'Despesa importada',
+          resolution: parseResolutionDetail(log.error_detail),
+        };
       case 'duplicate': return { type: 'despesa', title: 'Já existia (duplicado)' };
       case 'error':
         return { type: 'despesa', title: `Falhou ao guardar${log.error_detail ? `: ${log.error_detail}` : ''}` };

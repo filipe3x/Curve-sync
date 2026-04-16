@@ -3,7 +3,7 @@ import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import { ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
-import { describeLog, groupSyncBatches } from './curveLogsUtils';
+import { describeLog, groupSyncBatches, parseResolutionDetail } from './curveLogsUtils';
 
 const PER_PAGE = 30;
 
@@ -25,6 +25,35 @@ const TYPE_LABEL = {
   sistema:  'Sistema',
   auth:     'Auth',
   catalogo: 'Catálogo',
+};
+
+// Classification-path pill shown on sync `ok` rows. The three
+// branches map 1:1 to the tier labels the orchestrator records in
+// `error_detail` (docs/Categories.md §13, server's
+// `formatResolutionDetail`):
+//
+//   override       — personal rule won           → violet (matches
+//                    the Catálogo audit badge, since an override is
+//                    a user-owned catalogue entry)
+//   global         — curated catalogue won       → sand (neutral;
+//                    the "default" path, nothing surprising to see)
+//   uncategorised  — nothing matched             → amber (the call
+//                    to action — matches the staging-edit banner on
+//                    /expenses so the visual language lines up)
+//
+// The pill is intentionally tiny (text-[10px]) and sits on the
+// secondary meta line so the primary title stays uncluttered for
+// users who don't care about matching internals.
+const RESOLUTION_STYLE = {
+  override:      'bg-violet-50 text-violet-700',
+  global:        'bg-sand-100 text-sand-600',
+  uncategorised: 'bg-amber-50 text-amber-700',
+};
+
+const RESOLUTION_LABEL = {
+  override:      'Regra pessoal',
+  global:        'Catálogo',
+  uncategorised: 'Sem categoria',
 };
 
 export default function CurveLogsPage() {
@@ -142,8 +171,14 @@ export default function CurveLogsPage() {
 // ---------- Row components ----------
 
 function SingleRow({ log }) {
-  const { type, title, hideDetail } = describeLog(log);
+  const { type, title, hideDetail, resolution } = describeLog(log);
   const isExpense = type === 'despesa' && log.entity;
+  // `ok` sync rows now hold the resolution path in `error_detail`
+  // (not an error). Hiding it from the generic `!isExpense` fallback
+  // stops the raw "override → Mercados" text from double-rendering
+  // alongside the pill on the SECOND line. The pill itself lives
+  // inside the `isExpense` block below.
+  const detailIsResolution = log.status === 'ok' && resolution != null;
   return (
     <tr className="border-b border-sand-50 transition-colors hover:bg-sand-50/60">
       <DateCell value={log.created_at} />
@@ -151,20 +186,24 @@ function SingleRow({ log }) {
       <td className="px-5 py-3">
         <div className="text-sand-900">{title}</div>
         {isExpense && (
-          <div className="mt-0.5 text-xs text-sand-500">
-            {log.entity}
-            {log.amount != null && <> · €{Number(log.amount).toFixed(2)}</>}
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-sand-500">
+            <span>{log.entity}</span>
+            {log.amount != null && <span>· €{Number(log.amount).toFixed(2)}</span>}
             {log.digest && (
-              <> · <code className="font-mono text-[11px] text-sand-400">{log.digest.slice(0, 12)}…</code></>
+              <>
+                <span>·</span>
+                <code className="font-mono text-[11px] text-sand-400">{log.digest.slice(0, 12)}…</code>
+              </>
             )}
+            {resolution && <ResolutionPill resolution={resolution} />}
             {log.dry_run && (
-              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-indigo-600">
+              <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-indigo-600">
                 simulação
               </span>
             )}
           </div>
         )}
-        {!isExpense && !hideDetail && log.error_detail && !title.includes(log.error_detail) && (
+        {!isExpense && !hideDetail && !detailIsResolution && log.error_detail && !title.includes(log.error_detail) && (
           <div className="mt-0.5 break-all font-mono text-xs text-sand-400">{log.error_detail}</div>
         )}
       </td>
@@ -214,32 +253,48 @@ function BatchRow({ batch }) {
         </td>
       </tr>
       {open &&
-        batch.logs.map((log) => (
-          <tr key={log._id} className="border-b border-sand-50 bg-sand-50/40">
-            <td className="px-5 py-2 pl-12 text-xs text-sand-400">
-              {formatDate(log.created_at)}
-            </td>
-            <td className="px-5 py-2">
-              <StatusDot status={log.status} />
-            </td>
-            <td className="px-5 py-2 text-xs">
-              <span className="text-sand-800">{log.entity ?? '—'}</span>
-              {log.amount != null && (
-                <span className="ml-2 text-sand-500">€{Number(log.amount).toFixed(2)}</span>
-              )}
-              {log.digest && (
-                <code className="ml-2 font-mono text-[11px] text-sand-400">
-                  {log.digest.slice(0, 12)}…
-                </code>
-              )}
-              {log.error_detail && (
-                <div className="mt-0.5 break-all font-mono text-[11px] text-curve-700">
-                  {log.error_detail}
+        batch.logs.map((log) => {
+          // `ok` rows carry the classification path in `error_detail`.
+          // We parse it inline here — batch children skip describeLog
+          // on purpose (the batch only needs the summary), so we
+          // reach into the shared parser directly to keep the two
+          // row renderers consistent.
+          const resolution =
+            log.status === 'ok' ? parseResolutionDetail(log.error_detail) : null;
+          // Only show the raw mono detail when it's NOT a resolution
+          // string — on failure rows that's a real error message we
+          // want to surface verbatim; on ok rows the pill replaces it.
+          const showRawDetail = log.error_detail && !resolution;
+          return (
+            <tr key={log._id} className="border-b border-sand-50 bg-sand-50/40">
+              <td className="px-5 py-2 pl-12 text-xs text-sand-400">
+                {formatDate(log.created_at)}
+              </td>
+              <td className="px-5 py-2">
+                <StatusDot status={log.status} />
+              </td>
+              <td className="px-5 py-2 text-xs">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-sand-800">{log.entity ?? '—'}</span>
+                  {log.amount != null && (
+                    <span className="text-sand-500">€{Number(log.amount).toFixed(2)}</span>
+                  )}
+                  {log.digest && (
+                    <code className="font-mono text-[11px] text-sand-400">
+                      {log.digest.slice(0, 12)}…
+                    </code>
+                  )}
+                  {resolution && <ResolutionPill resolution={resolution} />}
                 </div>
-              )}
-            </td>
-          </tr>
-        ))}
+                {showRawDetail && (
+                  <div className="mt-0.5 break-all font-mono text-[11px] text-curve-700">
+                    {log.error_detail}
+                  </div>
+                )}
+              </td>
+            </tr>
+          );
+        })}
     </Fragment>
   );
 }
@@ -257,6 +312,31 @@ function TypeCell({ type }) {
         {TYPE_LABEL[type] ?? type}
       </span>
     </td>
+  );
+}
+
+function ResolutionPill({ resolution }) {
+  const style = RESOLUTION_STYLE[resolution.source] ?? RESOLUTION_STYLE.global;
+  const label = RESOLUTION_LABEL[resolution.source] ?? resolution.source;
+  return (
+    <span
+      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${style}`}
+      // The tooltip gives power users the raw `source → category`
+      // string the server wrote, for correlation with logs tooling
+      // and the admin audit trail. Harmless for regular users —
+      // hover on a mobile doesn't reveal anything and the label +
+      // colour already carry the meaning.
+      title={
+        resolution.categoryName
+          ? `${resolution.source} → ${resolution.categoryName}`
+          : resolution.source
+      }
+    >
+      {label}
+      {resolution.categoryName && (
+        <span className="ml-1 font-normal opacity-80">· {resolution.categoryName}</span>
+      )}
+    </span>
   );
 }
 
