@@ -639,7 +639,11 @@ proibido:
   `global_vs_user_flag`, `regex_pattern` — nada disso entra aqui. A
   riqueza de metadados vive em `curve_category_overrides` (§4.3).
 - Alterar índices existentes.
-- Tocar nos campos `icon_*` que o Paperclip do Embers gere.
+- Tocar nos campos `icon_*` que o Paperclip do Embers gere. O
+  Curve-Sync tem o seu próprio mapeamento de ícones numa colecção à
+  parte (`curve_category_icons`, ver §8.9) — os cinco campos
+  Paperclip ficam como ghost data, nunca lidos nem escritos por este
+  serviço.
 
 **Como o catálogo global é interpretado pelo matcher.** Cada entry
 do array `entities[]` é tratado pelo Curve Sync como um padrão
@@ -1407,13 +1411,18 @@ dos handlers de overrides (ver §7.3).
       "id": "65f…",
       "name": "Groceries",
       "entities": ["lidl", "continente", "pingo doce"],
-      "icon_url": "/images/categories/groceries.png",
       "created_at": "2024-01-12T…",
       "updated_at": "2024-03-04T…"
     }
   ]
 }
 ```
+
+O payload **não inclui** o ícone. O glyph rendered vem de um mapping
+Curve-Sync-owned à parte — ver §8.9. Os campos Paperclip dormentes
+(`icon_file_name`, `icon_content_type`, …) continuam no documento
+mas não são projectados pelo handler e o Mongoose schema de §2.1
+nem sequer os conhece.
 
 `POST /api/categories` — cria categoria global (admin). Body:
 
@@ -1427,9 +1436,9 @@ dos handlers de overrides (ver §7.3).
   (case-insensitive)
 - `403` — sem `role: 'admin'`
 
-`PUT /api/categories/:id` — edita nome e/ou ícone (o array
-`entities` é mexido pelos endpoints granulares de §8.3, não aqui).
-Body aceita `{ name?: string, icon_url?: string }`.
+`PUT /api/categories/:id` — edita nome (o array `entities` é mexido
+pelos endpoints granulares de §8.3, não aqui; o ícone tem endpoint
+próprio em §8.9). Body aceita `{ name?: string }`.
 
 - `200` → `{ data: Category }`
 - `404 category_not_found`
@@ -1698,9 +1707,111 @@ filtro" (§12.12).
 | `expense_not_found` | 404 | PUT expenses/:id/category |
 | `invalid_body` | 400 | PUT expenses/bulk-category (ids shape) |
 | `bulk_too_large` | 400 | GET expenses?fields=_id (>500 rows) |
+| `invalid_icon_name` | 400 | PUT category-icons/:id (§8.9) |
 
 Os 401 e 403 genéricos (§7.5) não entram na tabela — são contratos
 dos middlewares, não dos handlers.
+
+### 8.9 Ícones por categoria — `curve_category_icons` (admin-only escrita)
+
+O ícone rendered ao lado do nome da categoria (nos chips de despesas,
+na lista do `/categories`, no picker) **não vive em `categories`**.
+Vive numa colecção Curve-Sync-owned, `curve_category_icons`, com um
+documento por categoria que guarda apenas o nome do glyph Lucide a
+render pelo cliente.
+
+**Porque não reutilizámos o Paperclip do Embers.** O `Category` do
+Embers (`docs/embers-reference/models/category.rb:16`) tem um
+attachment Paperclip com cinco campos (`icon_file_name`,
+`icon_content_type`, `icon_file_size`, `icon_fingerprint`,
+`icon_updated_at`) e os bytes vivem no filesystem do servidor
+Embers, em `public/system/…`. Curve-Sync corre como serviço
+separado: partilha a BD mas não tem acesso a esse filesystem, não
+sabe servir os ficheiros e não tem pipeline de upload. Portar
+Paperclip para Mongoose significava replicar pipeline de upload,
+adapter de storage e URLs assinadas — custo real que para um
+catálogo de ~50 categorias entrega zero valor face a uma biblioteca
+de glyphs vectoriais já disponível no cliente (Lucide).
+
+Decisão: os cinco campos Paperclip ficam como *ghost data*
+dormente no documento (Embers ainda os lê — não renomear, não
+apagar — ver §4.2 regra "Tocar nos campos `icon_*`"), o Mongoose
+schema do §2.1 nem sequer os projecta, e o Curve-Sync passa a
+tratar o ícone como uma associação separada:
+
+```javascript
+// server/src/models/CategoryIcon.js
+const categoryIconSchema = new mongoose.Schema(
+  {
+    category_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Category',
+      required: true,
+      unique: true,  // uma linha por categoria
+    },
+    icon_name: { type: String, required: true, trim: true },
+  },
+  {
+    timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+    collection: 'curve_category_icons',
+  },
+);
+```
+
+`icon_name` é o nome do componente Lucide tal como exportado pelo
+`lucide-react` (p.ex. `"ShoppingCart"`, `"Coffee"`, `"Tag"`). O
+servidor valida contra uma whitelist fechada em
+`server/src/services/iconRegistry.js` — o cliente carrega um picker
+com o mesmo catálogo, portanto só aceitamos nomes que o cliente sabe
+renderizar. Um PUT com um nome fora da lista falha com
+`400 invalid_icon_name` em vez de escrever um valor que mais tarde
+não teria glyph.
+
+**Endpoints.**
+
+`GET /api/category-icons` — leitura para **qualquer user
+autenticado**. Ícones são catalogue-level, não per-user.
+
+```json
+// 200 OK
+{
+  "data": [
+    { "category_id": "65f…", "icon_name": "ShoppingCart" },
+    { "category_id": "65e…", "icon_name": "Coffee" }
+  ]
+}
+```
+
+O frontend carrega o mapping uma vez por página em paralelo com
+`GET /api/categories` e mantém-no num `Map<category_id, icon_name>`
+passado a todos os renderers de chip.
+
+`PUT /api/category-icons/:category_id` (admin) — upsert idempotente:
+cria a linha se a categoria ainda não tem ícone, actualiza caso
+contrário. Body `{ icon_name: string }`. Um PUT com o mesmo
+`icon_name` já persistido devolve `200` sem escrever em `curve_logs`
+(autosave path — alinhado com §13.4).
+
+- `200` → `{ data: { category_id, icon_name } }`
+- `404 category_not_found` — id inválido ou categoria inexistente
+- `400 invalid_icon_name` — nome em falta, não-string, ou fora da
+  whitelist
+- `403` — sem `role: 'admin'`
+
+`DELETE /api/category-icons/:category_id` (admin) — apaga a
+associação. Idempotente: apagar um ícone já ausente devolve `204`
+sem auditar. O handler aceita apagar ícones cuja categoria tenha
+sido eliminada num tab paralelo (a categoria pode já não existir;
+só o id é validado como ObjectId).
+
+- `204` em sucesso (sem body)
+- `404 category_not_found` — id não é ObjectId válido
+
+**Auditoria.** Ambos os writes partilham a mesma acção
+`category_icon_updated` no `CurveLog` enum — o DELETE grava
+`icon=none previous=<old>`, permitindo ao renderer de
+`/curve/logs` traduzir as duas operações numa linha única "Ícone
+de X alterado (→ Lucide / → nenhum)" sem um 13º caso no enum.
 
 ## 9. UIX — ecrã único de gestão de categorias
 
@@ -2520,6 +2631,13 @@ toca na relaxação de `expenses`.
   multi-admin.
 - **Reversível:** flag `enableAdminCategoryEditing` no frontend
   ou hide do botão, sem remover código.
+- **Estado na implementação:** o gate ficou em `user.role === 'admin'`
+  — a flag `enableAdminCategoryEditing` não foi introduzida. Para o
+  admin único do MVP o custo de toggle dinâmico não compensa o
+  overhead de mais uma config; rollback é remover a condição ou
+  `git revert` dos commits da fase. Se passarmos a multi-admin (ou
+  a staging rollouts), o backlog é trocar a condição por uma flag
+  real — mantido aqui para referência futura.
 
 **Fase 6 — Apply-to-all + quick-edit inline (endpoint + UX).**
 - Primeira fase que **requer** a relaxação do §4.4 (UPDATE de
