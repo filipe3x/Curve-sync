@@ -69,9 +69,15 @@ function formatEUR(value) {
 
 // "2026-03-22" → "22 Mar" for the cycle subtitle. Falls back to the
 // raw string if the input doesn't parse.
+//
+// The regex has three capture groups (year, month, day), so the
+// destructuring must skip four slots (match[0] = full string, then the
+// year) before reaching month + day. An earlier version dropped only
+// the full match and ended up reading the year as the month — which
+// rendered "Ciclo actual · 3 – 4" instead of "22 Mar – 21 Abr".
 function prettyDate(iso) {
   if (!iso) return '';
-  const [, m, d] = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/) ?? [];
+  const [, , m, d] = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/) ?? [];
   if (!d) return iso;
   const months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
   return `${Number(d)} ${months[Number(m) - 1] ?? ''}`.trim();
