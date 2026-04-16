@@ -2,8 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
+import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
+
+// Per-entry auto-dismiss window for the undo banner. Long enough to
+// catch a "wrong row" fat-finger, short enough to not clutter the page
+// if the user keeps editing — every new push re-arms its own timer,
+// older entries still tick down independently.
+const UNDO_WINDOW_MS = 6000;
 
 const PER_PAGE = 20;
 // Server-side cap on the bulk-move endpoint. The client mirrors it so
@@ -53,7 +60,16 @@ export default function ExpensesPage() {
   const [bulkPickerOpen, setBulkPickerOpen] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
   // Inline toast. null = silent, { type: 'ok'|'error', text } otherwise.
+  // After the undo-banner refactor the ok branch is only used by the
+  // bulk-move summary; single-row quick-edits stage their feedback on
+  // `categoryEdits` instead. Errors (single + bulk) still land here.
   const [toast, setToast] = useState(null);
+  // Pending undo entries for single-row quick-edits. Each row carries
+  // enough state to reverse the PUT without needing the expense table
+  // to still show the old category. Oldest first; parent-managed
+  // per-entry auto-dismiss via `editTimersRef`.
+  const [categoryEdits, setCategoryEdits] = useState([]);
+  const editTimersRef = useRef(new Map());
 
   const fetchExpenses = async (overrideSearch) => {
     setLoading(true);
@@ -179,11 +195,77 @@ export default function ExpensesPage() {
     setBulkPickerOpen(false);
   };
 
+  // ─── Undo-banner plumbing ───────────────────────────────────────
+  // Each entry has its own setTimeout stored in `editTimersRef` so
+  // timers are cancellable independently (Anular cancels its own
+  // timer; re-pushing the same expense re-arms it). The map is kept
+  // outside React state because timer ids are not rendering data.
+  const clearEditTimer = (id) => {
+    const t = editTimersRef.current.get(id);
+    if (t) {
+      clearTimeout(t);
+      editTimersRef.current.delete(id);
+    }
+  };
+  const scheduleEditDismiss = (id) => {
+    clearEditTimer(id);
+    const t = setTimeout(() => {
+      setCategoryEdits((prev) => prev.filter((e) => e.id !== id));
+      editTimersRef.current.delete(id);
+    }, UNDO_WINDOW_MS);
+    editTimersRef.current.set(id, t);
+  };
+  // Dedupe-per-expense on push. If the user already has a pending
+  // entry for the same expense (e.g. fat-fingered twice), we keep the
+  // *original* prevCategory so "Anular" always lands on the truly
+  // pre-edit state, but refresh the nextCategoryName + reset the
+  // auto-dismiss timer against the latest click.
+  const pushCategoryEdit = (entry) => {
+    setCategoryEdits((prev) => {
+      const existing = prev.find((e) => e.expenseId === entry.expenseId);
+      if (existing) clearEditTimer(existing.id);
+      const merged = existing
+        ? {
+            ...entry,
+            prevCategoryId: existing.prevCategoryId,
+            prevCategoryName: existing.prevCategoryName,
+          }
+        : entry;
+      const rest = prev.filter((e) => e.expenseId !== entry.expenseId);
+      return [...rest, merged];
+    });
+    scheduleEditDismiss(entry.id);
+  };
+  // Component-unmount cleanup — empty the timer map so React doesn't
+  // get setCategoryEdits calls after tear-down.
+  useEffect(() => {
+    const timers = editTimersRef.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
+
   // Quick-edit save: optimistic update first, then PUT, then rollback
   // on failure. Matches the flow described in docs/Categories.md §12.4
   // (default "inofensivo" path). `category_id` may be null to clear.
+  //
+  // Success path no longer fires the old "Categoria actualizada." toast
+  // — the chip already changed in place so the toast was just noise.
+  // We stage a reversible undo entry instead (see §12.8 rationale):
+  // the banner gives the user a short grace window to catch a
+  // wrong-row click before the change "commits" from their perspective.
   const handleCategorySave = async (expenseId, newCategoryId) => {
     const prev = expenses;
+    // Snapshot the row's current state for the undo entry. We read
+    // from the live `expenses` array instead of the popover's
+    // `expense` prop so rapid double-edits still capture the correct
+    // pre-click state (the prop is stale after the first optimistic
+    // flip).
+    const prevRow = prev.find((e) => e._id === expenseId);
+    const entity = prevRow?.entity ?? '';
+    const prevCategoryId = prevRow?.category_id ?? null;
+    const prevCategoryName = prevRow?.category_name ?? null;
     // Optimistic: swap the chip name immediately. We don't know the
     // new category_name locally yet, so look it up from the catalogue
     // and fall back to `—` for null.
@@ -206,7 +288,14 @@ export default function ExpensesPage() {
       setExpenses((rows) =>
         rows.map((e) => (e._id === expenseId ? { ...e, ...res.data } : e)),
       );
-      setToast({ type: 'ok', text: 'Categoria actualizada.' });
+      pushCategoryEdit({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        expenseId,
+        entity,
+        prevCategoryId,
+        prevCategoryName,
+        nextCategoryName: res.data?.category_name ?? newCategoryName,
+      });
       setPickerExpenseId(null);
     } catch (err) {
       // Rollback to the pre-click snapshot so the chip reverts.
@@ -217,6 +306,52 @@ export default function ExpensesPage() {
       });
     } finally {
       setPickerSaving(false);
+    }
+  };
+
+  // Anular handler — optimistic revert + PUT back to prevCategoryId.
+  // On success we drop the entry (the chip already shows the old
+  // category). On failure we restore the row to what it showed *before*
+  // the Anular click, surface an error toast, and re-arm the banner
+  // so the user can try again.
+  const handleUndoCategoryEdit = async (entry) => {
+    clearEditTimer(entry.id);
+    setCategoryEdits((prev) =>
+      prev.map((e) => (e.id === entry.id ? { ...e, undoing: true } : e)),
+    );
+    const prevRows = expenses;
+    setExpenses((rows) =>
+      rows.map((e) =>
+        e._id === entry.expenseId
+          ? {
+              ...e,
+              category_id: entry.prevCategoryId,
+              category_name: entry.prevCategoryName,
+            }
+          : e,
+      ),
+    );
+    try {
+      const res = await api.updateExpenseCategory(
+        entry.expenseId,
+        entry.prevCategoryId,
+      );
+      setExpenses((rows) =>
+        rows.map((e) =>
+          e._id === entry.expenseId ? { ...e, ...res.data } : e,
+        ),
+      );
+      setCategoryEdits((prev) => prev.filter((e) => e.id !== entry.id));
+    } catch (err) {
+      setExpenses(prevRows);
+      setCategoryEdits((prev) =>
+        prev.map((e) => (e.id === entry.id ? { ...e, undoing: false } : e)),
+      );
+      setToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível anular a alteração.',
+      });
+      scheduleEditDismiss(entry.id);
     }
   };
 
@@ -301,11 +436,12 @@ export default function ExpensesPage() {
     <>
       <PageHeader title="Despesas" description="Todas as despesas importadas" />
 
-      {/* Inline toast — surfaces optimistic-update success / failure for
-          both the single-row quick-edit popover (§12.8) and the bulk
-          move action. Green on success auto-dismisses after 4 s;
-          errors stay until the next action so the user can read the
-          reason. */}
+      {/* Inline toast — bulk-move success summary and errors from
+          either the single-row quick-edit popover or the bulk move.
+          Single-row successes now render as an undo banner below
+          instead of a toast; the chip already changed in place, so a
+          "saved" toast was just noise — what users actually want is a
+          short grace window to reverse a wrong-row click. */}
       {toast && (
         <div
           className={`mb-4 animate-slide-in-right rounded-2xl px-4 py-3 text-sm ${
@@ -318,6 +454,17 @@ export default function ExpensesPage() {
           {toast.text}
         </div>
       )}
+
+      {/* Staging banner(s) for single-row quick-edits. Each entry has
+          its own ~6 s auto-dismiss timer and an Anular action that
+          PUTs the previous category back. Stacks top-to-bottom when
+          the user edits multiple rows in quick succession; dedupe-
+          per-expense keeps a single banner per row even after
+          fat-fingered re-edits. */}
+      <CategoryEditUndoBanner
+        edits={categoryEdits}
+        onUndo={handleUndoCategoryEdit}
+      />
 
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">
