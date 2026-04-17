@@ -8,6 +8,7 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
+import { formatExpenseDate, formatAbsoluteDate } from '../utils/relativeDate';
 import * as api from '../services/api';
 
 // Per-entry auto-dismiss window for the undo banner. Matches the
@@ -582,10 +583,20 @@ export default function DashboardPage() {
               <tbody>
                 {recentExpenses.map((exp, i) => {
                   const pickerOpen = pickerExpenseId === exp._id;
+                  const rowExcluded = exp.excluded === true;
                   return (
                     <tr
                       key={exp._id ?? i}
-                      className="border-b border-sand-50 transition-colors duration-150 hover:bg-sand-50"
+                      title={
+                        rowExcluded
+                          ? 'Excluída do ciclo e do Savings Score'
+                          : undefined
+                      }
+                      className={`border-b border-sand-50 transition-colors duration-150 ${
+                        rowExcluded
+                          ? 'bg-sand-50 opacity-60 hover:opacity-75'
+                          : 'hover:bg-sand-50'
+                      }`}
                       style={{ animationDelay: `${i * 60}ms` }}
                     >
                       <td className="px-5 py-3 font-medium text-sand-900">
@@ -594,7 +605,19 @@ export default function DashboardPage() {
                       <td className="px-5 py-3 text-curve-700 font-semibold">
                         €{Number(exp.amount).toFixed(2)}
                       </td>
-                      <td className="px-5 py-3 text-sand-500">{exp.date}</td>
+                      <td
+                        className="px-5 py-3 text-sand-500"
+                        title={formatAbsoluteDate(exp.date)}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span>{formatExpenseDate(exp.date)}</span>
+                          {rowExcluded && (
+                            <span className="badge bg-sand-200 text-sand-600">
+                              excluída
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-5 py-3 text-sand-500">{exp.card}</td>
                       <td className="relative px-5 py-3">
                         <button

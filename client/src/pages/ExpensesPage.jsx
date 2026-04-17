@@ -5,6 +5,7 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
+import { formatExpenseDate, formatAbsoluteDate } from '../utils/relativeDate';
 
 // Per-entry auto-dismiss window for the undo banner. Long enough to
 // catch a "wrong row" fat-finger, short enough to not clutter the page
@@ -70,6 +71,14 @@ export default function ExpensesPage() {
   // per-entry auto-dismiss via `editTimersRef`.
   const [categoryEdits, setCategoryEdits] = useState([]);
   const editTimersRef = useRef(new Map());
+  // ROADMAP §2.10 — exclusion undo banner. One entry per toggle
+  // (bulk OR single-row) with a 6 s dismiss window. `direction` is
+  // `'excluded'` or `'included'` so Anular knows which inverse call
+  // to fire. We deliberately stack per-action (not per-expense) so a
+  // bulk "excluir 10" is one row the user can undo as a whole.
+  const [exclusionUndo, setExclusionUndo] = useState(null);
+  const exclusionUndoTimerRef = useRef(null);
+  const [exclusionBusy, setExclusionBusy] = useState(false);
 
   const fetchExpenses = async (overrideSearch) => {
     setLoading(true);
@@ -415,6 +424,115 @@ export default function ExpensesPage() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // ROADMAP §2.10 — exclusion toggle. Decides whether the current
+  // selection is "all excluded → re-include" or "has at least one
+  // included → exclude all". Matches the spec (the button label
+  // flips the same way).
+  const selectionAllExcluded =
+    selectedIds.size > 0
+    && [...selectedIds].every((id) => {
+      const row = expenses.find((e) => e._id === id);
+      // Rows outside the current page can't be introspected from the
+      // client — assume they're not excluded and let the server
+      // reconcile. The action bar's label is based on visible state,
+      // which matches the user's mental model.
+      return row?.excluded === true;
+    });
+
+  const clearExclusionTimer = () => {
+    if (exclusionUndoTimerRef.current) {
+      clearTimeout(exclusionUndoTimerRef.current);
+      exclusionUndoTimerRef.current = null;
+    }
+  };
+  const scheduleExclusionDismiss = () => {
+    clearExclusionTimer();
+    exclusionUndoTimerRef.current = setTimeout(() => {
+      setExclusionUndo(null);
+      exclusionUndoTimerRef.current = null;
+    }, UNDO_WINDOW_MS);
+  };
+
+  const handleExclusionToggle = async () => {
+    if (selectedIds.size === 0 || exclusionBusy) return;
+    const ids = [...selectedIds];
+    const direction = selectionAllExcluded ? 'included' : 'excluded';
+    const prev = expenses;
+    // Optimistic: flip the flag on visible rows that are in the
+    // selection. Rows outside the current page still flip on the
+    // server; a refetch after success picks them up if the user
+    // paginates back.
+    const nextExcluded = direction === 'excluded';
+    setExpenses((rows) =>
+      rows.map((e) =>
+        selectedIds.has(e._id) ? { ...e, excluded: nextExcluded } : e,
+      ),
+    );
+    setExclusionBusy(true);
+    try {
+      const call =
+        direction === 'excluded' ? api.excludeExpenses : api.includeExpenses;
+      const res = await call(ids);
+      const { affected, skipped } = res;
+      const verbPast =
+        direction === 'excluded' ? 'excluída' : 'reincluída';
+      const plural = affected === 1 ? '' : 's';
+      const text =
+        skipped > 0
+          ? `${affected} despesa${plural} ${verbPast}${plural}. ${skipped} ignorada${skipped === 1 ? '' : 's'} (já estava${skipped === 1 ? '' : 'm'} nesse estado).`
+          : `${affected} despesa${plural} ${verbPast}${plural}.`;
+      // Stash an undo entry instead of raising a toast — the spec
+      // wants a 6 s grace window, which mirrors the category-edit
+      // undo flow.
+      setExclusionUndo({ ids, direction, affected, skipped, text });
+      scheduleExclusionDismiss();
+      clearSelection();
+    } catch (err) {
+      setExpenses(prev);
+      setToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível actualizar a exclusão.',
+      });
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
+  const handleExclusionUndo = async () => {
+    if (!exclusionUndo || exclusionBusy) return;
+    clearExclusionTimer();
+    const { ids, direction } = exclusionUndo;
+    const prev = expenses;
+    // Flip everything back on the visible rows.
+    const revertedExcluded = direction === 'included';
+    setExpenses((rows) =>
+      rows.map((e) =>
+        ids.includes(e._id) ? { ...e, excluded: revertedExcluded } : e,
+      ),
+    );
+    setExclusionBusy(true);
+    try {
+      const call =
+        direction === 'excluded' ? api.includeExpenses : api.excludeExpenses;
+      await call(ids);
+      setExclusionUndo(null);
+    } catch (err) {
+      setExpenses(prev);
+      setToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível anular.',
+      });
+      scheduleExclusionDismiss();
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
+  // Unmount cleanup for the exclusion undo timer.
+  useEffect(() => {
+    return () => clearExclusionTimer();
+  }, []);
+
   const handleSearch = (e) => {
     e.preventDefault();
     setPage(1);
@@ -466,6 +584,27 @@ export default function ExpensesPage() {
         onUndo={handleUndoCategoryEdit}
       />
 
+      {/* ROADMAP §2.10 — exclusion undo banner. One-at-a-time (not
+          per-row like the category edits) because a bulk "excluir 10"
+          is semantically one action the user will want to undo as a
+          whole. 6 s window, same as the category undo. */}
+      {exclusionUndo && (
+        <div
+          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-3 text-sm shadow-sm"
+          role="status"
+        >
+          <span className="text-sand-700">{exclusionUndo.text}</span>
+          <button
+            type="button"
+            onClick={handleExclusionUndo}
+            disabled={exclusionBusy}
+            className="rounded-lg px-3 py-1 text-xs font-medium text-curve-700 transition-colors hover:bg-curve-50 disabled:opacity-50"
+          >
+            Anular
+          </button>
+        </div>
+      )}
+
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">
         <div className="relative flex-1">
@@ -504,6 +643,20 @@ export default function ExpensesPage() {
                 className="rounded-lg px-3 py-1.5 text-sm text-sand-600 transition-colors hover:bg-white disabled:opacity-50"
               >
                 Limpar
+              </button>
+              {/* ROADMAP §2.10 — cycle exclusion toggle. Label flips
+                  based on whether every *visible* selected row is
+                  already excluded. Rows outside the current page
+                  don't influence the label (we can't introspect them
+                  client-side), but the server handles both forward
+                  and backward toggles idempotently via `skipped`. */}
+              <button
+                type="button"
+                onClick={handleExclusionToggle}
+                disabled={bulkSaving || exclusionBusy}
+                className="rounded-lg border border-curve-300 bg-white px-3 py-1.5 text-sm text-curve-800 transition-colors hover:bg-curve-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {selectionAllExcluded ? 'Incluir no ciclo' : 'Excluir do ciclo'}
               </button>
               <div className="relative">
                 <button
@@ -601,17 +754,32 @@ export default function ExpensesPage() {
               {expenses.map((exp, i) => {
                 const pickerOpen = pickerExpenseId === exp._id;
                 const rowSelected = selectedIds.has(exp._id);
+                const rowExcluded = exp.excluded === true;
                 // When there's an active selection, disable the
                 // single-row quick-edit so the two flows don't compete
                 // for the same `category_id`. The chip is still
                 // visible, just no longer clickable.
                 const chipDisabled = selectedIds.size > 0;
+                // Row tinting priority: selection > excluded > hover.
+                // Selection stays on top because it communicates the
+                // user's current intent, not a persistent attribute
+                // of the row. Excluded rows lose contrast via
+                // `opacity-60` — spec §2.10: «ligeiramente distinta
+                // para destacar a sua exclusão».
+                const rowClass = rowSelected
+                  ? 'bg-curve-50'
+                  : rowExcluded
+                    ? 'bg-sand-50 opacity-60 hover:opacity-75'
+                    : 'hover:bg-sand-50';
                 return (
                   <tr
                     key={exp._id ?? i}
-                    className={`border-b border-sand-50 transition-colors duration-150 ${
-                      rowSelected ? 'bg-curve-50' : 'hover:bg-sand-50'
-                    }`}
+                    title={
+                      rowExcluded
+                        ? 'Esta despesa está excluída do cálculo do ciclo e do Savings Score'
+                        : undefined
+                    }
+                    className={`border-b border-sand-50 transition-colors duration-150 ${rowClass}`}
                   >
                     <td className="px-5 py-3">
                       <input
@@ -636,7 +804,19 @@ export default function ExpensesPage() {
                     <td className="px-5 py-3 font-semibold text-curve-700">
                       €{Number(exp.amount).toFixed(2)}
                     </td>
-                    <td className="px-5 py-3 text-sand-500">{exp.date}</td>
+                    <td
+                      className="px-5 py-3 text-sand-500"
+                      title={formatAbsoluteDate(exp.date)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span>{formatExpenseDate(exp.date)}</span>
+                        {rowExcluded && (
+                          <span className="badge bg-sand-200 text-sand-600">
+                            excluída
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-5 py-3 text-sand-500">{exp.card}</td>
                     <td className="relative px-5 py-3">
                       <button

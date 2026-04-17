@@ -144,6 +144,20 @@ const curveLogSchema = new mongoose.Schema(
       // `audit.js` auto-flips `status: 'error'`). Carries
       // `method=<METHOD> path=<path>` in `error_detail`.
       'admin_access_failed',
+      // Cycle-exclusion toggle from /expenses (ROADMAP §2.10).
+      //   expense_excluded_from_cycle — user marked N expenses as
+      //     "do not count for this cycle / Savings Score" via
+      //     POST /api/expenses/exclusions. Carries
+      //     `error_detail = "count=<N>"` for bulk toggles (the
+      //     action-bar path always ships N ≥ 1); `expense_id` +
+      //     `entity` are populated only for the single-row branch
+      //     (N == 1) so the /curve/logs renderer can surface the
+      //     receipt without digging through detail.
+      //   expense_included_in_cycle — inverse, via DELETE /exclusions.
+      //     Same shape — `count=<N>` in detail, single-row populates
+      //     `expense_id` + `entity`.
+      'expense_excluded_from_cycle',
+      'expense_included_in_cycle',
     ]},
     ip: String,
   },

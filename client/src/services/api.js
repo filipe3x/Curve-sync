@@ -92,6 +92,29 @@ export const getExpenseIds = (params) =>
     `/expenses?${new URLSearchParams({ ...(params ?? {}), fields: '_id' })}`,
   );
 
+// Toggle the "don't count for cycle / Savings Score" flag on up to
+// 500 expenses owned by the caller (ROADMAP §2.10). Exclusions live
+// in `curve_expense_exclusions` (Curve-Sync-owned) — we never mutate
+// the `expenses` collection for this flag. Both calls return
+// `{ affected, skipped }`:
+//   `affected` = number actually toggled server-side (excluded on
+//                POST, re-included on DELETE). Duplicates and ids
+//                already in the target state collapse into `skipped`.
+//   `skipped`  = requested.length - affected.
+export const excludeExpenses = (expense_ids) =>
+  request('/expenses/exclusions', {
+    method: 'POST',
+    body: JSON.stringify({ expense_ids }),
+    timeoutMs: 30_000,
+  });
+
+export const includeExpenses = (expense_ids) =>
+  request('/expenses/exclusions', {
+    method: 'DELETE',
+    body: JSON.stringify({ expense_ids }),
+    timeoutMs: 30_000,
+  });
+
 // Bulk-reassign `category_id` across up to 500 expenses owned by the
 // caller. `category_id` accepts an ObjectId hex string or `null` to
 // clear. Server rejects anything over 500 with a 400 `invalid_body`.

@@ -256,7 +256,14 @@ Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em
 - `CLAUDE.md` → Custom Monthly Cycle
 - Fase 2.5 deste roadmap — mesma pipeline de `computeDashboardStats` estende-se a `computeCycleHistory`
 
-### 2.9 Data relativa user-friendly na tabela de despesas recentes 🗓️ — MVP
+### ~~2.9 Data relativa user-friendly na tabela de despesas recentes~~ ✅ — MVP
+
+> **Implementado.**
+> - `client/src/utils/relativeDate.js` — `formatExpenseDate(iso, now?)` + `formatAbsoluteDate(iso)`; sete bandas civil-day-aware (`ontem` é o dia civil anterior em fuso local, não rolling 24 h). `Intl.DateTimeFormat('pt-PT')` com cache do formatter.
+> - `DashboardPage.jsx` + `ExpensesPage.jsx` — coluna Data agora renderiza `formatExpenseDate(exp.date)` com `title={formatAbsoluteDate(exp.date)}` na `<td>` para tooltip com a data completa.
+> - Sem impacto no backend, no schema, ou no pipeline de sync.
+
+### 2.9 — nota histórica (spec original)
 
 Substituir a string crua de `Expense.date` na coluna **Data** da tabela «Despesas recentes» do Dashboard (e, por extensão, da tabela de `/expenses`) por uma formulação relativa em português, mais legível de relance. A ideia é que uma despesa de hoje se leia como «há 3 min» ou «há 2 h» e uma dos últimos dias como «ontem», «anteontem» ou «há N dias» (até um máximo de **5** dias), caindo para a data absoluta (ex. `17 Abr 2026`) a partir daí.
 
@@ -322,7 +329,27 @@ Substituir a string crua de `Expense.date` na coluna **Data** da tabela «Despes
 
 ---
 
-### 2.10 Excluir despesa do ciclo / Savings Score 🚫 — MVP
+### ~~2.10 Excluir despesa do ciclo / Savings Score~~ ✅ — MVP
+
+> **Implementado.**
+>
+> Backend:
+> - `server/src/models/CurveExpenseExclusion.js` — nova colecção Curve-Sync-owned (`curve_expense_exclusions`), mesmo padrão do `CategoryOverride`. Unique index em `(user_id, expense_id)` torna o POST idempotente. Schema de `expenses` intocado (respeita CLAUDE.md → MongoDB Collection Access Rules).
+> - `server/src/routes/expenses.js` — `POST /api/expenses/exclusions` + `DELETE /api/expenses/exclusions`, body `{ expense_ids: [...] }`, cap 500. Validação de ownership antes de escrever (cross-user silently no-op). Respostas `{ affected, skipped }`.
+> - `GET /api/expenses` — cada row ganha `excluded: boolean`; query param `?exclude_filter=excluded|included|all` (default `all`) para filtrar a vista.
+> - `server/src/services/expenseStats.js :: computeDashboardStats` — exclusões carregadas em paralelo e filtradas do `month_total` **e** do `weekly_expenses`, portanto o `savings_score` também desce automaticamente. Override de testes aceita `{ exclusions }` no mesmo shape.
+> - `server/src/models/CurveLog.js` — dois novos valores de `action`: `expense_excluded_from_cycle`, `expense_included_in_cycle`. Single-row carrega `expense_id + entity`; bulk carrega só `detail = "count=<N>"`.
+>
+> Frontend:
+> - `client/src/services/api.js` — `excludeExpenses(ids)`, `includeExpenses(ids)`.
+> - `ExpensesPage.jsx` — botão «Excluir do ciclo / Incluir no ciclo» no action bar (label flipa conforme `selectionAllExcluded`). Optimistic update, banner de undo inline (6 s, mesmo padrão da §2.5), row tinting `bg-sand-50 opacity-60` + badge `excluída` na coluna Data.
+> - `DashboardPage.jsx` — row tinting e badge espelham o visual da `/expenses` (sem toggle UI — exclusão só se controla a partir de `/expenses`).
+>
+> Scope cut vs spec original:
+> - Undo é one-at-a-time (não per-expense como o banner de categorias) porque um «excluir 10» é semanticamente uma acção única que o user vai querer anular como um todo — menos clutter na UI.
+> - Testes server-side não foram adicionados neste PR (follow-up: estender `expenseStats.test.js` + novo `expenseExclusions.test.js`).
+
+### 2.10 — nota histórica (spec original)
 
 Permitir ao utilizador marcar uma despesa como **excluída do cálculo do ciclo actual e do Savings Score**, sem a apagar (DELETE em `expenses` continua proibido — Embers é owner). O caso de uso canónico: uma despesa anormal (reembolso pendente, pagamento de grupo que outra pessoa vai devolver, erro de categorização que obriga a duplicado) que distorce o «Despesas este mês» ou o Savings Score sem razão estrutural.
 
