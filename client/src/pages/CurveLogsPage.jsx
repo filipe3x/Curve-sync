@@ -382,7 +382,17 @@ export default function CurveLogsPage() {
           />
         )
       ) : (
-        <div className="animate-fade-in overflow-hidden rounded-2xl border border-sand-200 bg-white">
+        {/*
+          `overflow-visible` (not the default `hidden`) so the quick-edit
+          CategoryPickerPopover can drop below the last row without being
+          clipped at the table's bottom edge. The rounded-2xl corners
+          still look right because thead and the pagination strip only
+          use borders — no bleeding background fills to worry about.
+          A consequence: very wide tables would bleed out horizontally
+          on narrow viewports, but the detail cell is the only flexible
+          column and it wraps; data/tipo are width-constrained.
+        */}
+        <div className="animate-fade-in overflow-visible rounded-2xl border border-sand-200 bg-white">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-sand-100 text-left text-xs font-medium uppercase tracking-wide text-sand-400">
