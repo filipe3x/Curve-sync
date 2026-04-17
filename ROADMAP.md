@@ -47,8 +47,15 @@ Substituído o fallback estático de 31 dias por uma data computada dinamicament
 - **Referência:** `CLAUDE.md` → Custom Monthly Cycle
 - **Referência:** `docs/EMAIL.md` → First-sync safety net
 
-### 2.2 Relatórios mensais com ciclo dia 22
-Endpoint `GET /api/expenses/monthly` que agrupa despesas pelo ciclo customizado (22 do mês → 21 do mês seguinte). Devolver totais por mês e variação percentual entre meses.
+### 2.2 Relatórios mensais com ciclo dia 22 — 🔵 baixa prioridade / adiado
+
+**Adiado em favor da §2.8** (gráfico evolutivo por ciclo). O `computeCycleHistory` da §2.8 produz exactamente a mesma informação — totais por ciclo + variação percentual face ao ciclo anterior — já serializado para consumo directo pelo frontend. Um endpoint `GET /api/expenses/monthly` separado duplicaria a agregação e abriria dois caminhos para manter em sync sempre que o formato do `Expense.date` mudasse.
+
+**Reabre-se quando:**
+- Houver um consumidor externo (script, export CLI, relatório imprimível) que precise do relatório fora do flow do dashboard
+- A §2.8 mostre que o volume de payload do `meta.cycle_history` é problemático e valha a pena separar os dois endpoints
+
+**Se for reabrir**, a implementação directa é envolver `computeCycleHistory` num handler `router.get('/monthly', ...)` de `routes/expenses.js`.
 
 - **Referência:** `docs/expense-tracking.md` — secção "Ciclo Mensal Personalizado"
 - **Referência:** `docs/embers-reference/controllers/expenses_controller.rb` — `monthly_expenses`
@@ -59,8 +66,15 @@ Endpoint `GET /api/expenses/savings-score` que calcula:
 - Score: `(log(weekly_savings + 1) / log(budget + 1)) * 10`
 - Devolver: score (0–10), despesas da semana, orçamento restante
 
-### 2.4 Validação de campos extraídos
-Antes de inserir uma despesa, validar: entity não vazia, amount numérico e positivo, date parseável. Se a validação falha, criar `CurveLog` com status `parse_error` e guardar o HTML truncado em `error_detail`.
+### ~~2.4 Validação de campos extraídos~~ ✅
+
+Segunda barreira de validação entre o parser e `Expense.create`: o parser já lança `ParseError` para campos estruturalmente em falta; agora há um gate adicional que rejeita valores **aceites pelo parser mas nonsensicais** (entity vazia após trim, amount NaN/Infinity/zero, date que `Date.parse` não reconstrói). Log `parse_error` com `error_detail` a incluir o campo que falhou + razão + snippet HTML (200 chars, sem newlines, com fast-forward ao `<!doctype html>`). Email fica UNSEEN para retry.
+
+- **Implementado:**
+  - `server/src/services/emailParser.js` — `validateParsed(parsed)` pura, retorna `{ ok: true } | { ok: false, field, reason }`
+  - `server/src/services/syncOrchestrator.js` — novo step 1b entre parse e categorise; respeita o mesmo circuit breaker (10 parse/validation errors consecutivos sem `ok` → halt). Novo helper `truncateHtml(raw, 200)` para o snippet de contexto
+- **Desvio da spec ROADMAP:** "amount positivo" foi alargado a "amount finito não-zero" para não descartar refunds (Curve emite reembolsos com `amount` negativo — ver docstring de `parseAmount`). Rejeitamos 0, NaN, ±Infinity
+- **Testes:** `server/test/validateParsed.test.js` (15 casos: happy path, refund accepted, entity empty/whitespace/non-string, amount NaN/Infinity/zero/string, date empty/unparseable/whitespace, null/undefined parsed, missing card still passes)
 
 ### ~~2.5 Dashboard com dados reais~~ ✅
 Os `StatCard` do Dashboard passaram de placeholders `—` a KPIs reais, alinhados com o ciclo configurável do utilizador (§2.1). Quatro cartões vivos:
@@ -84,13 +98,33 @@ Os `StatCard` do Dashboard passaram de placeholders `—` a KPIs reais, alinhado
   - Janela semanal é rolling 7d (`now - 7 * 86400s`), não Monday-Sunday ISO, porque o user perguntado quer "quanto poupei estes últimos dias" não "esta semana calendário"
   - Não se usou `mongoose.aggregate` — a agregação em JS cobre o volume realista (centenas de expenses/mês por user) e partilha o `parseExpenseDate` com `/categories/stats`
 
-### 2.6 Filtros avançados na listagem de despesas
-Filtros por: categoria, cartão, intervalo de datas, entidade. Ordenação por data ou entidade (asc/desc). O frontend já tem a estrutura; falta implementar os query params no backend.
+### ~~2.6 Filtros avançados na listagem de despesas~~ ✅ *(backend only)*
+
+Query params novos em `GET /api/expenses` — **todos opcionais, todos aditivos**, frontend legacy continua a funcionar sem alterações (só manda `page/limit/search/sort` como antes):
+
+| Param | Semântica | Notas |
+|-------|-----------|-------|
+| `card` | Match exacto em `Expense.card` | Frontend deve vir da autocomplete (já canónico) |
+| `entity` | Match exacto em `Expense.entity` | Idem |
+| `start` | `YYYY-MM-DD` lower bound inclusivo em `Expense.date` | Mongo-side via `$expr` + `$dateFromString` |
+| `end` | `YYYY-MM-DD` upper bound inclusivo em `Expense.date` | Idem |
+| `sort` | Allowlist `date`/`amount`/`entity`/`card`/`created_at` ± | Campos fora da lista colapsam para `-date` |
+| `search` (legacy) | Regex `i` sobre `entity`+`card` | **Agora escapa metachars** para evitar catastrophic backtracking |
+
+- **Implementado:**
+  - `server/src/routes/expenses.js` — `escapeRegex` helper (security fix acoplado ao 2.6), `sanitiseSort` com allowlist, parsing + validação por param, `$expr`+`$dateFromString` para range de datas (rejeita silenciosamente rows com formato não reconstruível)
+- **Scope cut consciente (UI fica para outro PR):**
+  - `ExpensesPage.jsx` mantém a estrutura actual — não adicionei selects para `card`/`entity`/`start`/`end` porque o utilizador pediu explicitamente "sem disrupção da interface actual"
+  - A API está pronta; o frontend pode ligar incrementalmente (e.g. chip de entity na autocomplete, datepicker para range)
+- **Testes:** `server/test/expenseFilters.test.js` (8 casos: `sanitiseSort` defaults + allowlist + injection attempt, `escapeRegex` metachars + catastrophic-backtracking probe)
+- **Impacto no build:** frontend unchanged (`vite build` = 471 kB unchanged). Backend: 7 novos testes, 0 regressão
 
 ### ~~2.7 Encriptação de credenciais IMAP~~ ✅
 Movido para MU-5 e implementado: AES-256-GCM at rest, decrypt on-the-fly, backwards-compat com plaintext. Ver `server/src/services/crypto.js`.
 
-### 2.8 Gráfico evolutivo agregador por ciclo 📈
+### 2.8 Gráfico evolutivo agregador por ciclo 📈 — **tracked em PR separado**
+
+> **Scope cut deste PR:** a especificação abaixo fica documentada; a implementação (instalar `recharts`, criar `computeCycleHistory`, compor `CycleTrendCard`) é feita num PR dedicado porque o bundle-size impact (~55–65 kB gzip) e a verificação de `prefers-reduced-motion` justificam uma revisão de UI focada.
 
 Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em EUR e destaque visualmente os altos e baixos entre ciclos consecutivos — i.e., quanto se gastou a mais ou a menos do ciclo anterior para o seguinte. O objectivo é responder de relance a «estou a gastar mais ou menos do que há 3 meses?» sem ter de abrir `/expenses`.
 

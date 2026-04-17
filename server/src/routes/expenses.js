@@ -12,6 +12,35 @@ import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
 
+// Escape a user-supplied string so it's safe to embed in a RegExp. Without
+// this the caller could ship `.*`, `(?:` catastrophic backtracking, or
+// unbalanced brackets and either crash the regex compiler or DoS the
+// server. The character set is the canonical set from MDN.
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Allowlist of sortable fields. Anything else falls back to `-date`
+// (default). This prevents a caller from sorting on an indexed field
+// they shouldn't see (e.g. `user_id` would change result ordering but
+// leak nothing since the user filter is applied first; still, tight is
+// better than loose).
+const ALLOWED_SORT_FIELDS = new Set([
+  'date',
+  'amount',
+  'entity',
+  'card',
+  'created_at',
+]);
+
+function sanitiseSort(raw) {
+  if (!raw || typeof raw !== 'string') return '-date';
+  const desc = raw.startsWith('-');
+  const field = desc ? raw.slice(1) : raw;
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
+  return desc ? `-${field}` : field;
+}
+
 // GET /api/expenses
 //
 // Compact-mode query param `fields=_id` switches the handler to a
@@ -23,12 +52,36 @@ const router = Router();
 // paginated response before asking for all ids at once. Keeping it as
 // a query-param flag on the existing endpoint (rather than a separate
 // /ids route) means the filter-parsing logic below lives in one place.
+//
+// Supported filter query params (ROADMAP Fase 2.6 — all optional, all
+// additive, unchanged defaults if omitted):
+//   search       — fuzzy regex over entity + card (legacy)
+//   category_id  — object id, or 'null' / 'uncategorised' synthetic key
+//   card         — exact match on Expense.card
+//   entity       — exact match on Expense.entity
+//   start        — YYYY-MM-DD lower bound (inclusive) on Expense.date
+//   end          — YYYY-MM-DD upper bound (inclusive) on Expense.date
+//   sort         — one of date/amount/entity/card/created_at ±. Default -date.
+// The legacy frontend (`ExpensesPage.jsx`) still only sends
+// page/limit/search/sort; new params are driven by UI that lands later.
 router.get('/', async (req, res) => {
   try {
-    const { page = 1, limit = 20, sort = '-date', search, category_id, fields } = req.query;
+    const {
+      page = 1,
+      limit = 20,
+      sort,
+      search,
+      category_id,
+      card,
+      entity,
+      start,
+      end,
+      fields,
+    } = req.query;
+    const safeSort = sanitiseSort(sort);
     const filter = { user_id: req.userId };
     if (search) {
-      const regex = new RegExp(search, 'i');
+      const regex = new RegExp(escapeRegex(search), 'i');
       filter.$or = [{ entity: regex }, { card: regex }];
     }
     // Narrow to a specific category. `null`/`uncategorised` (the
@@ -45,6 +98,52 @@ router.get('/', async (req, res) => {
       // filter still applies, so nothing leaks. The client never
       // sends a malformed id in practice.
     }
+    // Exact-match filters (ROADMAP Fase 2.6). These are populated from
+    // the autocomplete endpoint so the values are already canonical;
+    // we don't normalise case here to stay consistent with how the
+    // expenses are stored.
+    if (typeof card === 'string' && card.trim() !== '') {
+      filter.card = card;
+    }
+    if (typeof entity === 'string' && entity.trim() !== '') {
+      filter.entity = entity;
+    }
+    // Date range. `Expense.date` is a free-form string ("06 April 2026
+    // 08:53:31") so we can't compare it lexicographically — parse it
+    // Mongo-side via $dateFromString. Rows that fail to parse (onError:
+    // null) are excluded, which matches the graceful-skip contract of
+    // /categories/stats.
+    if (
+      (typeof start === 'string' && start.trim() !== '') ||
+      (typeof end === 'string' && end.trim() !== '')
+    ) {
+      const conds = [];
+      if (typeof start === 'string' && start.trim() !== '') {
+        const s = new Date(`${start}T00:00:00.000Z`);
+        if (!Number.isNaN(s.getTime())) {
+          conds.push({
+            $gte: [
+              { $dateFromString: { dateString: '$date', onError: null } },
+              s,
+            ],
+          });
+        }
+      }
+      if (typeof end === 'string' && end.trim() !== '') {
+        const e = new Date(`${end}T23:59:59.999Z`);
+        if (!Number.isNaN(e.getTime())) {
+          conds.push({
+            $lte: [
+              { $dateFromString: { dateString: '$date', onError: null } },
+              e,
+            ],
+          });
+        }
+      }
+      if (conds.length) {
+        filter.$expr = conds.length === 1 ? conds[0] : { $and: conds };
+      }
+    }
 
     // ──────── Compact id-only mode ────────
     if (fields === '_id') {
@@ -59,7 +158,7 @@ router.get('/', async (req, res) => {
         });
       }
       const rows = await Expense.find(filter)
-        .sort(sort)
+        .sort(safeSort)
         .limit(500)
         .select('_id')
         .lean();
@@ -69,7 +168,7 @@ router.get('/', async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
     const [data, total] = await Promise.all([
       Expense.find(filter)
-        .sort(sort)
+        .sort(safeSort)
         .skip(skip)
         .limit(Number(limit))
         .lean(),
