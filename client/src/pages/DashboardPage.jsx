@@ -385,11 +385,27 @@ export default function DashboardPage() {
         title="Dashboard"
         description="Resumo da sincronização e despesas recentes"
         actions={
-          <button onClick={handleSync} disabled={syncing} className="btn-primary">
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            aria-label={syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            title={syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            className="btn-primary"
+          >
+            {/*
+              Icon bumped from h-4 to h-5 so it reads as a proper glyph
+              (not a token) next to the button chrome. Mobile (< lg)
+              hides the text entirely — the 40-px primary button keeps
+              a tappable target without competing with the rail on the
+              left. aria-label + title still expose the action name to
+              assistive tech and desktop tooltips.
+            */}
             <ArrowPathIcon
-              className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`}
+              className={`h-5 w-5 ${syncing ? 'animate-spin' : ''}`}
             />
-            {syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            <span className="hidden lg:inline">
+              {syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            </span>
           </button>
         }
       />
