@@ -230,18 +230,20 @@ Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em
 
 ### ~~3.1 Layout responsivo / mobile~~ ✅
 
-Sidebar passou a drawer deslizante (< lg / 1024px) com top bar sticky, hamburger + título compacto, backdrop com click-para-fechar, Escape-to-close, auto-close ao mudar de rota e body-scroll lock enquanto aberto. Desktop mantém sidebar docked como antes — **zero alteração visível** acima de 1024px.
+Sidebar agora é **um único componente responsivo** que colapsa para um rail de ícones (64 px) em narrow (`< lg / 1024 px`) e expande para sidebar full (256 px) em wide. Em portrait/phone fica visível apenas o badge "CS" no topo + os 5 ícones de navegação empilhados verticalmente + botão de logout no fundo. Sem drawer, sem hamburger, sem topbar — cada destino está a um tap.
+
+**Iteração:** a primeira implementação foi um slide-in drawer com hamburger + wordmark no topbar. Revertida após feedback de que o topbar portrait mostrava `CS` e `Curve Sync` lado-a-lado (redundância visual) e porque cada navegação forçava dois taps (hamburger → link). O rail sempre-visível resolve ambos.
 
 - **Implementado:**
-  - `client/src/components/layout/Shell.jsx` — host do drawer state + topbar + backdrop + `fixed inset-0 z-40 lg:hidden` para o painel; `translate-x` / `transition-transform` Tailwind puro (sem `motion/react`) para garantir `prefers-reduced-motion` a grátis via browser short-circuit
-  - `client/src/components/layout/Sidebar.jsx` — aceita `onNavigate` (fecha drawer em link tap) e `onClose` (botão X no cabeçalho, visível só em mobile)
-  - `client/src/components/layout/Icons.jsx` — novos `Bars3Icon`, `XMarkIcon`
+  - `client/src/components/layout/Sidebar.jsx` — único componente, `w-16 lg:w-64`; brand vira só badge em mobile (`hidden lg:inline` no wordmark); NavLinks alternam entre `justify-center` (icon-only) e `justify-start` (icon + label); cada link carrega `title={label}` + `aria-label={label}` para tooltips + screen readers
+  - `client/src/components/layout/Shell.jsx` — simplificado para `<div className="flex min-h-screen"><Sidebar /><main>…</main></div>`; removido todo o state do drawer (escape listener, body scroll lock, backdrop, `useLocation` auto-close) — ~60 linhas de complexidade desapareceram
+  - `client/src/contexts/ToastContext.jsx` — viewport dos toasts ancorado a `top-right` em todos os breakpoints (ajustado para não brigar com o rail lateral ocupado)
   - `min-w-0` no `<main>` previne que tabelas largas (`/expenses`, `/curve/logs`) expandam o viewport lateralmente no telemóvel (flex default é `min-width: auto`)
 - **Acessibilidade:**
-  - Drawer é `role="dialog" aria-modal="true" aria-label="Menu de navegação"`
-  - Botão hamburger tem `aria-expanded` reactivo
-  - Container do overlay tem `aria-hidden` para esconder o drawer fechado dos ATs
-- **Impacto no bundle:** zero deps novas; +0 kB além do markup
+  - Nav container é `<aside aria-label="Navegação">`
+  - Links icon-only mantêm `aria-label` com o nome canónico — screen readers anunciam "Dashboard" / "Despesas" / ... igual em ambos os modos
+  - `title` attribute fornece tooltip nativo em desktop ao passar o cursor sobre o ícone
+- **Impacto no bundle:** zero deps novas; código net-negativo vs iteração do drawer (saíram state, listeners e scroll lock)
 
 ### ~~3.2 Notificações / Toasts~~ ✅
 

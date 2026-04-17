@@ -250,9 +250,12 @@ function ToastViewport({ toasts, onDismiss }) {
   // pointer-events-none on the container, auto on children lets the
   // user interact with the page underneath between toasts (e.g. the
   // corner avatar or a dropdown) while still being able to dismiss.
+  // Anchored top-right at every breakpoint — the 64 px nav rail on
+  // the left of mobile would fight a top-center layout, and the
+  // desktop sidebar wouldn't care either way.
   return (
     <div
-      className="pointer-events-none fixed inset-x-0 top-16 z-50 flex flex-col items-center gap-2 px-4 sm:inset-x-auto sm:right-4 sm:top-4 sm:max-w-sm sm:items-end"
+      className="pointer-events-none fixed right-3 top-3 z-50 flex w-[calc(100%-5rem)] max-w-sm flex-col items-stretch gap-2 sm:right-4 sm:top-4 sm:w-auto sm:items-end"
       data-slot="toast-viewport"
     >
       <div className="pointer-events-auto flex w-full max-w-sm flex-col gap-2">
