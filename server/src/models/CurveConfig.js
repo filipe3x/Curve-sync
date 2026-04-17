@@ -30,6 +30,12 @@ const curveConfigSchema = new mongoose.Schema(
     // Clamped to [1, 28] in services/cycle.js → normaliseCycleDay to
     // avoid Feb overflow when a user picks something like 31.
     sync_cycle_day: { type: Number, default: 22, min: 1, max: 28 },
+    // Weekly spending budget in EUR — feeds the dashboard savings-score
+    // KPI. Default of 73.75 comes from the original Embers analysis
+    // (€295/month ÷ 4 weeks). Stored per-user so everyone can calibrate
+    // to their own pay; the score formula lives in
+    // services/expenseStats.js → computeSavingsScore.
+    weekly_budget: { type: Number, default: 73.75, min: 0 },
     // IMAP SEARCH SINCE filter. When set, the reader appends
     // `SINCE <date>` to the SEARCH UNSEEN query so the IMAP server
     // filters old messages server-side before sending. When `null`,

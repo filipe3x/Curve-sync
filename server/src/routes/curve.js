@@ -114,7 +114,7 @@ router.put('/config', async (req, res) => {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
       imap_since, max_emails_per_run,
-      sync_cycle_day,
+      sync_cycle_day, weekly_budget,
       confirm_folder,
     } = req.body;
 
@@ -131,6 +131,13 @@ router.put('/config', async (req, res) => {
       // save) don't stomp on a previously-set cycle day.
       sync_cycle_day:
         sync_cycle_day != null ? normaliseCycleDay(sync_cycle_day) : undefined,
+      // Parse + clamp to a non-negative finite number. Mongoose's `min: 0`
+      // still runs on the update via runValidators, but parsing up-front
+      // keeps "73,75" strings and "Infinity" out of the DB entirely.
+      weekly_budget:
+        weekly_budget != null && Number.isFinite(Number(weekly_budget))
+          ? Math.max(0, Number(weekly_budget))
+          : undefined,
       user_id: req.userId,
     };
     if (confirm_folder === true) {

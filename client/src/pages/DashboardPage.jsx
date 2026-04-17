@@ -14,6 +14,33 @@ import * as api from '../services/api';
 // users jump between them.
 const UNDO_WINDOW_MS = 6000;
 
+// Portuguese relative time for the "Último sync" stat card. We use a
+// tiny hand-rolled formatter instead of Intl.RelativeTimeFormat because
+// the latter rounds in unhelpful ways ("há 1 minuto" for 59 s felt
+// jumpy) and the three bands below cover every realistic sync cadence.
+function formatRelativePt(iso) {
+  if (!iso) return '—';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '—';
+  const diff = Math.max(0, Date.now() - then);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'há segundos';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `há ${min} min`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `há ${hr} h`;
+  const days = Math.floor(hr / 24);
+  return `há ${days} d`;
+}
+
+// EUR formatter for month totals — parity with the currency style used
+// across /expenses so €€€ never rendered with mixed separators.
+const EUR = new Intl.NumberFormat('pt-PT', {
+  style: 'currency',
+  currency: 'EUR',
+  maximumFractionDigits: 2,
+});
+
 /**
  * Re-auth banner visibility rule (see docs/EMAIL_AUTH_MVP.md §8 items
  * 4 and 5). The banner fires when the user is on the OAuth branch AND
@@ -424,11 +451,21 @@ export default function DashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Despesas este mês"
-          value={stats?.month_total != null ? `€${stats.month_total}` : '—'}
+          value={stats?.month_total != null ? EUR.format(stats.month_total) : '—'}
+          sub={
+            stats?.cycle?.start && stats?.cycle?.end
+              ? `${stats.cycle.start} → ${stats.cycle.end}`
+              : undefined
+          }
         />
         <StatCard
           label="Savings Score"
-          value={stats?.savings_score != null ? stats.savings_score : '—'}
+          value={stats?.savings_score != null ? stats.savings_score.toFixed(1) : '—'}
+          sub={
+            stats?.weekly_savings != null && stats?.weekly_budget
+              ? `${EUR.format(stats.weekly_savings)} / ${EUR.format(stats.weekly_budget)}`
+              : undefined
+          }
           accent
         />
         {/*
@@ -456,8 +493,14 @@ export default function DashboardPage() {
         </Link>
         <StatCard
           label="Último sync"
-          value={stats?.last_sync ?? '—'}
-          sub={syncStatus?.last_sync_status ?? stats?.last_sync_status}
+          value={formatRelativePt(
+            syncStatus?.last_sync_at ?? stats?.last_sync_at,
+          )}
+          sub={
+            stats?.emails_processed != null
+              ? `${stats.emails_processed.toLocaleString('pt-PT')} emails processados`
+              : (syncStatus?.last_sync_status ?? stats?.last_sync_status)
+          }
         />
       </div>
 

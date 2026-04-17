@@ -490,6 +490,38 @@ export default function CurveConfigPage() {
             categorias e à primeira sincronização.
           </span>
         </label>
+
+        {/*
+          Weekly budget drives the dashboard savings-score KPI. Edited
+          in EUR; the backend clamps to [0, ∞) and parses "73,75" /
+          "73.75" alike. Blurring triggers the save — we don't debounce
+          while typing to keep parity with the rest of the schedule
+          card (checkbox + dropdowns are all save-on-change).
+        */}
+        <label className="mt-5 block">
+          <span className="mb-1.5 block text-xs font-medium text-sand-500">
+            Orçamento semanal (€)
+          </span>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            defaultValue={config.weekly_budget ?? 73.75}
+            onBlur={(e) => {
+              const parsed = Number(e.target.value.replace(',', '.'));
+              if (!Number.isFinite(parsed) || parsed < 0) return;
+              if (parsed === (config.weekly_budget ?? 73.75)) return;
+              saveSchedule({ weekly_budget: parsed });
+            }}
+            disabled={schedSaving || authBroken || authFresh}
+            className="input disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          <span className="mt-1.5 block text-xs text-sand-500">
+            Limite de despesas a atingir cada semana. Alimenta a «Savings
+            Score» do dashboard (score alto = poupaste mais). Por defeito
+            €73,75 (€295 / 4 semanas).
+          </span>
+        </label>
       </section>
 
       {/* ----- Stats card ----- */}

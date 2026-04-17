@@ -7,6 +7,7 @@ import {
   reassignCategoryBulk,
 } from '../services/expense.js';
 import { loadContext, resolveCategory } from '../services/categoryResolver.js';
+import { computeDashboardStats } from '../services/expenseStats.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
@@ -86,7 +87,28 @@ router.get('/', async (req, res) => {
       category_name: e.category_id ? catMap[e.category_id.toString()] ?? null : null,
     }));
 
-    res.json({ data: enriched, meta: { total, page: Number(page), limit: Number(limit) } });
+    // Dashboard KPIs — computed in parallel with the list fetch above
+    // so adding stats doesn't bump the `/expenses` latency. Keeping
+    // them on `meta` (instead of a dedicated /stats endpoint) means the
+    // dashboard's single `getExpenses({ limit: 5 })` call wires all
+    // four StatCards at once. Fast-fail: any error collapses to zeros
+    // rather than 500ing the listing — the stat cards handle `null`.
+    let dashboardStats = null;
+    try {
+      dashboardStats = await computeDashboardStats({ userId: req.userId });
+    } catch (e) {
+      console.warn(`dashboard stats failed: ${e.message}`);
+    }
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        ...(dashboardStats ?? {}),
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
