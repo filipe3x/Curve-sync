@@ -2,6 +2,7 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import Expense from '../models/Expense.js';
 import Category from '../models/Category.js';
+import CurveLog from '../models/CurveLog.js';
 import {
   computeDigest,
   reassignCategoryBulk,
@@ -318,6 +319,28 @@ router.put('/:id/category', async (req, res) => {
       { _id: id, user_id: req.userId },
       category_id,
     );
+
+    // Keep the denormalised `CurveLog.uncategorised` flag in sync with
+    // the live expense state. The flag was originally snapshotted at
+    // sync time to feed the /curve/stats/uncategorised count and the
+    // /curve/logs?tab=uncategorised view without joining to Expense.
+    // Once the user recategorises, the flag stops matching reality and
+    // the row lingers in the "Sem categoria" tab until the next sync.
+    // Fix it here: category_id=null means uncategorised, anything else
+    // means categorised. `updateMany` is scoped to `{ expense_id, user_id }`
+    // for defence-in-depth. Best-effort — a failure here doesn't roll
+    // back the expense write (the log is a view, not the source of
+    // truth), but it is logged so ops can spot the inconsistency.
+    try {
+      await CurveLog.updateMany(
+        { expense_id: id, user_id: req.userId },
+        { $set: { uncategorised: category_id === null } },
+      );
+    } catch (e) {
+      console.warn(
+        `expenses.putCategory: could not sync CurveLog.uncategorised for ${id}: ${e.message}`,
+      );
+    }
 
     // Re-read so the response carries the updated `updated_at` that
     // Mongoose just stamped — the popover optimistically updates the
