@@ -243,7 +243,23 @@ Sidebar agora é **um único componente responsivo** que colapsa para um rail de
   - Nav container é `<aside aria-label="Navegação">`
   - Links icon-only mantêm `aria-label` com o nome canónico — screen readers anunciam "Dashboard" / "Despesas" / ... igual em ambos os modos
   - `title` attribute fornece tooltip nativo em desktop ao passar o cursor sobre o ícone
+- **Ajustes afinados em cima do rail:**
+  - Botão «Sincronizar agora» do dashboard vira só ícone em `< lg` (`<span className="hidden lg:inline">` sobre o texto); `aria-label` + `title` mantêm o nome completo para assistive tech e tooltips
+  - Ícone `ArrowPathIcon` do mesmo botão subiu de `h-4 w-4` para `h-5 w-5` em ambos os modos — lê-se como glyph de acção em vez de token
 - **Impacto no bundle:** zero deps novas; código net-negativo vs iteração do drawer (saíram state, listeners e scroll lock)
+- **🔬 Testes de campo pendentes (follow-up, ajustes minor):**
+  - [ ] **iPhone SE 1ª gen (320 × 568)** — o mais estreito ainda em circulação; verificar que o rail de 64 px + main column não força scroll horizontal em `/expenses` nem em `/curve/logs`
+  - [ ] **iPhone 12/13/14 mini (375 × 667)** — alvo típico de portrait; confirmar o gap entre o botão «Sincronizar» e o título no `PageHeader` (actualmente sem breakpoint intermédio)
+  - [ ] **iPhone 14 Pro Max (430 × 932)** — verificar que o rail não parece anémico num ecrã maior onde ainda estamos abaixo de `lg`
+  - [ ] **iPad mini portrait (768 × 1024)** — **zona crítica**: ainda abaixo do breakpoint `lg` de 1024 px, portanto cai no rail mobile. Avaliar se a partir de `md` (768 px) vale a pena introduzir um breakpoint intermédio com rail + labels (ex: `w-48`), ou manter o rail slim e expandir apenas acima de `lg`
+  - [ ] **iPad Pro 11" landscape (1194 × 834)** — landscape tablets já entram em sidebar full; validar que a sidebar não come espaço demais em landscape
+  - [ ] **Android Chrome (Pixel 7, Galaxy S22)** — verificar `safe-area-inset-bottom` na navegação (actualmente não aplicado) e comportamento do `title` tooltip em touch
+  - [ ] **Orientation flip** (portrait → landscape num phone) — confirmar que nada se partiu; o layout é CSS-only, portanto deve adaptar-se sem glitch
+  - [ ] **Tema do sistema dark** (browser dev tools) — o dark mode está diferido para §3.3, mas verificar que o rail actual não fica ilegível em dark via `forced-colors`
+  - [ ] **Toasts em mobile** — validar que não sobrepõem o `PageHeader` com 2+ toasts simultâneos; ajustar `top-3` se necessário
+  - [ ] **Tap targets** — passar pelo [WCAG 2.2 Target Size (AAA ≥ 44 px)](https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html); botão de logout e hamburger dos ícones de nav estão na fronteira (`p-2.5` + `h-5` = 36 px), pode valer a pena subir para `p-3`
+
+  **O que não é pendente nestes testes:** a arquitectura (rail sempre-visível vs drawer) está decidida. Os ajustes esperados são todos CSS tweaks — paddings, breakpoints intermédios, `safe-area-inset`. Nenhum deles deve mover código para fora do `Sidebar.jsx`/`Shell.jsx`.
 
 ### ~~3.2 Notificações / Toasts~~ ✅
 
