@@ -425,6 +425,112 @@ Logo, **não se pode adicionar** um campo `excluded_from_cycle` a `Expense`. A s
 
 ---
 
+### 2.11 🐛 Dashboard stale após «Sincronizar agora» + tween consistente nos KPIs — MVP
+
+**Bug.** Depois de clicar «Sincronizar agora» no Dashboard e o sync importar despesas novas com sucesso, os `StatCard` de **«Despesas este mês»** e **«Savings Score»** continuam a mostrar os valores antigos. A tabela «Despesas recentes» também fica stale. Só o card «Sem categoria» e «Último sync» actualizam, porque são os únicos que `handleSync` re-fetcha. O utilizador tem de recarregar a página para ver o resultado real da sincronização — o que contraria o próprio propósito do botão.
+
+**Root cause.** `DashboardPage.jsx :: handleSync` (linha ~317) faz, no `finally`:
+
+```js
+await refreshStatuses();                   // sync_status + oauth_status
+api.getUncategorisedStats().then(...)      // uncategorised count
+```
+
+Mas **nunca** re-invoca `api.getExpenses({ limit: 5, sort: '-date' })`, que é o endpoint que alimenta:
+
+- `recentExpenses` (tabela inteira)
+- `stats` (do `meta`): `month_total`, `savings_score`, `weekly_savings`, `weekly_budget`, `emails_processed`
+
+O `useEffect` de mount só corre uma vez, portanto tudo o que depende de `stats` fica congelado no valor inicial.
+
+**Fix de dados:**
+
+- Extrair a fetch inicial do `useEffect` para um helper `loadDashboard()` (paralelo, `Promise.allSettled`)
+- Chamá-lo também no `finally` de `handleSync` em vez do bloco actual de 3 fetches dispersos
+- O helper devolve quatro coisas em paralelo: `getExpenses({ limit: 5 })`, `getSyncStatus`, `getOAuthStatus`, `getUncategorisedStats` — todos com fallback silencioso (fetch que falhe não bloqueia o resto)
+
+**Fix de UX — tween estilo slot machine em todos os KPIs numéricos:**
+
+Relacionado mas não dependente: quando os valores **mudam** (post-sync, ou quando o utilizador re-categoriza uma despesa e o Savings Score se mexe), os números devem **re-animar** do valor anterior até ao novo valor, igual ao que já acontece em `/categories` — não um swap instantâneo. Hoje:
+
+| Card | Estado actual | Deve |
+|------|---------------|------|
+| Despesas este mês | `EUR.format(stats.month_total)` directo | tween €prev → €next |
+| Savings Score | `stats.savings_score.toFixed(1)` directo | tween 0.0 → 8.1 |
+| Sem categoria | já usa `useCountUp(uncategorisedCount ?? 0)` | ✅ ok |
+| Último sync | `formatRelativePt(...)` | N/A (não é numérico) |
+| `emails_processed` (sub-label) | `.toLocaleString('pt-PT')` directo | tween do contador |
+
+O padrão já existe e está provado em `client/src/pages/CategoriesPage.jsx:300` — o componente `AnimatedKPI` (`const tweened = useCountUp(value, 800)` + formatador à volta). **Reaproveitar — não recriar.**
+
+**Estrutura de implementação:**
+
+1. **Componente partilhado** — mover `AnimatedKPI` de `CategoriesPage.jsx` para `client/src/components/common/AnimatedKPI.jsx`:
+   ```jsx
+   export function AnimatedKPI({ label, value, format, sub, accent, title }) {
+     const tweened = useCountUp(value ?? 0, 800);
+     return (
+       <StatCard
+         label={label}
+         value={value == null ? '—' : format(tweened)}
+         sub={sub}
+         accent={accent}
+         title={title}
+       />
+     );
+   }
+   ```
+   - Notar: `value == null` → `—` (não mostra `0` durante o primeiro paint se o fetch ainda não resolveu)
+   - Reusa o `StatCard` existente para manter o visual consistente
+
+2. **Dashboard — adoptar `AnimatedKPI` nos três cards numéricos:**
+   ```jsx
+   <AnimatedKPI
+     label="Despesas este mês"
+     value={stats?.month_total}
+     format={(v) => EUR.format(v)}
+     sub={stats?.cycle ? `${stats.cycle.start} → ${stats.cycle.end}` : undefined}
+   />
+   <AnimatedKPI
+     label="Savings Score"
+     value={stats?.savings_score}
+     format={(v) => v.toFixed(1)}
+     sub={...}
+     title="..."
+     accent
+   />
+   ```
+   - Para «Sem categoria» já existe uma versão manual do `useCountUp`; substituir pela nova abstracção para cortar o código duplicado
+
+3. **`loadDashboard()` helper** — consolida todas as fetches num único ponto de entrada; chamado no mount e em `handleSync.finally`. Cada fetch individual continua a falhar silenciosamente para preservar o comportamento actual de «a dashboard nunca é hostage de um endpoint que esteja em baixo».
+
+4. **`useCountUp` — pequeno ajuste** (opcional, afina a UX):
+   - Hoje o hook anima sempre de `0 → value`. Isso é correcto no primeiro paint, mas em updates (post-sync) fica jumpy: um score que passa de `8.1` para `8.3` recua visivelmente para `0` e sobe
+   - Alterar o hook para animar de **`previousValue` → `value`** em transições subsequentes, mantendo `0` só como valor inicial do primeiro paint. O spec em `/categories` também beneficia — hoje disfarça-se porque mudar de categoria reseta visualmente os quatro cartões, mas a animação ainda assim «vem do 0»
+   - Implementação: guardar o `value` anterior num `ref`, usar `ref.current` como `from` no `tick`, actualizar no fim do rAF
+   - `prefers-reduced-motion: reduce` continua a cortar a animação inteira
+
+**Testes:**
+
+- `client/src/hooks/__tests__/useCountUp.test.js` — novo caso para previous-value animation (update de 5 → 8 não passa por 0)
+- Smoke manual no dashboard: clicar «Sincronizar agora» → confirmar que os quatro cards actualizam sem reload e que os números tween-am do valor anterior para o novo
+
+**Scope cut consciente:**
+
+- Não estender o tween à tabela «Despesas recentes» (só aos KPIs). A tabela já tem `animate-slide-in-right`-style delay por linha (`style={{ animationDelay: ... }}`) que dá a sensação de refresh — misturar com tween numérico fica barulhento
+- Não mexer nos StatCards das outras páginas (`/curve/config`, `/curve/logs`); cada uma pode migrar para `AnimatedKPI` em PRs separados se se mostrar útil
+
+**Dependências:** Nenhuma. É um bug fix frontend puro + reuso do hook `useCountUp` já existente.
+
+**Referências:**
+- `client/src/pages/DashboardPage.jsx:317` — `handleSync` actual (onde falta o refetch de `getExpenses`)
+- `client/src/pages/DashboardPage.jsx:131` — `useEffect` de mount (a extrair para `loadDashboard`)
+- `client/src/pages/CategoriesPage.jsx:300` — `AnimatedKPI` existente (a promover a partilhado)
+- `client/src/hooks/useCountUp.js` — hook a estender (0→value vira prev→value em updates)
+- `client/src/components/common/StatCard.jsx` — componente base inalterado
+
+---
+
 ## Fase 3 — Polimento (Prioridade Baixa)
 
 ### ~~3.1 Layout responsivo / mobile~~ ✅
