@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import StatCard from '../components/common/StatCard';
+import AnimatedKPI from '../components/common/AnimatedKPI';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
-import { useCountUp } from '../hooks/useCountUp';
 import { useToast } from '../contexts/ToastContext';
 import * as api from '../services/api';
 
@@ -116,59 +116,61 @@ export default function DashboardPage() {
   // and also confirms a successful recovery sync with a green ack.
   const [syncMessage, setSyncMessage] = useState(null);
 
-  // Parallel reload helper — used on mount AND after every sync
-  // attempt (success or failure). Keeping both statuses fresh is what
-  // lets the re-auth banner appear/disappear without a page reload.
-  const refreshStatuses = async () => {
-    const [syncRes, oauthRes] = await Promise.allSettled([
+  // Consolidated reload. Used on mount AND in handleSync.finally so
+  // both paths hit the same six endpoints, in parallel, with
+  // per-endpoint silent-failure. Pre-§2.11 the mount useEffect loaded
+  // six things but `handleSync` only refreshed three, leaving the
+  // KPI cards (which depend on getExpenses `meta`) stale until a
+  // page reload. Centralising the fetches is what fixes that.
+  //
+  // Each branch swallows its own error because any one of these may
+  // be slow / unreachable and the dashboard must still paint what it
+  // can. `getExpenses` is the one exception: its failure also surfaces
+  // the top-level error banner since it drives both the stats AND the
+  // recent-expenses table.
+  const loadDashboard = async () => {
+    const [
+      expensesRes,
+      syncRes,
+      oauthRes,
+      uncatRes,
+      catsRes,
+      iconsRes,
+    ] = await Promise.allSettled([
+      api.getExpenses({ limit: 5, sort: '-date' }),
       api.getSyncStatus(),
       api.getOAuthStatus(),
+      api.getUncategorisedStats(),
+      api.getCategories(),
+      api.getCategoryIcons(),
     ]);
+
+    if (expensesRes.status === 'fulfilled') {
+      setRecentExpenses(expensesRes.value.data ?? []);
+      setStats(expensesRes.value.meta ?? null);
+      setError(null);
+    } else {
+      setError('Não foi possível carregar dados.');
+    }
     if (syncRes.status === 'fulfilled') setSyncStatus(syncRes.value);
     if (oauthRes.status === 'fulfilled') setOauthStatus(oauthRes.value);
+    if (uncatRes.status === 'fulfilled') {
+      setUncategorisedCount(uncatRes.value?.count ?? null);
+    }
+    if (catsRes.status === 'fulfilled') {
+      setCategories(catsRes.value.data ?? []);
+    }
+    if (iconsRes.status === 'fulfilled') {
+      const entries = (iconsRes.value.data ?? []).map((row) => [
+        String(row.category_id),
+        row.icon_name,
+      ]);
+      setIconByCategory(new Map(entries));
+    }
   };
 
   useEffect(() => {
-    api
-      .getExpenses({ limit: 5, sort: '-date' })
-      .then((res) => {
-        setRecentExpenses(res.data ?? []);
-        setStats(res.meta ?? null);
-      })
-      .catch(() => setError('Não foi possível carregar dados.'));
-
-    // Fire both auth + sync status in parallel. Failures are
-    // swallowed — the banner just stays hidden. The dashboard must
-    // not become a hostage to /oauth/status being unreachable.
-    refreshStatuses();
-
-    // Category catalogue for the quick-edit popover — tiny payload,
-    // failures are silent (popover just shows an empty state).
-    api
-      .getCategories()
-      .then((res) => setCategories(res.data ?? []))
-      .catch(() => setCategories([]));
-
-    // Icon mapping for the popover tiles. Same parallel-and-silent
-    // shape as the catalogue fetch — a 500 here must not break the
-    // dashboard, the popover just falls back to Tag glyphs.
-    api
-      .getCategoryIcons()
-      .then((res) => {
-        const entries = (res.data ?? []).map((row) => [
-          String(row.category_id),
-          row.icon_name,
-        ]);
-        setIconByCategory(new Map(entries));
-      })
-      .catch(() => setIconByCategory(new Map()));
-
-    // Uncategorised count for the current day-22 cycle. Failures are
-    // silent — the card just stays on `—`.
-    api
-      .getUncategorisedStats()
-      .then((res) => setUncategorisedCount(res?.count ?? null))
-      .catch(() => setUncategorisedCount(null));
+    loadDashboard();
   }, []);
 
   // ─── Undo-banner plumbing ───────────────────────────────────────
@@ -338,28 +340,18 @@ export default function DashboardPage() {
       toast.error(text, { id: 'sync-result' });
     } finally {
       setSyncing(false);
-      // Refresh both statuses whatever the outcome:
-      //   - On success: may have recovered from an earlier error, so
-      //     the banner should disappear → we need fresh sync status.
-      //     oauthStatus may also have changed if the user re-ran the
-      //     wizard in another tab between mounts, so refresh that too.
-      //   - On failure: the server flipped `last_sync_status='error'`
-      //     and/or the OAuth cache is now known-broken, so refreshing
-      //     both is what makes the banner light up in-place without
-      //     requiring the user to reload the dashboard.
+      // Full refresh regardless of sync outcome. Success may have
+      // imported new expenses (so month_total + savings_score change),
+      // may have added "Sem categoria" rows, and must clear any
+      // stale `last_sync_status='error'` that was lighting the
+      // re-auth banner. Failure flips things the other way. Either
+      // way, hitting all six endpoints keeps every card and the
+      // recent-expenses table honest without a page reload.
       try {
-        await refreshStatuses();
+        await loadDashboard();
       } catch {
-        /* best-effort — the banner will catch up on next mount */
+        /* best-effort — the cards will catch up on next interaction */
       }
-      // Re-pull the uncategorised count too — a successful sync may
-      // have added new "Sem categoria" rows (or the user re-categorised
-      // them via the popover, in which case the count should drop).
-      // Silent on failure — the card keeps the stale number.
-      api
-        .getUncategorisedStats()
-        .then((res) => setUncategorisedCount(res?.count ?? null))
-        .catch(() => {});
       // Keep the message visible but slightly longer on success so
       // the user can read it. Error messages stay until the next
       // click because dismissing them silently would just recreate
@@ -371,13 +363,6 @@ export default function DashboardPage() {
   };
 
   const showReauth = needsReauth({ syncStatus, oauthStatus });
-
-  // KPI-strip convention per docs/Categories.md §9.8: tween numeric
-  // stats from 0 → target on first paint so the dashboard feels alive
-  // rather than teleporting values in. Passing 0 while loading keeps
-  // the tween target deterministic; the card itself shows `—` until
-  // the fetch resolves, so the user never sees a spurious "0".
-  const uncategorisedDisplay = useCountUp(uncategorisedCount ?? 0);
 
   return (
     <>
@@ -463,11 +448,15 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Stat cards */}
+      {/* Stat cards — three numeric KPIs share AnimatedKPI so the
+          numbers tween on every refresh (mount OR post-sync), not
+          just first paint. Último sync stays on StatCard because its
+          value is relative-time text, not a number. */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
+        <AnimatedKPI
           label="Despesas este mês"
-          value={stats?.month_total != null ? EUR.format(stats.month_total) : '—'}
+          value={stats?.month_total}
+          format={(v) => EUR.format(v)}
           sub={
             stats?.cycle?.start && stats?.cycle?.end
               ? `${stats.cycle.start} → ${stats.cycle.end}`
@@ -477,13 +466,16 @@ export default function DashboardPage() {
         {/*
           Savings Score — 0 to 10 on a log curve (see
           server/src/services/expenseStats.js → computeSavingsScore).
-          Sub-label reads as `{savings} / {budget}` (kept / possible);
-          the `title` tooltip carries the fuller explanation of the
-          0-10 scale for desktop hover.
+          `perfect` kicks in when the tween lands on exactly 10 and
+          dresses the number in the shimmer/breathe combo defined in
+          index.css. Sub-label reads as `{savings} / {budget}`
+          (kept / possible); the tooltip carries the fuller
+          explanation for desktop hover.
         */}
-        <StatCard
+        <AnimatedKPI
           label="Savings Score"
-          value={stats?.savings_score != null ? stats.savings_score.toFixed(1) : '—'}
+          value={stats?.savings_score}
+          format={(v) => v.toFixed(1)}
           sub={
             stats?.weekly_savings != null && stats?.weekly_budget
               ? `${EUR.format(stats.weekly_savings)} / ${EUR.format(stats.weekly_budget)}`
@@ -491,27 +483,24 @@ export default function DashboardPage() {
           }
           title="Score de 0 a 10 baseado no que poupaste esta semana face ao orçamento. Escala logarítmica — poupar pouco já dá score alto; gastar tudo colapsa para 0."
           accent
+          perfect
         />
         {/*
           "Sem categoria" card — the one interactive stat on the
-          dashboard. Wrapping StatCard in a Link rather than teaching
-          StatCard about href keeps the component dumb (it's used in
-          four other places, none of which should light up on hover).
-          Deep-links to /curve/logs with the tab param so the user
-          lands directly on the uncategorised bucket, scoped to the
-          current day-22 cycle by the server.
+          dashboard. Wrapping AnimatedKPI in a Link rather than
+          teaching the component about href keeps it dumb (it's also
+          used on /categories). Deep-links to /curve/logs with the
+          tab param so the user lands directly on the uncategorised
+          bucket, scoped to the current day-22 cycle by the server.
          */}
         <Link
           to="/curve/logs?tab=uncategorised"
           className="block rounded-2xl transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
         >
-          <StatCard
+          <AnimatedKPI
             label="Sem categoria"
-            value={
-              uncategorisedCount == null
-                ? '—'
-                : Math.round(uncategorisedDisplay).toLocaleString('pt-PT')
-            }
+            value={uncategorisedCount}
+            format={(v) => Math.round(v).toLocaleString('pt-PT')}
             sub="ciclo actual"
           />
         </Link>

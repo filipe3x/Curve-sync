@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import { PlusIcon, MagnifyingGlassIcon } from '../components/layout/Icons';
-import { useCountUp } from '../hooks/useCountUp';
+import AnimatedKPI from '../components/common/AnimatedKPI';
 import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 import { CategoryIcon } from '../components/common/CategoryIcon';
@@ -294,20 +294,6 @@ function CategoryRow({ row, index, selected, iconName, onClick }) {
         <DeltaBadge delta={row.delta} />
       </div>
     </button>
-  );
-}
-
-function AnimatedKPI({ label, value, format }) {
-  const tweened = useCountUp(value, 800);
-  return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-4">
-      <p className="text-[11px] font-medium uppercase tracking-wide text-sand-400">
-        {label}
-      </p>
-      <p className="mt-2 text-xl font-semibold text-sand-900" data-count-up>
-        {format(tweened)}
-      </p>
-    </div>
   );
 }
 
@@ -2500,21 +2486,25 @@ export default function CategoriesPage() {
               {/* KPI strip */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <AnimatedKPI
+                  variant="compact"
                   label="Total do ciclo"
                   value={selectedRow.total}
                   format={formatEUR}
                 />
                 <AnimatedKPI
+                  variant="compact"
                   label="Despesas"
                   value={selectedRow.expense_count}
                   format={(n) => Math.round(n).toString()}
                 />
                 <AnimatedKPI
+                  variant="compact"
                   label="Entidades"
                   value={selectedRow.entity_count}
                   format={(n) => Math.round(n).toString()}
                 />
                 <AnimatedKPI
+                  variant="compact"
                   label="Média por despesa"
                   value={
                     selectedRow.expense_count

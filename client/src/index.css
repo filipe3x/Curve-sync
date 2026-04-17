@@ -52,6 +52,31 @@
   .badge-pending {
     @apply badge bg-amber-50 text-amber-700;
   }
+
+  /* Savings Score "perfect 10" — a horizontal shimmer clipped to the
+     number, breathing scale, and a soft warm halo. All three layers
+     are intentionally slow (2.8 s) and low-amplitude so the card
+     celebrates the milestone without shouting. Triggered from the
+     AnimatedKPI via the `perfect` prop; see DashboardPage for the
+     wiring and ROADMAP §2.11 for the design note. */
+  .kpi-perfect {
+    @apply relative inline-block animate-perfect-breathe;
+    background-image: linear-gradient(
+      100deg,
+      theme('colors.curve.700') 0%,
+      theme('colors.curve.700') 35%,
+      theme('colors.amber.400') 50%,
+      theme('colors.curve.700') 65%,
+      theme('colors.curve.700') 100%
+    );
+    background-size: 250% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: perfect-shimmer 2.8s linear infinite,
+               perfect-breathe 2.8s ease-in-out infinite;
+    filter: drop-shadow(0 0 6px theme('colors.amber.300' / 55%));
+  }
 }
 
 /* Accessibility — kill every animation/transition for users who ask

@@ -425,7 +425,17 @@ Logo, **não se pode adicionar** um campo `excluded_from_cycle` a `Expense`. A s
 
 ---
 
-### 2.11 🐛 Dashboard stale após «Sincronizar agora» + tween consistente nos KPIs — MVP
+### ~~2.11 🐛 Dashboard stale após «Sincronizar agora» + tween consistente nos KPIs~~ ✅ — MVP
+
+> **Implementado.** Ver commits abaixo. Resumo do que aterrou:
+>
+> - `DashboardPage.jsx` — seis fetches consolidados em `loadDashboard()`; chamado no mount e no `finally` de `handleSync` em substituição dos três fetches soltos. Inclui `getExpenses` — que é o que alimenta `stats.month_total` + `stats.savings_score` + `recentExpenses` e, antes, ficava stale até reload
+> - `client/src/components/common/AnimatedKPI.jsx` — novo componente partilhado (variantes `default` para o dashboard e `compact` para o KPI strip de `/categories`). Os três cards numéricos do dashboard (Despesas este mês, Savings Score, Sem categoria) passam a usá-lo; o StatCard «Último sync» mantém-se (valor relativo em texto, não numérico)
+> - `hooks/useCountUp.js` — tween agora parte de `previousValue` em updates (via ref), só parte de 0 no primeiro paint. Um score a subir de 8.1 → 8.3 já não regride visualmente a 0 antes de climbar
+> - **Savings Score = 10** ganha o efeito subtil `kpi-perfect` (`index.css`): shimmer horizontal clipado ao número em gradiente `curve-700 → amber-400 → curve-700`, breathing scale 1 ↔ 1.03 em 2.8 s, halo de `drop-shadow` em `amber-300/55`. Só activa depois do tween aterrar (`Math.abs(tweened - 10) < 0.05`) — senão o efeito piscaria ao atravessar 10.0 durante a subida. Os três layers respeitam `prefers-reduced-motion: reduce` via o bloco global em `index.css`
+> - `CategoriesPage.jsx` — migrada para o `AnimatedKPI` partilhado (`variant="compact"`); zero regressão visual no KPI strip
+
+### 2.11 — nota histórica 🐛 (spec original)
 
 **Bug.** Depois de clicar «Sincronizar agora» no Dashboard e o sync importar despesas novas com sucesso, os `StatCard` de **«Despesas este mês»** e **«Savings Score»** continuam a mostrar os valores antigos. A tabela «Despesas recentes» também fica stale. Só o card «Sem categoria» e «Último sync» actualizam, porque são os únicos que `handleSync` re-fetcha. O utilizador tem de recarregar a página para ver o resultado real da sincronização — o que contraria o próprio propósito do botão.
 
