@@ -256,6 +256,173 @@ Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em
 - `CLAUDE.md` → Custom Monthly Cycle
 - Fase 2.5 deste roadmap — mesma pipeline de `computeDashboardStats` estende-se a `computeCycleHistory`
 
+### 2.9 Data relativa user-friendly na tabela de despesas recentes 🗓️ — MVP
+
+Substituir a string crua de `Expense.date` na coluna **Data** da tabela «Despesas recentes» do Dashboard (e, por extensão, da tabela de `/expenses`) por uma formulação relativa em português, mais legível de relance. A ideia é que uma despesa de hoje se leia como «há 3 min» ou «há 2 h» e uma dos últimos dias como «ontem», «anteontem» ou «há N dias» (até um máximo de **5** dias), caindo para a data absoluta (ex. `17 Abr 2026`) a partir daí.
+
+**Estado actual:**
+
+- O Dashboard já tem um formatter relativo (`formatRelativePt`) em `client/src/pages/DashboardPage.jsx:22` — mas **só o usa para o StatCard «Último sync»**. A coluna Data da tabela renderiza `exp.date` cru (linha `<td className="px-5 py-3 text-sand-500">{exp.date}</td>`)
+- `/expenses` também renderiza `exp.date` cru
+- `Expense.date` é armazenado como string (vem do parser cheerio — ver `emailParser.js` e o padrão de `parseExpenseDate` em `expenseStats.js`), portanto é necessário passar por `Date.parse` antes de comparar
+
+**Requisitos funcionais:**
+
+| Diferença face a `now` | Texto renderizado |
+|------------------------|-------------------|
+| `< 60 s` | `há segundos` |
+| `< 60 min` | `há N min` |
+| `< 24 h` | `há N h` |
+| 1 dia (mesmo dia civil anterior) | `ontem` |
+| 2 dias | `anteontem` |
+| 3–5 dias | `há N dias` |
+| `> 5 dias` ou data no futuro | fallback para a data absoluta `DD MMM YYYY` (pt-PT, `Intl.DateTimeFormat`) |
+
+- A decisão **dia civil vs. 24 h rolling** importa: «ontem» deve ser o dia civil anterior ao de hoje no fuso local, não «entre 24 e 48 h atrás». Uma despesa feita ontem às 23:00 e vista hoje às 08:00 deve ler «ontem», não «há 9 h»
+- O `title` attribute da `<td>` passa a carregar a data absoluta completa (para o utilizador passar o cursor e ver o valor exacto)
+- Datas não parseáveis caem silenciosamente para o texto original — nunca quebrar a linha
+
+**Estrutura de implementação:**
+
+1. **Frontend — novo helper partilhado**
+   - `client/src/utils/relativeDate.js` — `formatExpenseDate(iso, now = Date.now())` puro, testável; cobre as 7 bandas acima + fallback absoluto
+   - `DashboardPage.jsx` — substituir `{exp.date}` por `{formatExpenseDate(exp.date)}` e mover `formatRelativePt` (StatCard do "Último sync") para usar a banda curta do mesmo helper para consistência
+   - `ExpensesPage.jsx` — idem na coluna Data
+   - Adicionar `title={formatAbsoluteDate(exp.date)}` à `<td>` em ambos os sítios
+
+2. **Testes**
+   - `client/src/utils/__tests__/relativeDate.test.js` (ou homólogo server-side se optarmos por fazer o cálculo no backend — ver nota abaixo) com casos:
+     - `now - 30 s` → `há segundos`
+     - `now - 5 min` → `há 5 min`
+     - `now - 3 h` → `há 3 h`
+     - Ontem 23:00 visto hoje 08:00 → `ontem` (não `há 9 h`)
+     - Anteontem → `anteontem`
+     - `now - 4 dias` → `há 4 dias`
+     - `now - 6 dias` → fallback absoluto
+     - Data inválida / vazia → string original devolvida sem crash
+     - Fuso: deve respeitar timezone local (o server é UTC, o cliente é pt-PT)
+
+3. **Decisão aberta — client-side vs server-side**
+   - **Opção A (preferida):** cálculo no cliente. Prós: timezone local nativo, re-renderiza ao navegar entre páginas sem stale, zero bytes na wire. Contras: se a aba ficar aberta 5 horas, `há 2 min` fica parada até um re-render (mitigável com um `setInterval(60_000)` no dashboard)
+   - **Opção B:** calcular no backend em `parseExpenseDate` e serializar. Prós: uma única fonte de verdade, testes em Node. Contras: perde timezone do utilizador (o backend é UTC), envelhece assim que o payload é servido
+   - A opção A ganha pela UX e pela ausência de mudança no contrato da API
+
+**Notas de design:**
+
+- Máximo de 5 dias não é arbitrário — acima disso o texto relativo perde utilidade («há 17 dias» diz menos do que `30 Mar 2026`) e a data absoluta é mais rápida de ler
+- A data absoluta usa `Intl.DateTimeFormat('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' })`, consistente com o resto da app
+- Não mexer em `Expense.date` no schema — o campo continua string, a formatação é apenas de apresentação
+
+**Dependências:** Nenhuma. É puramente visual; zero impacto no backend, no schema, ou no pipeline de sync.
+
+**Referências:**
+- `client/src/pages/DashboardPage.jsx:22` — `formatRelativePt` actual (apenas «Último sync»)
+- `server/src/services/expenseStats.js` — `parseExpenseDate` defensivo (mesma estratégia de parsing se optarmos por Opção B)
+- `docs/UIX_DESIGN.md` — tom/voz pt-PT
+
+---
+
+### 2.10 Excluir despesa do ciclo / Savings Score 🚫 — MVP
+
+Permitir ao utilizador marcar uma despesa como **excluída do cálculo do ciclo actual e do Savings Score**, sem a apagar (DELETE em `expenses` continua proibido — Embers é owner). O caso de uso canónico: uma despesa anormal (reembolso pendente, pagamento de grupo que outra pessoa vai devolver, erro de categorização que obriga a duplicado) que distorce o «Despesas este mês» ou o Savings Score sem razão estrutural.
+
+**Requisitos funcionais:**
+
+- Em `/expenses`, o action bar actual «*N* despesa(s) seleccionada(s) · Limpar · Mover para…» passa a ter uma terceira acção: **«Excluir do ciclo»** (toggle — se toda a selecção já está excluída, o botão passa a «**Incluir no ciclo**»)
+- Despesas excluídas aparecem **com cor de fundo distinta** na tabela (ex. `bg-sand-50` + texto `text-sand-400` + badge discreto `excluída` na coluna Categoria ou Data) para o utilizador perceber de relance que não contam para os totais
+- No Dashboard, as mesmas despesas aparecem com a mesma estilização na «Despesas recentes»
+- Os `StatCard` do Dashboard (**Despesas este mês** e **Savings Score**) **ignoram** despesas excluídas no ciclo actual — tanto `month_total` como o `weekly_expenses` da fórmula do score
+- A coluna «Sem categoria» continua a contar o que o utilizador vê; excluir não re-categoriza
+- Undo curto (mesmo padrão da §2.5 / docs/Categories.md §12 — 6 s para anular a última exclusão/inclusão via banner)
+- Auditoria: cada toggle escreve em `curve_logs` com novas acções `expense_excluded_from_cycle` e `expense_included_in_cycle` (ver `docs/CURVE_LOGS.md` §4 para o contrato e `docs/Categories.md` §13.2 para o padrão de enumeração)
+
+**Constraint crítico — não se pode alterar o schema de `Expense`:**
+
+Por `CLAUDE.md` → MongoDB Collection Access Rules, a coleção `expenses` só aceita UPDATE ao campo `category_id`:
+
+> **`expenses`** — READ + INSERT + UPDATE of **`category_id` only**. All other fields [...] remain INSERT-only. DELETE is still forbidden — Embers owns the destroy path.
+
+Logo, **não se pode adicionar** um campo `excluded_from_cycle` a `Expense`. A solução segue o mesmo padrão do `CategoryOverride` (§2 do `docs/Categories.md`): nova colecção **owned exclusivamente pela Curve Sync**, invisível ao Embers.
+
+**Modelo novo — `CurveExpenseExclusion`:**
+
+```js
+// server/src/models/CurveExpenseExclusion.js
+{
+  user_id:    ObjectId,  // required, indexed
+  expense_id: ObjectId,  // required — ref Expense
+  created_at: Date,      // when it was excluded
+  note:       String,    // optional short reason typed by the user
+}
+// Unique index: { user_id: 1, expense_id: 1 }
+// Collection name (explicit): 'curve_expense_exclusions'
+// Access control: always scoped by `user_id: req.userId`
+```
+
+**Estrutura de implementação:**
+
+1. **Backend — modelo + routes**
+   - `server/src/models/CurveExpenseExclusion.js` — schema acima, `strict: true`, `timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }`
+   - `server/src/routes/expenseExclusions.js` (ou estender `routes/expenses.js`):
+     - `POST /api/expenses/exclusions` — body `{ expense_ids: [...] }`; upsert por par `(user_id, expense_id)`; devolve contagem criada/existente
+     - `DELETE /api/expenses/exclusions` — body `{ expense_ids: [...] }`; remove exclusões para os ids
+     - Single-row também válido (`POST` com um id), para o banner undo
+   - Todas as handlers filtram por `req.userId` primeiro (exactamente como `CategoryOverride`)
+
+2. **Backend — integração com stats**
+   - `expenseStats.js :: computeDashboardStats` passa a carregar `CurveExpenseExclusion.find({ user_id }).select('expense_id').lean()` e filtra o agregado:
+     ```js
+     const excluded = new Set(exclusions.map(e => String(e.expense_id)));
+     const effective = expenses.filter(e => !excluded.has(String(e._id)));
+     ```
+   - O mesmo filtro aplica-se tanto a `month_total` como a `weekly_expenses` (que alimenta `computeSavingsScore`). Logs de auditoria NÃO são recalculados — a exclusão é de *apresentação*, não de *existência* da despesa
+   - `computeCycleHistory` (§2.8, quando aterrar) lê o mesmo conjunto e aplica o mesmo filtro por ciclo para que o gráfico seja coerente
+
+3. **Backend — listagem de despesas**
+   - `GET /api/expenses` junta a cada row o booleano `excluded: true|false` via `$lookup` ou join em memória (preferir in-memory para escala actual — 1 query extra por página, pequena)
+   - Query param opcional `?exclude_filter=excluded|included|all` (default `all`) para o utilizador filtrar a vista
+
+4. **Frontend — action bar em `/expenses`**
+   - `ExpensesPage.jsx` — adicionar botão «Excluir do ciclo» no bloco `{selectedIds.size > 0 && (...)}` (linha ~492). Texto alterna para «Incluir no ciclo» quando `selectedIds.every(id => row.excluded === true)`
+   - Handler chama `POST/DELETE /api/expenses/exclusions`, actualiza rows optimisticamente, e empurra um undo banner (mesma infra do `categoryEdits` — ver `CategoryEditUndoBanner`)
+
+5. **Frontend — estilização de rows excluídas**
+   - `<tr>` ganha `className` condicional: `data-excluded={exp.excluded}` + uma classe tailwind `opacity-60 bg-sand-50` quando excluído
+   - Badge `excluída` pequeno na coluna Data (reaproveitar `.badge bg-sand-100 text-sand-400`)
+   - Mesma estilização em `DashboardPage.jsx :: Despesas recentes`
+   - `title` na row explica «Esta despesa está excluída do cálculo do ciclo e do Savings Score»
+
+6. **Auditoria (`curve_logs`)**
+   - 2 novas acções: `expense_excluded_from_cycle`, `expense_included_in_cycle`
+   - Payload inclui `expense_id`, `entity`, `amount`, `count` (para toggles em massa). Ver contrato em `docs/CURVE_LOGS.md` §4
+   - Lista `/curve/logs` ganha labels pt-PT para os novos tipos (mesmo padrão das 13 acções de categorias)
+
+**Testes:**
+
+- `server/test/expenseExclusions.test.js` — CRUD de exclusões (scoped por `user_id`, não pode ver exclusões de outros), toggle idempotente
+- `server/test/expenseStats.test.js` — estender os casos existentes: `computeDashboardStats` com 3 expenses, 1 excluída → `month_total` e `weekly_expenses` ignoram-na; Savings Score sobe em conformidade
+- `client` — smoke test do botão (se houver setup de testes frontend) ou teste manual documentado
+
+**Notas de design:**
+
+- **Porquê toggle em vez de soft-delete?** «Excluir» sugere acção destrutiva; a ideia é apenas «não contar para este mês». O verbo «Excluir do ciclo / Incluir no ciclo» é explícito e reversível
+- **Scope da exclusão é global, não por-ciclo**: uma vez excluída, a despesa não conta para nenhum cálculo (ciclo actual, histórico, score). Permitir exclusão *só no ciclo X* seria sobre-engenharia — quase ninguém volta a ver um ciclo passado
+- **Não aparece em `/curve/logs?tab=uncategorised`**: a exclusão é ortogonal à categorização
+- **Por-user, sempre**: mesmo admin não vê nem mexe em exclusões de outros (mesmo padrão de `CurveCategoryOverride`)
+
+**Dependências:**
+- Requer **2.5** (stats no Dashboard) — estende `computeDashboardStats`
+- Beneficia de **2.6** (filtros `/expenses`) — o `?exclude_filter=` encaixa nos query params existentes
+- Não depende de **2.8** (gráfico por ciclo), mas o gráfico deve aplicar o mesmo filtro quando aterrar
+
+**Referências:**
+- `CLAUDE.md` → «MongoDB Collection Access Rules» (constraint de não-mexer no schema de `expenses`)
+- `server/src/models/CategoryOverride.js` — template para uma colecção Curve-Sync-only
+- `server/src/services/expenseStats.js` — `computeDashboardStats` e `computeSavingsScore`
+- `client/src/pages/ExpensesPage.jsx:492` — bloco do action bar da selecção
+- `docs/Categories.md` §12 — padrão do undo banner optimista (reutilizar)
+- `docs/CURVE_LOGS.md` §4 — contrato do `curve_logs` para as 2 novas acções
+
 ---
 
 ## Fase 3 — Polimento (Prioridade Baixa)
