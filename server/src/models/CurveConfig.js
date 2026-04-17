@@ -22,16 +22,27 @@ const curveConfigSchema = new mongoose.Schema(
     imap_folder_confirmed_at: { type: Date, default: null },
     sync_enabled: { type: Boolean, default: false },
     sync_interval_minutes: { type: Number, default: 5 },
+    // Day-of-month that starts the user's expense cycle. Defaults to
+    // 22 (pay cycle alignment — see CLAUDE.md → Custom Monthly Cycle)
+    // and drives three things uniformly per user: the reader's
+    // `imap_since` fallback, the dashboard's "este mês" totals, and
+    // the /categories/stats + /curve/stats/uncategorised windows.
+    // Clamped to [1, 28] in services/cycle.js → normaliseCycleDay to
+    // avoid Feb overflow when a user picks something like 31.
+    sync_cycle_day: { type: Number, default: 22, min: 1, max: 28 },
+    // Weekly spending budget in EUR — feeds the dashboard savings-score
+    // KPI. Default of 73.75 comes from the original Embers analysis
+    // (€295/month ÷ 4 weeks). Stored per-user so everyone can calibrate
+    // to their own pay; the score formula lives in
+    // services/expenseStats.js → computeSavingsScore.
+    weekly_budget: { type: Number, default: 73.75, min: 0 },
     // IMAP SEARCH SINCE filter. When set, the reader appends
     // `SINCE <date>` to the SEARCH UNSEEN query so the IMAP server
     // filters old messages server-side before sending. When `null`,
-    // the reader falls back to 31 days ago in Europe/Lisbon time.
-    //
-    // Future: the frontend will expose this as a cycle-aware
-    // control — if the user's month starts on day 22, `imap_since`
-    // is auto-computed to the 22nd of the current (or previous)
-    // month on each sync invocation. See CLAUDE.md → Custom Monthly
-    // Cycle for the day-22 logic.
+    // the reader falls back to the start of the user's current cycle
+    // (based on `sync_cycle_day` above) so first-sync only picks up
+    // expenses from the current pay window. See imapReader.js →
+    // defaultSince for the exact computation.
     imap_since: { type: Date, default: null },
     // Hard cap on emails fetched per sync run. Prevents a first-time
     // sync against a folder with thousands of UNSEEN historical emails

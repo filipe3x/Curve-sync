@@ -7,12 +7,40 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import { useCountUp } from '../hooks/useCountUp';
+import { useToast } from '../contexts/ToastContext';
 import * as api from '../services/api';
 
 // Per-entry auto-dismiss window for the undo banner. Matches the
 // ExpensesPage constant so /expenses and / feel consistent when
 // users jump between them.
 const UNDO_WINDOW_MS = 6000;
+
+// Portuguese relative time for the "Último sync" stat card. We use a
+// tiny hand-rolled formatter instead of Intl.RelativeTimeFormat because
+// the latter rounds in unhelpful ways ("há 1 minuto" for 59 s felt
+// jumpy) and the three bands below cover every realistic sync cadence.
+function formatRelativePt(iso) {
+  if (!iso) return '—';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '—';
+  const diff = Math.max(0, Date.now() - then);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'há segundos';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `há ${min} min`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `há ${hr} h`;
+  const days = Math.floor(hr / 24);
+  return `há ${days} d`;
+}
+
+// EUR formatter for month totals — parity with the currency style used
+// across /expenses so €€€ never rendered with mixed separators.
+const EUR = new Intl.NumberFormat('pt-PT', {
+  style: 'currency',
+  currency: 'EUR',
+  maximumFractionDigits: 2,
+});
 
 /**
  * Re-auth banner visibility rule (see docs/EMAIL_AUTH_MVP.md §8 items
@@ -47,6 +75,7 @@ function needsReauth({ syncStatus, oauthStatus }) {
 }
 
 export default function DashboardPage() {
+  const toast = useToast();
   const [syncing, setSyncing] = useState(false);
   const [recentExpenses, setRecentExpenses] = useState([]);
   const [stats, setStats] = useState(null);
@@ -295,20 +324,18 @@ export default function DashboardPage() {
       // Server returns `{ message, summary }` — mirror the string the
       // config page shows so the user gets the same feedback regardless
       // of where the sync was triggered from.
-      setSyncMessage({
-        type: 'ok',
-        text: res?.message ?? 'Sincronização concluída.',
-      });
+      const text = res?.message ?? 'Sincronização concluída.';
+      setSyncMessage({ type: 'ok', text });
+      toast.success(text, { id: 'sync-result' });
     } catch (err) {
       // Non-banner errors (circuit breaker, folder missing, etc.)
       // still need an inline message so the user knows something
       // happened. OAuth-reauth errors also land here — the error
       // message is redundant with the banner but harmless, and it's
       // better than a silent click.
-      setSyncMessage({
-        type: 'error',
-        text: err?.message ?? 'Sincronização falhou.',
-      });
+      const text = err?.message ?? 'Sincronização falhou.';
+      setSyncMessage({ type: 'error', text });
+      toast.error(text, { id: 'sync-result' });
     } finally {
       setSyncing(false);
       // Refresh both statuses whatever the outcome:
@@ -358,11 +385,27 @@ export default function DashboardPage() {
         title="Dashboard"
         description="Resumo da sincronização e despesas recentes"
         actions={
-          <button onClick={handleSync} disabled={syncing} className="btn-primary">
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            aria-label={syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            title={syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            className="btn-primary"
+          >
+            {/*
+              Icon bumped from h-4 to h-5 so it reads as a proper glyph
+              (not a token) next to the button chrome. Mobile (< lg)
+              hides the text entirely — the 40-px primary button keeps
+              a tappable target without competing with the rail on the
+              left. aria-label + title still expose the action name to
+              assistive tech and desktop tooltips.
+            */}
             <ArrowPathIcon
-              className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`}
+              className={`h-5 w-5 ${syncing ? 'animate-spin' : ''}`}
             />
-            {syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            <span className="hidden lg:inline">
+              {syncing ? 'A sincronizar…' : 'Sincronizar agora'}
+            </span>
           </button>
         }
       />
@@ -424,11 +467,29 @@ export default function DashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Despesas este mês"
-          value={stats?.month_total != null ? `€${stats.month_total}` : '—'}
+          value={stats?.month_total != null ? EUR.format(stats.month_total) : '—'}
+          sub={
+            stats?.cycle?.start && stats?.cycle?.end
+              ? `${stats.cycle.start} → ${stats.cycle.end}`
+              : undefined
+          }
         />
+        {/*
+          Savings Score — 0 to 10 on a log curve (see
+          server/src/services/expenseStats.js → computeSavingsScore).
+          Sub-label reads as `{savings} / {budget}` (kept / possible);
+          the `title` tooltip carries the fuller explanation of the
+          0-10 scale for desktop hover.
+        */}
         <StatCard
           label="Savings Score"
-          value={stats?.savings_score != null ? stats.savings_score : '—'}
+          value={stats?.savings_score != null ? stats.savings_score.toFixed(1) : '—'}
+          sub={
+            stats?.weekly_savings != null && stats?.weekly_budget
+              ? `${EUR.format(stats.weekly_savings)} / ${EUR.format(stats.weekly_budget)}`
+              : undefined
+          }
+          title="Score de 0 a 10 baseado no que poupaste esta semana face ao orçamento. Escala logarítmica — poupar pouco já dá score alto; gastar tudo colapsa para 0."
           accent
         />
         {/*
@@ -456,8 +517,14 @@ export default function DashboardPage() {
         </Link>
         <StatCard
           label="Último sync"
-          value={stats?.last_sync ?? '—'}
-          sub={syncStatus?.last_sync_status ?? stats?.last_sync_status}
+          value={formatRelativePt(
+            syncStatus?.last_sync_at ?? stats?.last_sync_at,
+          )}
+          sub={
+            stats?.emails_processed != null
+              ? `${stats.emails_processed.toLocaleString('pt-PT')} emails processados`
+              : (syncStatus?.last_sync_status ?? stats?.last_sync_status)
+          }
         />
       </div>
 

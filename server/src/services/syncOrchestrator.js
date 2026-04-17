@@ -49,7 +49,7 @@ import path from 'node:path';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import Expense from '../models/Expense.js';
-import { parseEmail, ParseError } from './emailParser.js';
+import { parseEmail, ParseError, validateParsed } from './emailParser.js';
 import { loadContext, resolveCategoryDetailed } from './categoryResolver.js';
 import { ImapReader } from './imapReader.js';
 import { audit } from './audit.js';
@@ -112,6 +112,27 @@ function truncateDetail(value) {
   return str.length > MAX_ERROR_DETAIL
     ? `${str.slice(0, MAX_ERROR_DETAIL)}…`
     : str;
+}
+
+// Smaller budget for the raw HTML/MIME sample we attach to validation
+// failure logs (ROADMAP Fase 2.4). We want enough to distinguish "Curve
+// changed their template" from "spam email slipped through the folder
+// filter", but not so much that one bad email fills curve_logs with
+// quoted-printable noise. Strips newlines so the log line stays scannable
+// and collapses the MIME header block (it's noisy and usually uninformative
+// — the HTML body is what we need).
+const MAX_HTML_SNIPPET = 200;
+function truncateHtml(raw) {
+  if (!raw) return '';
+  const str = String(raw);
+  // Jump past the headers if we can see the HTML body marker; otherwise
+  // keep from the top. Replace whitespace runs with single spaces so the
+  // snippet is readable on a single log line.
+  const bodyIdx = str.toLowerCase().search(/<!doctype html|<html/);
+  const slice = (bodyIdx >= 0 ? str.slice(bodyIdx) : str).replace(/\s+/g, ' ');
+  return slice.length > MAX_HTML_SNIPPET
+    ? `${slice.slice(0, MAX_HTML_SNIPPET)}…`
+    : slice;
 }
 
 /**
@@ -383,6 +404,48 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         }
         // NOTE: do NOT markSeen — leave the email UNSEEN so the next
         // sync retries it after the parser is fixed.
+        continue;
+      }
+
+      // ---- 1b. Semantic validation (ROADMAP Fase 2.4) ----
+      // The parser succeeded — all required fields are present and
+      // structurally parseable. `validateParsed` is the second gate
+      // that rejects values the parser accepted but are nonsensical:
+      // blank entity, zero/NaN/Infinity amount, date that can't be
+      // reparsed. Same recovery invariant as the ParseError branch:
+      // log + do NOT markSeen so the next sync retries.
+      const validation = validateParsed(parsed);
+      if (!validation.ok) {
+        summary.parseErrors += 1;
+        consecutiveParseErrors += 1;
+        await writeLog({
+          config,
+          status: 'parse_error',
+          dryRun,
+          entity: parsed.entity,
+          amount: parsed.amount,
+          error_detail: truncateDetail(
+            `validation failed [field=${validation.field}] ` +
+              `${validation.reason} | raw=${truncateHtml(source)}`,
+          ),
+        });
+        if (
+          consecutiveParseErrors >= PARSE_ERROR_CIRCUIT_BREAKER &&
+          summary.ok === 0
+        ) {
+          summary.halted = true;
+          await writeLog({
+            config,
+            status: 'error',
+            dryRun,
+            error_detail: truncateDetail(
+              `circuit breaker: ${PARSE_ERROR_CIRCUIT_BREAKER} consecutive ` +
+                'parse/validation errors without a successful parse — ' +
+                'halting to avoid retry storm',
+            ),
+          });
+          break;
+        }
         continue;
       }
 

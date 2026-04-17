@@ -2,14 +2,45 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import Expense from '../models/Expense.js';
 import Category from '../models/Category.js';
+import CurveLog from '../models/CurveLog.js';
 import {
   computeDigest,
   reassignCategoryBulk,
 } from '../services/expense.js';
 import { loadContext, resolveCategory } from '../services/categoryResolver.js';
+import { computeDashboardStats } from '../services/expenseStats.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
+
+// Escape a user-supplied string so it's safe to embed in a RegExp. Without
+// this the caller could ship `.*`, `(?:` catastrophic backtracking, or
+// unbalanced brackets and either crash the regex compiler or DoS the
+// server. The character set is the canonical set from MDN.
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Allowlist of sortable fields. Anything else falls back to `-date`
+// (default). This prevents a caller from sorting on an indexed field
+// they shouldn't see (e.g. `user_id` would change result ordering but
+// leak nothing since the user filter is applied first; still, tight is
+// better than loose).
+const ALLOWED_SORT_FIELDS = new Set([
+  'date',
+  'amount',
+  'entity',
+  'card',
+  'created_at',
+]);
+
+function sanitiseSort(raw) {
+  if (!raw || typeof raw !== 'string') return '-date';
+  const desc = raw.startsWith('-');
+  const field = desc ? raw.slice(1) : raw;
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
+  return desc ? `-${field}` : field;
+}
 
 // GET /api/expenses
 //
@@ -22,12 +53,36 @@ const router = Router();
 // paginated response before asking for all ids at once. Keeping it as
 // a query-param flag on the existing endpoint (rather than a separate
 // /ids route) means the filter-parsing logic below lives in one place.
+//
+// Supported filter query params (ROADMAP Fase 2.6 — all optional, all
+// additive, unchanged defaults if omitted):
+//   search       — fuzzy regex over entity + card (legacy)
+//   category_id  — object id, or 'null' / 'uncategorised' synthetic key
+//   card         — exact match on Expense.card
+//   entity       — exact match on Expense.entity
+//   start        — YYYY-MM-DD lower bound (inclusive) on Expense.date
+//   end          — YYYY-MM-DD upper bound (inclusive) on Expense.date
+//   sort         — one of date/amount/entity/card/created_at ±. Default -date.
+// The legacy frontend (`ExpensesPage.jsx`) still only sends
+// page/limit/search/sort; new params are driven by UI that lands later.
 router.get('/', async (req, res) => {
   try {
-    const { page = 1, limit = 20, sort = '-date', search, category_id, fields } = req.query;
+    const {
+      page = 1,
+      limit = 20,
+      sort,
+      search,
+      category_id,
+      card,
+      entity,
+      start,
+      end,
+      fields,
+    } = req.query;
+    const safeSort = sanitiseSort(sort);
     const filter = { user_id: req.userId };
     if (search) {
-      const regex = new RegExp(search, 'i');
+      const regex = new RegExp(escapeRegex(search), 'i');
       filter.$or = [{ entity: regex }, { card: regex }];
     }
     // Narrow to a specific category. `null`/`uncategorised` (the
@@ -44,6 +99,52 @@ router.get('/', async (req, res) => {
       // filter still applies, so nothing leaks. The client never
       // sends a malformed id in practice.
     }
+    // Exact-match filters (ROADMAP Fase 2.6). These are populated from
+    // the autocomplete endpoint so the values are already canonical;
+    // we don't normalise case here to stay consistent with how the
+    // expenses are stored.
+    if (typeof card === 'string' && card.trim() !== '') {
+      filter.card = card;
+    }
+    if (typeof entity === 'string' && entity.trim() !== '') {
+      filter.entity = entity;
+    }
+    // Date range. `Expense.date` is a free-form string ("06 April 2026
+    // 08:53:31") so we can't compare it lexicographically — parse it
+    // Mongo-side via $dateFromString. Rows that fail to parse (onError:
+    // null) are excluded, which matches the graceful-skip contract of
+    // /categories/stats.
+    if (
+      (typeof start === 'string' && start.trim() !== '') ||
+      (typeof end === 'string' && end.trim() !== '')
+    ) {
+      const conds = [];
+      if (typeof start === 'string' && start.trim() !== '') {
+        const s = new Date(`${start}T00:00:00.000Z`);
+        if (!Number.isNaN(s.getTime())) {
+          conds.push({
+            $gte: [
+              { $dateFromString: { dateString: '$date', onError: null } },
+              s,
+            ],
+          });
+        }
+      }
+      if (typeof end === 'string' && end.trim() !== '') {
+        const e = new Date(`${end}T23:59:59.999Z`);
+        if (!Number.isNaN(e.getTime())) {
+          conds.push({
+            $lte: [
+              { $dateFromString: { dateString: '$date', onError: null } },
+              e,
+            ],
+          });
+        }
+      }
+      if (conds.length) {
+        filter.$expr = conds.length === 1 ? conds[0] : { $and: conds };
+      }
+    }
 
     // ──────── Compact id-only mode ────────
     if (fields === '_id') {
@@ -58,7 +159,7 @@ router.get('/', async (req, res) => {
         });
       }
       const rows = await Expense.find(filter)
-        .sort(sort)
+        .sort(safeSort)
         .limit(500)
         .select('_id')
         .lean();
@@ -68,7 +169,7 @@ router.get('/', async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
     const [data, total] = await Promise.all([
       Expense.find(filter)
-        .sort(sort)
+        .sort(safeSort)
         .skip(skip)
         .limit(Number(limit))
         .lean(),
@@ -86,7 +187,28 @@ router.get('/', async (req, res) => {
       category_name: e.category_id ? catMap[e.category_id.toString()] ?? null : null,
     }));
 
-    res.json({ data: enriched, meta: { total, page: Number(page), limit: Number(limit) } });
+    // Dashboard KPIs — computed in parallel with the list fetch above
+    // so adding stats doesn't bump the `/expenses` latency. Keeping
+    // them on `meta` (instead of a dedicated /stats endpoint) means the
+    // dashboard's single `getExpenses({ limit: 5 })` call wires all
+    // four StatCards at once. Fast-fail: any error collapses to zeros
+    // rather than 500ing the listing — the stat cards handle `null`.
+    let dashboardStats = null;
+    try {
+      dashboardStats = await computeDashboardStats({ userId: req.userId });
+    } catch (e) {
+      console.warn(`dashboard stats failed: ${e.message}`);
+    }
+
+    res.json({
+      data: enriched,
+      meta: {
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        ...(dashboardStats ?? {}),
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -197,6 +319,28 @@ router.put('/:id/category', async (req, res) => {
       { _id: id, user_id: req.userId },
       category_id,
     );
+
+    // Keep the denormalised `CurveLog.uncategorised` flag in sync with
+    // the live expense state. The flag was originally snapshotted at
+    // sync time to feed the /curve/stats/uncategorised count and the
+    // /curve/logs?tab=uncategorised view without joining to Expense.
+    // Once the user recategorises, the flag stops matching reality and
+    // the row lingers in the "Sem categoria" tab until the next sync.
+    // Fix it here: category_id=null means uncategorised, anything else
+    // means categorised. `updateMany` is scoped to `{ expense_id, user_id }`
+    // for defence-in-depth. Best-effort — a failure here doesn't roll
+    // back the expense write (the log is a view, not the source of
+    // truth), but it is logged so ops can spot the inconsistency.
+    try {
+      await CurveLog.updateMany(
+        { expense_id: id, user_id: req.userId },
+        { $set: { uncategorised: category_id === null } },
+      );
+    } catch (e) {
+      console.warn(
+        `expenses.putCategory: could not sync CurveLog.uncategorised for ${id}: ${e.message}`,
+      );
+    }
 
     // Re-read so the response carries the updated `updated_at` that
     // Mongoose just stamped — the popover optimistically updates the

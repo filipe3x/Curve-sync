@@ -20,7 +20,12 @@ import {
 } from '../services/scheduler.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { audit, clientIp } from '../services/audit.js';
-import { cycleBoundsFor, formatISODate } from '../services/cycle.js';
+import {
+  cycleBoundsFor,
+  cycleBoundsForUser,
+  formatISODate,
+  normaliseCycleDay,
+} from '../services/cycle.js';
 import oauthRouter from './curveOAuth.js';
 
 const router = Router();
@@ -109,6 +114,7 @@ router.put('/config', async (req, res) => {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
       imap_since, max_emails_per_run,
+      sync_cycle_day, weekly_budget,
       confirm_folder,
     } = req.body;
 
@@ -119,6 +125,19 @@ router.put('/config', async (req, res) => {
       imap_folder, sync_enabled, sync_interval_minutes,
       imap_since: imap_since ? new Date(imap_since) : null,
       max_emails_per_run: max_emails_per_run != null ? Number(max_emails_per_run) : undefined,
+      // Clamp on write so the DB never holds a value cycleBoundsFor
+      // would reject. Omit from the update when the caller didn't
+      // send the field, so partial PUTs (e.g. wizard's folder-only
+      // save) don't stomp on a previously-set cycle day.
+      sync_cycle_day:
+        sync_cycle_day != null ? normaliseCycleDay(sync_cycle_day) : undefined,
+      // Parse + clamp to a non-negative finite number. Mongoose's `min: 0`
+      // still runs on the update via runValidators, but parsing up-front
+      // keeps "73,75" strings and "Infinity" out of the DB entirely.
+      weekly_budget:
+        weekly_budget != null && Number.isFinite(Number(weekly_budget))
+          ? Math.max(0, Number(weekly_budget))
+          : undefined,
       user_id: req.userId,
     };
     if (confirm_folder === true) {
@@ -138,6 +157,17 @@ router.put('/config', async (req, res) => {
       ip: clientIp(req),
       detail,
     });
+
+    // Auto-start the scheduler when sync is enabled for the first time.
+    // The boot-time check in server/src/index.js only arms the cron if a
+    // sync_enabled=true config already existed — a fresh user completing
+    // the wizard would otherwise upsert sync_enabled=true into a DB
+    // where the scheduler is dormant, and the first sync would never
+    // run without a server restart. Guarded by getSchedulerStatus so we
+    // don't double-schedule when it's already armed from boot.
+    if (sync_enabled === true && !getSchedulerStatus().running) {
+      startScheduler();
+    }
 
     res.json({ data });
   } catch (err) {
@@ -344,7 +374,7 @@ router.get('/logs', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────
 router.get('/stats/uncategorised', async (req, res) => {
   try {
-    const { start, end } = cycleBoundsFor(new Date());
+    const { start, end } = await cycleBoundsForUser(req.userId);
     const count = await CurveLog.countDocuments({
       user_id: req.userId,
       uncategorised: true,
