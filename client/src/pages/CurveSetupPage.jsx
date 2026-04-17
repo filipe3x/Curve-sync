@@ -36,6 +36,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AnimatePresence } from 'motion/react';
+import { useToast } from '../contexts/ToastContext';
 import {
   checkOAuthEmail,
   startOAuth,
@@ -69,6 +70,7 @@ const STEPS = [
 
 export default function CurveSetupPage() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [step, setStep] = useState('hero');
   const [email, setEmail] = useState('');
   const [provider, setProvider] = useState(null);
@@ -359,6 +361,12 @@ export default function CurveSetupPage() {
           sync_enabled: syncEnabled,
           sync_interval_minutes: intervalMinutes,
         });
+        toast.success(
+          syncEnabled
+            ? 'Tudo pronto! A primeira sincronização já arrancou.'
+            : 'Configuração guardada. Sincroniza quando quiseres.',
+          { id: 'wizard-finish' },
+        );
         if (syncEnabled) {
           triggerSync().catch(() => {
             // Swallow: the dashboard's status poll + re-auth banner
@@ -371,11 +379,14 @@ export default function CurveSetupPage() {
         navigate('/curve/config');
       } catch (e) {
         setError(e.message);
+        toast.error(e.message ?? 'Não foi possível concluir o assistente.', {
+          id: 'wizard-finish',
+        });
       } finally {
         setLoading(false);
       }
     },
-    [navigate],
+    [navigate, toast],
   );
 
   // ----- Skip wizard entirely ------------------------------------------

@@ -7,6 +7,7 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import { useCountUp } from '../hooks/useCountUp';
+import { useToast } from '../contexts/ToastContext';
 import * as api from '../services/api';
 
 // Per-entry auto-dismiss window for the undo banner. Matches the
@@ -74,6 +75,7 @@ function needsReauth({ syncStatus, oauthStatus }) {
 }
 
 export default function DashboardPage() {
+  const toast = useToast();
   const [syncing, setSyncing] = useState(false);
   const [recentExpenses, setRecentExpenses] = useState([]);
   const [stats, setStats] = useState(null);
@@ -322,20 +324,18 @@ export default function DashboardPage() {
       // Server returns `{ message, summary }` — mirror the string the
       // config page shows so the user gets the same feedback regardless
       // of where the sync was triggered from.
-      setSyncMessage({
-        type: 'ok',
-        text: res?.message ?? 'Sincronização concluída.',
-      });
+      const text = res?.message ?? 'Sincronização concluída.';
+      setSyncMessage({ type: 'ok', text });
+      toast.success(text, { id: 'sync-result' });
     } catch (err) {
       // Non-banner errors (circuit breaker, folder missing, etc.)
       // still need an inline message so the user knows something
       // happened. OAuth-reauth errors also land here — the error
       // message is redundant with the banner but harmless, and it's
       // better than a silent click.
-      setSyncMessage({
-        type: 'error',
-        text: err?.message ?? 'Sincronização falhou.',
-      });
+      const text = err?.message ?? 'Sincronização falhou.';
+      setSyncMessage({ type: 'error', text });
+      toast.error(text, { id: 'sync-result' });
     } finally {
       setSyncing(false);
       // Refresh both statuses whatever the outcome:

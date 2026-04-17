@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import * as api from '../services/api';
 
 // Debounce window for the folder dropdown auto-save. Short enough to
@@ -56,6 +57,7 @@ function formatDateTime(value) {
 
 export default function CurveConfigPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [config, setConfig] = useState({});
   const [oauthStatus, setOauthStatus] = useState(null);
   const [folderOptions, setFolderOptions] = useState([]);
@@ -92,9 +94,14 @@ export default function CurveConfigPage() {
     try {
       const res = await api.testConnection();
       setFolderOptions(Array.isArray(res.folders) ? res.folders : []);
-      setMessage({ type: 'ok', text: res.message ?? 'Ligação bem-sucedida.' });
+      const text = res.message ?? 'Ligação bem-sucedida.';
+      setMessage({ type: 'ok', text });
+      toast.success(text, { id: 'config-test' });
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      toast.error(err.message ?? 'Teste de ligação falhou.', {
+        id: 'config-test',
+      });
     } finally {
       setTesting(false);
     }
@@ -116,12 +123,14 @@ export default function CurveConfigPage() {
           imap_folder: nextFolder,
           imap_folder_confirmed_at: new Date().toISOString(),
         }));
-        setMessage({
-          type: 'ok',
-          text: `Pasta "${nextFolder}" confirmada.`,
-        });
+        const text = `Pasta "${nextFolder}" confirmada.`;
+        setMessage({ type: 'ok', text });
+        toast.success(text, { id: 'config-folder' });
       } catch (err) {
         setMessage({ type: 'error', text: err.message });
+        toast.error(err.message ?? 'Não foi possível guardar a pasta.', {
+          id: 'config-folder',
+        });
       } finally {
         setFolderSaving(false);
       }
@@ -144,8 +153,12 @@ export default function CurveConfigPage() {
         imap_folder_confirmed_at: new Date().toISOString(),
       }));
       setMessage({ type: 'ok', text: 'Pasta confirmada.' });
+      toast.success('Pasta confirmada.', { id: 'config-folder' });
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      toast.error(err.message ?? 'Não foi possível confirmar a pasta.', {
+        id: 'config-folder',
+      });
     } finally {
       setFolderSaving(false);
     }
@@ -159,8 +172,12 @@ export default function CurveConfigPage() {
       await api.updateCurveConfig(patch);
       setConfig((prev) => ({ ...prev, ...patch }));
       setMessage({ type: 'ok', text: 'Agenda actualizada.' });
+      toast.success('Configuração guardada.', { id: 'config-schedule' });
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      toast.error(err.message ?? 'Não foi possível guardar.', {
+        id: 'config-schedule',
+      });
     } finally {
       setSchedSaving(false);
     }

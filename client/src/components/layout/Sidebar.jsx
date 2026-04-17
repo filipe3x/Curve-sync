@@ -7,6 +7,7 @@ import {
   CogIcon,
   ClipboardDocumentListIcon,
   ArrowRightOnRectangleIcon,
+  XMarkIcon,
 } from './Icons';
 
 const links = [
@@ -17,11 +18,23 @@ const links = [
   { to: '/curve/logs', label: 'Logs', icon: ClipboardDocumentListIcon },
 ];
 
-export default function Sidebar() {
+/**
+ * Sidebar body. Rendered in two contexts:
+ *  - desktop (≥ lg): statically docked to the left by `Shell`
+ *  - mobile (< lg): inside a slide-in drawer whose open/close state
+ *    lives in `Shell`. `onNavigate` is called after every NavLink
+ *    click so `Shell` can close the drawer on navigation (otherwise
+ *    the user has to tap twice: once for the link, once for the
+ *    backdrop).
+ *  - `onClose` renders a close button inside the drawer header so
+ *    touch targets are reachable with thumbs at the top of the panel.
+ *    Desktop passes `null` and the button hides.
+ */
+export default function Sidebar({ onNavigate, onClose = null }) {
   const { user, logout } = useAuth();
 
   return (
-    <aside className="flex w-64 flex-col border-r border-sand-200 bg-white">
+    <aside className="flex h-full w-64 flex-col border-r border-sand-200 bg-white">
       {/* Brand */}
       <div className="flex h-16 items-center gap-3 px-6">
         <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-curve-700">
@@ -30,6 +43,19 @@ export default function Sidebar() {
         <span className="text-lg font-semibold text-sand-900">
           Curve Sync
         </span>
+        {/* Close (mobile drawer only). Rendered last inside the brand
+            row so it aligns with the hamburger button that opened the
+            drawer in the topbar. */}
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Fechar menu"
+            className="ml-auto rounded-lg p-1.5 text-sand-500 transition-colors hover:bg-sand-100 hover:text-sand-800 lg:hidden"
+          >
+            <XMarkIcon className="h-5 w-5" />
+          </button>
+        )}
       </div>
 
       {/* Navigation */}
@@ -39,6 +65,7 @@ export default function Sidebar() {
             key={to}
             to={to}
             end={to === '/'}
+            onClick={onNavigate}
             className={({ isActive }) =>
               `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors duration-200 ${
                 isActive

@@ -228,11 +228,47 @@ Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em
 
 ## Fase 3 — Polimento (Prioridade Baixa)
 
-### 3.1 Layout responsivo / mobile
-A sidebar fixa não funciona em ecrãs pequenos. Adicionar drawer colapsável ou bottom nav para mobile.
+### ~~3.1 Layout responsivo / mobile~~ ✅
 
-### 3.2 Notificações / Toasts
-Feedback visual para acções: sync concluído (X importadas, Y duplicadas, Z erros), config guardada, erro de ligação. Usar toasts com fade-out automático.
+Sidebar passou a drawer deslizante (< lg / 1024px) com top bar sticky, hamburger + título compacto, backdrop com click-para-fechar, Escape-to-close, auto-close ao mudar de rota e body-scroll lock enquanto aberto. Desktop mantém sidebar docked como antes — **zero alteração visível** acima de 1024px.
+
+- **Implementado:**
+  - `client/src/components/layout/Shell.jsx` — host do drawer state + topbar + backdrop + `fixed inset-0 z-40 lg:hidden` para o painel; `translate-x` / `transition-transform` Tailwind puro (sem `motion/react`) para garantir `prefers-reduced-motion` a grátis via browser short-circuit
+  - `client/src/components/layout/Sidebar.jsx` — aceita `onNavigate` (fecha drawer em link tap) e `onClose` (botão X no cabeçalho, visível só em mobile)
+  - `client/src/components/layout/Icons.jsx` — novos `Bars3Icon`, `XMarkIcon`
+  - `min-w-0` no `<main>` previne que tabelas largas (`/expenses`, `/curve/logs`) expandam o viewport lateralmente no telemóvel (flex default é `min-width: auto`)
+- **Acessibilidade:**
+  - Drawer é `role="dialog" aria-modal="true" aria-label="Menu de navegação"`
+  - Botão hamburger tem `aria-expanded` reactivo
+  - Container do overlay tem `aria-hidden` para esconder o drawer fechado dos ATs
+- **Impacto no bundle:** zero deps novas; +0 kB além do markup
+
+### ~~3.2 Notificações / Toasts~~ ✅
+
+Sistema de toasts próprio (sem lib externa — `sonner`/`react-hot-toast`/`radix-toast` descartadas por trazerem 2–5 kB gzip cada para uma API que não usamos). Três tons (`success` / `error` / `info`), 3 call-sites iniciais:
+
+| Call-site | Toasts emitidos |
+|-----------|-----------------|
+| `DashboardPage` — "Sincronizar agora" | `success` com o `summary` do server, ou `error` com a razão (mantém inline banner por redundância) |
+| `CurveConfigPage` — test connection, folder save, dismiss banner, schedule save, budget save | `success` e `error` com id estável por handler (dedup — guardar 10× não stacka 10 toasts) |
+| `CurveSetupPage` — `handleFinish` | `success` contextual («Tudo pronto! A primeira sync arrancou.» vs «Configuração guardada. Sincroniza quando quiseres.») |
+
+- **Implementado:**
+  - `client/src/contexts/ToastContext.jsx` — `ToastProvider` + `useToast()` hook + viewport inline (um único ficheiro, ~240 linhas)
+  - `client/src/main.jsx` — Provider mounted acima do BrowserRouter (toasts sobrevivem a mudanças de rota)
+  - `client/src/components/layout/Icons.jsx` — `CheckCircleIcon`, `ExclamationCircleIcon`, `InformationCircleIcon` para os tons
+- **Acessibilidade:**
+  - Viewport splits em **duas** listas — `aria-live="polite"` para info/success e `aria-live="assertive"` para errors, para os leitores de ecrã escalarem erros sem interromper constantemente
+  - `useReducedMotion()` do `motion/react` reduz animações de entrada/saída para fade de 50 ms quando o user tem a flag ligada
+  - Botão de fechar por toast com `aria-label="Fechar notificação"`
+- **API:**
+  - `toast.success(text, { id?, duration? })`, `toast.error(text, opts)`, `toast.info(text, opts)` — TTL default 4000 ms (5500 ms para errors)
+  - `toast.show({ text, tone, id?, duration? })` canonical para casos custom
+  - `duration: 0` opt-out de auto-dismiss
+  - `id` estável → toast em-loco actualiza em vez de stackar (e.g. clicar "Guardar" 10× mostra **um** toast)
+  - Cap de 4 toasts visíveis; o mais antigo cai em overflow
+- **Posição:** top-right em `≥ sm`, top-center em mobile (não colide com o topbar do hamburger)
+- **Impacto no bundle:** reutiliza `motion/react` já presente; zero novas deps. Total do PR Fase 3.1 + 3.2: +1 kB gzip no client (146 → 147 kB gzip)
 
 ### 3.3 Dark mode
 Suporte a tema escuro usando as variáveis CSS do Tailwind. O design monocromático adapta-se bem.
