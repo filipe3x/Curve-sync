@@ -5,7 +5,6 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
-import { formatExpenseDate, formatAbsoluteDate } from '../utils/relativeDate';
 
 // Per-entry auto-dismiss window for the undo banner. Long enough to
 // catch a "wrong row" fat-finger, short enough to not clutter the page
@@ -804,12 +803,9 @@ export default function ExpensesPage() {
                     <td className="px-5 py-3 font-semibold text-curve-700">
                       €{Number(exp.amount).toFixed(2)}
                     </td>
-                    <td
-                      className="px-5 py-3 text-sand-500"
-                      title={formatAbsoluteDate(exp.date)}
-                    >
+                    <td className="px-5 py-3 text-sand-500">
                       <div className="flex items-center gap-2">
-                        <span>{formatExpenseDate(exp.date)}</span>
+                        <span>{exp.date}</span>
                         {rowExcluded && (
                           <span className="badge bg-sand-200 text-sand-600">
                             excluída
