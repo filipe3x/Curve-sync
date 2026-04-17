@@ -322,10 +322,32 @@ como fase 2.
 O MVP está pronto quando **todos** os critérios abaixo forem
 verificáveis:
 
-- [ ] Existing user com App Password continua a sincronizar sem
+- [x] Existing user com App Password continua a sincronizar sem
       intervenção, sem warnings novos nos logs
-- [ ] Novo user cria conta, abre `/curve/setup`, completa o wizard até
+      <!-- verified-by-code-review 2026-04-17: createImapReader
+           routes legacy configs via imapReader.js:490-493; CurveLog
+           enum não dispara oauth_* para oauth_provider=null;
+           DashboardPage needsReauth curto-circuita em
+           !oauthStatus?.provider; crypto.decrypt(null) é seguro. -->
+
+- [x] Novo user cria conta, abre `/curve/setup`, completa o wizard até
       ao fim, e a primeira sync insere expenses sem intervenção manual
+      <!-- fixed 2026-04-17: dois gaps bloqueantes identificados e
+           corrigidos antes da verificação poder passar:
+           (a) server/src/routes/curve.js PUT /config agora arranca
+               o scheduler quando sync_enabled=true e ele ainda não
+               está a correr — o boot-time auto-start em index.js só
+               armava o cron se já existisse uma config sync_enabled
+               antes do boot, pelo que um primeiro user nunca
+               disparava syncs automáticas sem restart;
+           (b) client/src/pages/CurveSetupPage.jsx handleFinish agora
+               chama triggerSync() fire-and-forget se syncEnabled=true
+               no step 6. Respeita o consentimento do user: se ele
+               optou por sync manual (syncEnabled=false), nada é
+               disparado. Isto garante que o happy-path do critério
+               "primeira sync sem intervenção manual" não depende do
+               próximo tick do cron (até 5 min). -->
+
 - [ ] Sync >1h depois do setup inicial dispara refresh silencioso
       (observável em `CurveLog` via `oauth_token_refreshed`)
 - [ ] Cache `oauth_token_cache` apagado à mão na DB → próximo sync

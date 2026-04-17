@@ -45,6 +45,7 @@ import {
   updateCurveConfig,
   getCurveConfig,
   getOAuthStatus,
+  triggerSync,
 } from '../services/api.js';
 import HeroScreen from '../components/setup/steps/HeroScreen.jsx';
 import EmailScreen from '../components/setup/steps/EmailScreen.jsx';
@@ -341,6 +342,14 @@ export default function CurveSetupPage() {
   );
 
   // ----- Step 6 finish: persist schedule + exit wizard ----------------
+  //
+  // If the user opted into automatic sync, kick off the first sync
+  // immediately (fire-and-forget) so they don't have to wait for the
+  // next cron tick or click "Sincronizar agora" manually. This is the
+  // §8 item 2 acceptance criterion of EMAIL_AUTH_MVP: "wizard completes
+  // → first sync inserts expenses sem intervenção manual". If they
+  // opted out (syncEnabled=false), we respect that and do NOT sync —
+  // the user will drive it manually from the dashboard.
   const handleFinish = useCallback(
     async ({ syncEnabled, intervalMinutes }) => {
       setLoading(true);
@@ -350,6 +359,15 @@ export default function CurveSetupPage() {
           sync_enabled: syncEnabled,
           sync_interval_minutes: intervalMinutes,
         });
+        if (syncEnabled) {
+          triggerSync().catch(() => {
+            // Swallow: the dashboard's status poll + re-auth banner
+            // will surface any failure. We don't want to block the
+            // wizard exit on a slow/failing first sync — the user has
+            // already finished the setup and deserves the success
+            // experience even if IMAP is momentarily flaky.
+          });
+        }
         navigate('/curve/config');
       } catch (e) {
         setError(e.message);

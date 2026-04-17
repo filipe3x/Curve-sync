@@ -139,6 +139,17 @@ router.put('/config', async (req, res) => {
       detail,
     });
 
+    // Auto-start the scheduler when sync is enabled for the first time.
+    // The boot-time check in server/src/index.js only arms the cron if a
+    // sync_enabled=true config already existed — a fresh user completing
+    // the wizard would otherwise upsert sync_enabled=true into a DB
+    // where the scheduler is dormant, and the first sync would never
+    // run without a server restart. Guarded by getSchedulerStatus so we
+    // don't double-schedule when it's already armed from boot.
+    if (sync_enabled === true && !getSchedulerStatus().running) {
+      startScheduler();
+    }
+
     res.json({ data });
   } catch (err) {
     res.status(500).json({ error: err.message });
