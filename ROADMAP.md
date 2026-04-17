@@ -60,11 +60,43 @@ Substituído o fallback estático de 31 dias por uma data computada dinamicament
 - **Referência:** `docs/expense-tracking.md` — secção "Ciclo Mensal Personalizado"
 - **Referência:** `docs/embers-reference/controllers/expenses_controller.rb` — `monthly_expenses`
 
-### 2.3 Savings Score semanal
-Endpoint `GET /api/expenses/savings-score` que calcula:
-- Orçamento semanal: €295 / 4
-- Score: `(log(weekly_savings + 1) / log(budget + 1)) * 10`
-- Devolver: score (0–10), despesas da semana, orçamento restante
+### ~~2.3 Savings Score semanal~~ ✅ *(fechado via 2.5)*
+
+Não foi criado um endpoint dedicado `GET /api/expenses/savings-score` — a fórmula e os campos que ele devolveria já são expostos no `meta` de `GET /api/expenses` desde a Fase 2.5. Um endpoint separado duplicaria o mesmo cálculo para zero ganho actual. O conceito, no entanto, está implementado e visível no dashboard.
+
+**Como é calculado** (canonical em `server/src/services/expenseStats.js:computeSavingsScore`):
+
+```
+weekly_budget    = config.weekly_budget (default €73,75 = €295 / 4)
+weekly_expenses  = soma de Expense.amount nos últimos 7 dias rolling
+weekly_savings   = weekly_budget − weekly_expenses
+score            = (log(weekly_savings + 1) / log(weekly_budget + 1)) * 10
+                   clamped a [0, 10], arredondado a 1 decimal
+```
+
+A escala é **logarítmica** por design: psicologicamente, gastar €60 de €73,75 já é quase rebentar o orçamento e não deve render 80 % do score máximo; a curva log recompensa poupanças pequenas mais rapidamente e achata perto do tecto.
+
+**Exemplos trabalhados (budget €73,75):**
+
+| Gasto | Poupança | Score | Notas |
+|-------|----------|-------|-------|
+| €73,75 | €0,00 | 0,0 | orçamento todo consumido |
+| €60,00 | €13,75 | 6,1 | |
+| €50,00 | €23,75 | 7,3 | |
+| €42,11 | €31,64 | 8,1 | exemplo canónico que aparece na UI |
+| €20,00 | €53,75 | 9,3 | |
+| €0,00 | €73,75 | 10,0 | nada gasto → tecto |
+| €90,00 | −€16,25 | 0,0 | overspend → colapsa para 0 |
+
+**O que o dashboard mostra:**
+
+- **Valor do StatCard**: o score (ex. `8.1`)
+- **Sub-label**: `Poupança 31,64 € · orçamento 73,75 €` quando savings ≥ 0, ou `Excedeste o orçamento em 16,25 €` quando overspend. Substituiu a forma anterior `31,64 € / 73,75 €` que os utilizadores liam como "gastei 31 de 74" quando o significado era o inverso
+- **Tooltip (`title`)** no próprio card: "Score de 0 a 10 baseado no que poupaste esta semana face ao orçamento. Escala logarítmica — poupar pouco já dá score alto; gastar tudo colapsa para 0."
+
+**Se um consumidor externo (script, export, CLI) precisar do score isolado**, é trivial envolver `computeDashboardStats` num handler `router.get('/savings-score', ...)` — o helper já existe e é pure.
+
+- **Referência:** `server/src/services/expenseStats.js` → `computeSavingsScore`
 
 ### ~~2.4 Validação de campos extraídos~~ ✅
 

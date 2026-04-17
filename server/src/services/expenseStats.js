@@ -45,13 +45,60 @@ export function parseExpenseDate(str) {
 }
 
 /**
- * Compute the Embers savings-score from a weekly_savings value and a
- * per-user weekly budget. Pure function — no IO. Clamped to [0, 10]
+ * Compute the Embers Savings Score from a `weekly_savings` value and a
+ * per-user `weekly_budget`. Pure function — no IO. Clamped to [0, 10]
  * and rounded to one decimal place.
+ *
+ * ## What the score measures
+ *
+ * How much the user has saved this week **relative to their budget**.
+ * Higher is better: 0 = the budget is blown, 10 = nothing was spent.
+ *
+ * ## Inputs, intuitively
+ *
+ *     weekly_budget   = EUR they've decided is fair to spend per week
+ *                       (default €73,75 = €295 / 4 weeks).
+ *     weekly_expenses = EUR actually spent in the last rolling 7 days.
+ *     weekly_savings  = weekly_budget - weekly_expenses.
+ *                       Can be negative (overspent) — the score
+ *                       collapses to 0 in that case.
+ *
+ * ## Formula (Embers canonical, see docs/expense-tracking.md)
+ *
+ *     score = (log(weekly_savings + 1) / log(weekly_budget + 1)) * 10
+ *
+ * The `+ 1` shift prevents `log(0) = -Infinity` when the user saved
+ * exactly zero and keeps the score continuous around that boundary.
+ *
+ * The scale is **logarithmic on purpose**: psychologically, someone
+ * who spent €60 out of €74 is already close to blowing the budget and
+ * shouldn't walk away with 80 % of the max score. Log curve rewards
+ * early savings steeply and plateaus near the ceiling.
+ *
+ * ## Worked examples (budget €73,75)
+ *
+ *     spent      saved       score   notes
+ *     ─────      ─────       ─────   ─────
+ *     €73,75     €0,00       0,0     budget fully consumed
+ *     €60,00     €13,75      6,1
+ *     €50,00     €23,75      7,3
+ *     €42,11     €31,64      8,1     ← the dashboard "example" case
+ *     €20,00     €53,75      9,3
+ *     €0,00      €73,75      10,0    saved everything → clamped top
+ *     €90,00     −€16,25     0,0     overspent → collapsed to 0
+ *
+ * ## Relationship to the dashboard sub-label
+ *
+ * The `/` card on `DashboardPage` renders the sub-label as
+ * `{weekly_savings} / {weekly_budget}` — i.e. **what you kept** over
+ * **the ceiling you set**. Not to be confused with expenses-vs-budget:
+ * a user who spent €42,11 of €73,75 sees `€31,64 / €73,75` (kept 31,
+ * could have kept up to 74).
  *
  * @param {number} weeklySavings EUR saved this week (may be negative).
  * @param {number} weeklyBudget  EUR ceiling (must be > 0).
- * @returns {number} 0–10 score, rounded to 1dp.
+ * @returns {number} 0–10 score, rounded to 1dp. Negative savings and
+ *                   non-finite inputs collapse to 0.
  */
 export function computeSavingsScore(weeklySavings, weeklyBudget) {
   if (!Number.isFinite(weeklyBudget) || weeklyBudget <= 0) return 0;

@@ -474,14 +474,30 @@ export default function DashboardPage() {
               : undefined
           }
         />
+        {/*
+          Savings Score — 0 to 10 on a log curve (see
+          server/src/services/expenseStats.js → computeSavingsScore).
+          Sub-label used to be `${savings} / ${budget}` which users
+          read as "spent X out of Y" even though it meant the opposite
+          ("kept X out of Y"). Explicit wording now: "Poupança X €"
+          for the saved amount, "orçamento Y €" for the ceiling, with
+          a distinct message when the budget is blown. The `title`
+          tooltip explains the 0-10 scale for desktop hover; mobile
+          users get the clearer sub-label instead.
+        */}
         <StatCard
           label="Savings Score"
           value={stats?.savings_score != null ? stats.savings_score.toFixed(1) : '—'}
-          sub={
-            stats?.weekly_savings != null && stats?.weekly_budget
-              ? `${EUR.format(stats.weekly_savings)} / ${EUR.format(stats.weekly_budget)}`
-              : undefined
-          }
+          sub={(() => {
+            if (stats?.weekly_savings == null || stats?.weekly_budget == null) {
+              return undefined;
+            }
+            if (stats.weekly_savings < 0) {
+              return `Excedeste o orçamento em ${EUR.format(Math.abs(stats.weekly_savings))}`;
+            }
+            return `Poupança ${EUR.format(stats.weekly_savings)} · orçamento ${EUR.format(stats.weekly_budget)}`;
+          })()}
+          title="Score de 0 a 10 baseado no que poupaste esta semana face ao orçamento. Escala logarítmica — poupar pouco já dá score alto; gastar tudo colapsa para 0."
           accent
         />
         {/*
