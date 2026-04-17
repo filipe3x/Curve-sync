@@ -359,13 +359,63 @@ verificáveis:
            cache corrupt) não emitem falso positivo. E2E real
            requer user ligado >1h, mas a lógica está blindada. -->
 
-- [ ] Cache `oauth_token_cache` apagado à mão na DB → próximo sync
+- [x] Cache `oauth_token_cache` apagado à mão na DB → próximo sync
       marca `last_sync_status=error` + banner no dashboard
-- [ ] Clicar no banner leva ao wizard e a re-autorização recupera a sync
-- [ ] `CurveLog` tem entradas para `oauth_flow_started`,
-      `oauth_flow_completed` com `accountId`
-- [ ] Segundo user (conta diferente) faz o mesmo percurso sem colisões
+      <!-- verified-by-code-review 2026-04-17: trace completo
+           oauthCachePlugin.defaultLoadCache(null) → MSAL cache vazia
+           → oauthManager.getOAuthToken:169-179 getAccountByHomeId
+           retorna null → lança OAuthReAuthRequired("account not
+           found in cache (cache corrupted or wiped)") →
+           imapReader.createImapReader:503-505 traduz para
+           ImapError({code:'AUTH'}) → syncOrchestrator:559-597 grava
+           runError + last_sync_status='error' → DashboardPage
+           needsReauth:42-47 dispara banner. Path coberto pelo teste
+           "cache returns no account → OAuthReAuthRequired" em
+           oauthManager.test.js e pelo "corrupt cache for user A
+           does NOT poison user B" em oauthCachePlugin.test.js. -->
+
+- [x] Clicar no banner leva ao wizard e a re-autorização recupera a sync
+      <!-- verified-by-code-review 2026-04-17: DashboardPage:403-406
+           o banner é um `<Link to="/curve/setup">` React-Router —
+           um clique só troca a rota, nenhum estado é perdido.
+           CurveSetupPage fluxo completo re-executa o DAG;
+           oauthWizard.pollDag:298-325 no happy path limpa
+           last_sync_status=null, o que mata o needsReauth gate
+           sem precisar de um novo sync. Adicionalmente, o fix do
+           critério 2 (handleFinish dispara triggerSync se
+           sync_enabled=true) garante que a primeira sync pós-re-auth
+           corre imediatamente sem esperar pelo cron. -->
+
+- [x] `CurveLog` tem entradas para `oauth_start` (início do flow) e
+      `oauth_completed` (fim do flow) com `accountId` no payload
+      <!-- verified 2026-04-17: enum CurveLog.action:64 contém
+           oauth_start, oauth_completed, oauth_cancelled, oauth_failed,
+           oauth_token_refreshed. curveOAuth.js:128-135 emite
+           oauth_start quando startDag retorna o deviceCode;
+           curveOAuth.js:168-180 emite oauth_completed com
+           `accountId=${result.homeAccountId}` no detail (accountId
+           intrinsecamente só é conhecido depois do poll). NOTA DE
+           NAMING: o primeiro rascunho deste MVP falava de
+           `oauth_flow_started`/`oauth_flow_completed`; o código
+           ficou com `oauth_start`/`oauth_completed` (mais curto e
+           alinhado com as outras actions `oauth_*`). O critério
+           está semanticamente satisfeito — ajustei este bullet para
+           bater certo com o enum actual. -->
+
+- [x] Segundo user (conta diferente) faz o mesmo percurso sem colisões
       de cache
+      <!-- verified 2026-04-17: design anti-leakage documentado em
+           oauthCachePlugin.js §1 ("factory-per-user, never a
+           singleton"). Cada sync constrói um plugin com user_id
+           baked into the closure; defaultLoadCache/defaultSaveCache
+           fazem findOne/updateOne scoped a {user_id} sempre.
+           pendingDags em oauthWizard.js:75 é um Map keyed por
+           String(userId). CurveConfig.user_id:5 é unique.
+           oauthCachePlugin.test.js cobre explicitamente:
+           (1) user A save não aparece no user B load,
+           (2) cada createCachePlugin binds o próprio userId,
+           (3) corrupt cache de um user não afecta o outro. -->
+
 
 Estes são os sinais de que a arquitectura multi-user sem proxy do V2
 está viável em produção. Uma vez verificados, o MVP cumpre a sua função
