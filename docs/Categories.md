@@ -2079,6 +2079,92 @@ management screen passa-a, mas os outros consumers da API
 (`ExpensesPage`, `DashboardPage`, `CategoryPickerPopover`)
 ignoram-na e ficam no payload barato `{ id, name, icon, entities }`.
 
+### 9.5.4 Input partilhado com toggle Pessoal/Global (modo admin)
+
+Substitui o form de catálogo global separado que existia antes:
+no modo admin, o input do painel **"As minhas regras"** passa a
+servir as duas escritas através de um segmented control visual.
+A razão é UX — o admin tem um gesto único ("escrevo o padrão,
+pico, submeto") e uma única superfície para pensar, em vez de
+dois forms quase-idênticos empilhados.
+
+**Layout.**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ [Nova regra pessoal/global para <Categoria>…]               │
+│                          [ Pessoal │ Global ]  [Adicionar]  │
+│ (se kind=global) Várias de uma vez? Separa com …            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+O segmented control ("Pessoal | Global") fica adjacente ao
+botão Adicionar; `effectiveKind` default é `'personal'` e o
+toggle só aparece quando o parent passa `onAddGlobal` (gate
+implícito de admin — users nunca vêem os botões).
+
+**Branch de submissão.** O `submit` do form inspecciona
+`effectiveKind` e despacha para o handler certo:
+
+| kind     | Click Adicionar                              | Enter na sugestão        |
+|----------|----------------------------------------------|--------------------------|
+| personal | `onCreate({ pattern })`                      | `onCreate({ pattern })`  |
+| global   | `onAddGlobal(entities[])` (split comma/nl)   | `onAddGlobal([entity])`  |
+
+O mesmo form suporta **batch mode** só quando `kind=global` —
+admin pode colar "galp, bp, repsol" ou uma lista com quebras de
+linha e o form faz split antes de chamar `onAddGlobal`. Em
+`kind=personal` os separadores ficam em texto literal no
+`pattern` (é o que o user esperaria — regras pessoais não são
+batch-addable, o endpoint só aceita uma de cada vez).
+
+**Fonte + filtro das sugestões.** O autocomplete é **idêntico**
+entre os dois kinds (mesmo `entitySuggestions`, mesmo
+`entityCoveredByOverride(e, overrides)`). Chave da simplificação:
+a lista que o admin vê quando escreve para catalogar globalmente
+é a mesma que veria para criar uma regra pessoal — foi a queixa
+explícita que levou a esta reescrita ("o dropdown deve renderizar
+exactamente os mesmos resultados tanto em regras pessoais como
+globais"). O filtro cross-category baseado em
+`existingGlobalNorms` do desenho anterior foi retirado porque
+apanhava demasiado quando o catálogo estava seeded a sério — o
+servidor continua a proteger o invariant via `409 entity_conflict`
+e a UI renderiza inline sob o form.
+
+**Placeholder e helper text** adaptam-se ao kind:
+
+- `personal` → "Nova regra pessoal para <Categoria>…"
+- `global`   → "Nova regra global para <Categoria>…" + a frase
+  "Várias de uma vez? Separa com vírgulas ou quebras de linha."
+
+O texto "regra" em vez de "entidade" no lado global é
+deliberado: do ponto de vista do user, tanto uma regra pessoal
+como uma entrada do catálogo global são "regras de
+catalogação" — a diferença mora em escopo (só para mim vs
+global) e não em tipo.
+
+**Conflict feedback.** O kind=global ainda pode 409 na
+sobreposição entre categorias globais. O mesmo amber box que
+existia no form antigo é renderizado sob o input partilhado,
+listando `<entidade> está em <outra categoria>` por conflicto.
+O kind=personal não tem este path (overrides pessoais são
+user-scoped e não colidem entre si pela mesma chave).
+
+**"Catálogo global" como listing-only.** A secção "Catálogo
+global" debaixo de "As minhas regras" perde o add-form e fica
+apenas como **lista read-ish**: admin mantém o botão `Apagar`
+por linha, a caixa de pesquisa e os contadores "match c/ N
+despesa(s)". O ponto de entrada único para ADICIONAR fica no
+toggle acima, mas os globais continuam visualmente separados
+(§9.9 — desvio aceite vs "lista única mista" do spec original).
+
+**Degradation.** Se um deploy antigo servir a página sem
+`onAddGlobal` (por exemplo durante um upgrade escalonado do
+bundle), o admin vê exactamente a mesma UI que um user comum —
+o toggle não aparece, o form cria overrides pessoais, o
+"Catálogo global" fica read-only. Nunca fica num estado meio-
+admin meio-user.
+
 ### 9.6 Painel de despesas recentes (tab alternativa)
 
 Tabela compacta com as últimas 10 despesas da categoria
@@ -2280,7 +2366,7 @@ O mesmo ecrã, `role`-adaptive. Diferenças resumidas:
 | Header editável (nome/ícone) | Editável | Read-only |
 | Catálogo global | CRUD directo (`POST/DELETE .../entities`) | Read-only (badge `global`) |
 | Overrides pessoais | CRUD dos próprios | CRUD dos próprios |
-| Tab "Entidades" | Uma única lista mista | Duas secções: "Globais" (ro) + "As minhas regras" (crud) |
+| Tab "Entidades" | Duas secções: "As minhas regras" (crud + toggle P/G, §9.5.4) + "Catálogo global" (listing + delete) | Duas secções: "As minhas regras" (crud) + "Catálogo global" (read-only) |
 | Apply-to-all | Globais + pessoais | Apenas pessoais |
 
 Gráficos (distribution bar, ring, spark, KPIs) são **sempre

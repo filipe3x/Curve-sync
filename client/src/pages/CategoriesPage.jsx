@@ -29,10 +29,12 @@ import {
  *     responses populate the DeleteCategoryDialog's "blocked" mode
  *     with the expense + override reference counts so the admin
  *     sees why it refused (docs/Categories.md §11.4 risk #3).
- *   - Batch-add of entities above the read-only global catalogue
- *     list (AddGlobalEntitiesForm), committing via
- *     `POST /api/categories/:id/entities` and pushing an
- *     admin-kind pending-apply banner on success.
+ *   - Shared "Nova regra pessoal/global" input inside "As minhas
+ *     regras" with a Pessoal/Global segmented toggle. Global picks
+ *     commit via `POST /api/categories/:id/entities` and push an
+ *     admin-kind pending-apply banner on success; personal picks
+ *     still go through `POST /api/category-overrides` exactly like
+ *     the user branch. See `OverridesList`'s `onAddGlobal` prop.
  *   - Admin branch of the apply-to-all stack: pending entries with
  *     `kind: 'admin'` call `api.applyCategoryToAll` instead of the
  *     personal variant, show "Entidades adicionadas a <cat>" copy,
@@ -316,6 +318,7 @@ function OverridesList({
   categoryName,
   onCreate,
   onDelete,
+  onAddGlobal,
   busy,
 }) {
   const [pattern, setPattern] = useState('');
@@ -324,12 +327,25 @@ function OverridesList({
   // looked like a dead click to users. Now clicking (or hitting Enter)
   // with an empty field surfaces the message below the form.
   const [error, setError] = useState(null);
+  // Admin-only: "entity_conflict" collisions returned by
+  // `addCategoryEntities` when the user tries to add a global entity
+  // that already belongs to another category. Populated from the
+  // re-thrown error body; cleared on next keystroke / kind toggle.
+  const [conflicts, setConflicts] = useState([]);
   // Autocomplete dropdown: `open` gates visibility (set on focus +
   // typing, cleared on blur / pick / Escape), `highlightIdx` tracks the
   // keyboard-selected row. `-1` means "nothing highlighted" so arrow-up
   // can wrap to the last entry on the first press.
   const [open, setOpen] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
+  // Admin kind toggle — only meaningful when `onAddGlobal` is wired in
+  // (admin mode). The non-admin branch defaults to `'personal'` and
+  // never reads this value. `'personal'` is the default because
+  // personal rules are the more common per-session action; the admin
+  // flips to `'global'` when seeding the catalogue.
+  const [kind, setKind] = useState('personal');
+  const adminMode = typeof onAddGlobal === 'function';
+  const effectiveKind = adminMode ? kind : 'personal';
   const mine = overrides.filter((o) => o.category_id === categoryId);
 
   // Available entities for the autocomplete = caller's distinct expense
@@ -377,19 +393,52 @@ function OverridesList({
     if (highlightIdx >= filteredSuggestions.length) setHighlightIdx(-1);
   }, [filteredSuggestions, highlightIdx]);
 
+  const clearFeedback = () => {
+    if (error) setError(null);
+    if (conflicts.length) setConflicts([]);
+  };
+
+  // Translate a server error code into pt-PT inline copy. Shared between
+  // the autocomplete pick path and the free-form submit path so both
+  // surfaces render the same message for the same failure.
+  const mapError = (err) => {
+    if (effectiveKind === 'global' && err?.message === 'entity_conflict' && err?.body?.conflicts) {
+      setConflicts(err.body.conflicts);
+      return;
+    }
+    const code = err?.message;
+    if (code === 'invalid_entities') {
+      setError('Uma ou mais entidades são inválidas.');
+    } else if (code === 'category_not_found') {
+      setError('Categoria não encontrada — recarrega a página.');
+    } else {
+      setError(err?.message ?? 'Erro a adicionar entrada.');
+    }
+  };
+
   // Click-to-create: picking a suggestion immediately hands the
-  // entity off to `onCreate` instead of just filling the input. The
-  // two-click flow (pick → Adicionar) made no sense when the user
-  // had already explicitly chosen a valid, unused entity from the
-  // dropdown — the parent's apply-to-all banner still runs after
-  // creation, so the apply flow is unchanged.
+  // entity off to the right handler depending on the active kind.
+  //   personal → onCreate({ pattern })      — one rule, the default
+  //   global   → onAddGlobal([entity])      — one-element batch
+  // The apply-to-all banner stack fires downstream of either call, so
+  // the apply flow is unchanged regardless of kind.
   const pickSuggestion = async (entity) => {
     if (busy) return;
     setOpen(false);
     setHighlightIdx(-1);
-    if (error) setError(null);
-    await onCreate({ pattern: entity.trim() });
-    setPattern('');
+    clearFeedback();
+    const trimmed = entity.trim();
+    if (!trimmed) return;
+    try {
+      if (effectiveKind === 'global' && onAddGlobal) {
+        await onAddGlobal([trimmed]);
+      } else {
+        await onCreate({ pattern: trimmed });
+      }
+      setPattern('');
+    } catch (err) {
+      mapError(err);
+    }
   };
 
   const handleKeyDown = (e) => {
@@ -416,91 +465,192 @@ function OverridesList({
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!pattern.trim()) {
+    const raw = pattern;
+    if (!raw.trim()) {
       setError('Preenche o nome da entidade primeiro.');
       return;
     }
-    setError(null);
+    clearFeedback();
     setOpen(false);
-    await onCreate({ pattern: pattern.trim() });
-    setPattern('');
+    try {
+      if (effectiveKind === 'global' && onAddGlobal) {
+        // Batch mode: split on commas and newlines so the admin can
+        // paste several entities at once. Personal-rule mode stays
+        // single-entry because overrides aren't batch-addable.
+        const entities = raw
+          .split(/[\n,]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (!entities.length) {
+          setError('Indica pelo menos uma entidade.');
+          return;
+        }
+        await onAddGlobal(entities);
+      } else {
+        await onCreate({ pattern: raw.trim() });
+      }
+      setPattern('');
+    } catch (err) {
+      mapError(err);
+    }
   };
+
+  const placeholder = adminMode
+    ? `Nova regra ${effectiveKind === 'global' ? 'global' : 'pessoal'} para ${categoryName ?? 'esta categoria'}…`
+    : `Nova regra pessoal para ${categoryName ?? 'esta categoria'}…`;
 
   return (
     <div className="space-y-4">
-      <form onSubmit={submit} className="relative flex gap-2">
-        <div className="relative flex-1">
-          <input
-            type="text"
-            value={pattern}
-            onChange={(e) => {
-              setPattern(e.target.value);
-              setOpen(true);
-              setHighlightIdx(-1);
-              if (error) setError(null);
-            }}
-            onFocus={() => setOpen(true)}
-            // Delay the close so a click on a suggestion row (which
-            // blurs the input) still registers its onMouseDown before
-            // the dropdown disappears.
-            onBlur={() => setTimeout(() => setOpen(false), 120)}
-            onKeyDown={handleKeyDown}
-            placeholder={`Nova regra pessoal para ${categoryName ?? 'esta categoria'}…`}
-            className="input w-full"
-            disabled={busy}
-            autoComplete="off"
-            role="combobox"
-            aria-expanded={open && filteredSuggestions.length > 0}
-            aria-autocomplete="list"
-            aria-controls="override-entity-suggestions"
-          />
-          {open && filteredSuggestions.length > 0 && (
-            <ul
-              id="override-entity-suggestions"
-              role="listbox"
-              className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-xl border border-sand-200 bg-white py-1 shadow-lg animate-fade-in"
+      <form onSubmit={submit} className="space-y-2">
+        <div className="relative flex flex-wrap gap-2">
+          <div className="relative min-w-[180px] flex-1">
+            <input
+              type="text"
+              value={pattern}
+              onChange={(e) => {
+                setPattern(e.target.value);
+                setOpen(true);
+                setHighlightIdx(-1);
+                clearFeedback();
+              }}
+              onFocus={() => setOpen(true)}
+              // Delay the close so a click on a suggestion row (which
+              // blurs the input) still registers its onMouseDown before
+              // the dropdown disappears.
+              onBlur={() => setTimeout(() => setOpen(false), 120)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              className="input w-full"
+              disabled={busy}
+              autoComplete="off"
+              role="combobox"
+              aria-expanded={open && filteredSuggestions.length > 0}
+              aria-autocomplete="list"
+              aria-controls="override-entity-suggestions"
+            />
+            {open && filteredSuggestions.length > 0 && (
+              <ul
+                id="override-entity-suggestions"
+                role="listbox"
+                className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-xl border border-sand-200 bg-white py-1 shadow-lg animate-fade-in"
+              >
+                {filteredSuggestions.map((entity, i) => {
+                  const isActive = i === highlightIdx;
+                  return (
+                    <li
+                      key={entity}
+                      role="option"
+                      aria-selected={isActive}
+                      // `onMouseDown` (not `onClick`) fires before the
+                      // input's `onBlur`, which is what lets the click
+                      // beat the delayed-close timer above.
+                      onMouseDown={(ev) => {
+                        ev.preventDefault();
+                        pickSuggestion(entity);
+                      }}
+                      onMouseEnter={() => setHighlightIdx(i)}
+                      className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
+                        isActive
+                          ? 'bg-curve-50 text-curve-800'
+                          : 'text-sand-800 hover:bg-sand-50'
+                      }`}
+                    >
+                      {entity}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+          {adminMode && (
+            // Segmented control that flips the target of the add form
+            // between personal overrides and the global catalogue.
+            // Admin-only surface — users never see this. Toggling
+            // clears any pending error/conflict so switching modes
+            // feels like "fresh start" rather than "carry stale
+            // feedback across kinds".
+            <div
+              role="group"
+              aria-label="Tipo de regra"
+              className="inline-flex items-center rounded-xl bg-sand-100 p-0.5"
             >
-              {filteredSuggestions.map((entity, i) => {
-                const isActive = i === highlightIdx;
-                return (
-                  <li
-                    key={entity}
-                    role="option"
-                    aria-selected={isActive}
-                    // `onMouseDown` (not `onClick`) fires before the
-                    // input's `onBlur`, which is what lets the click
-                    // beat the delayed-close timer above.
-                    onMouseDown={(ev) => {
-                      ev.preventDefault();
-                      pickSuggestion(entity);
-                    }}
-                    onMouseEnter={() => setHighlightIdx(i)}
-                    className={`cursor-pointer px-3 py-2 text-sm transition-colors ${
-                      isActive
-                        ? 'bg-curve-50 text-curve-800'
-                        : 'text-sand-800 hover:bg-sand-50'
-                    }`}
-                  >
-                    {entity}
-                  </li>
-                );
-              })}
-            </ul>
+              <button
+                type="button"
+                onClick={() => {
+                  setKind('personal');
+                  clearFeedback();
+                }}
+                aria-pressed={effectiveKind === 'personal'}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  effectiveKind === 'personal'
+                    ? 'bg-white text-curve-800 shadow-sm'
+                    : 'text-sand-500 hover:text-sand-800'
+                }`}
+                disabled={busy}
+              >
+                Pessoal
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setKind('global');
+                  clearFeedback();
+                }}
+                aria-pressed={effectiveKind === 'global'}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  effectiveKind === 'global'
+                    ? 'bg-white text-curve-800 shadow-sm'
+                    : 'text-sand-500 hover:text-sand-800'
+                }`}
+                disabled={busy}
+              >
+                Global
+              </button>
+            </div>
           )}
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={busy}
+          >
+            <PlusIcon className="h-4 w-4" />
+            Adicionar
+          </button>
         </div>
-        <button
-          type="submit"
-          className="btn-primary"
-          disabled={busy}
-        >
-          <PlusIcon className="h-4 w-4" />
-          Adicionar
-        </button>
+        {adminMode && effectiveKind === 'global' && (
+          <p className="text-xs text-sand-400">
+            Várias de uma vez? Separa com vírgulas ou quebras de linha.
+          </p>
+        )}
       </form>
       {error && (
         <p className="-mt-2 text-xs text-curve-700" role="alert">
           {error}
         </p>
+      )}
+      {conflicts.length > 0 && (
+        <div
+          className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+          role="alert"
+        >
+          <p className="font-medium">
+            {conflicts.length === 1
+              ? 'Esta entidade já está atribuída a outra categoria:'
+              : `${conflicts.length} entidades já estão atribuídas a outras categorias:`}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {conflicts.map((c) => (
+              <li key={c.entity}>
+                <strong>{c.entity}</strong> está em{' '}
+                <em>{c.category_name}</em>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2">
+            Remove-a de lá antes de a trazer para aqui — o catálogo não
+            permite duplicados entre categorias.
+          </p>
+        </div>
       )}
 
       {mine.length === 0 ? (
@@ -592,8 +742,25 @@ function GlobalEntitiesList({
 
   if (!entities.length) {
     return (
-      <div className="rounded-2xl border-2 border-dashed border-sand-200 py-8 text-center text-sm text-sand-500">
-        Esta categoria ainda não tem entidades no catálogo global.
+      <div className="rounded-2xl border-2 border-dashed border-sand-200 py-8 text-center">
+        <p className="text-sm text-sand-500">
+          Esta categoria ainda não tem entidades no catálogo global.
+        </p>
+        <p className="mt-1 text-xs text-sand-400">
+          {isAdmin ? (
+            <>
+              Adiciona um padrão (e.g. <span className="font-mono">lidl</span>)
+              para catalogar automaticamente as despesas de todos os
+              utilizadores.
+            </>
+          ) : (
+            <>
+              Pede ao admin para adicionar um padrão, ou cria uma{' '}
+              <span className="font-medium text-sand-600">regra pessoal</span>{' '}
+              acima.
+            </>
+          )}
+        </p>
       </div>
     );
   }
@@ -663,123 +830,6 @@ function GlobalEntitiesList({
   );
 }
 
-// Admin-only: batch-add entity strings to a global category. The form
-// splits on commas and newlines, so the admin can paste "galp, bp,
-// repsol" OR type one per line and hit Enter. Trimmed, blank-dropped,
-// and forwarded to `onSubmit(entities)` which is expected to call
-// `api.addCategoryEntities`.
-//
-// The 409 `entity_conflict` path renders inline under the form: the
-// parent re-throws the augmented Error (`err.body.conflicts`) so this
-// component can list the collisions ("<entity> está em <other>") and
-// tell the admin to either remove them from the other category first
-// or edit the input and retry. The whole batch is aborted on any
-// conflict — the server explicitly refuses to half-apply (§8.3).
-//
-// On success the input clears; on any error the draft is preserved so
-// the admin can fix-and-retry without re-typing. The parent handles
-// the apply-to-all banner (pushed after a successful add, keyed off
-// `{ kind: 'admin' }` — see pendingApplies).
-function AddGlobalEntitiesForm({ categoryId, categoryName, onSubmit, busy }) {
-  const [text, setText] = useState('');
-  const [conflicts, setConflicts] = useState([]);
-  const [error, setError] = useState(null);
-
-  const parseEntities = (raw) =>
-    raw
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-  const clearFeedback = () => {
-    if (error) setError(null);
-    if (conflicts.length) setConflicts([]);
-  };
-
-  const submit = async (e) => {
-    e.preventDefault();
-    const entities = parseEntities(text);
-    if (!entities.length) {
-      setError('Indica pelo menos uma entidade.');
-      return;
-    }
-    setError(null);
-    setConflicts([]);
-    try {
-      await onSubmit(entities);
-      setText('');
-    } catch (err) {
-      if (err?.message === 'entity_conflict' && err?.body?.conflicts) {
-        setConflicts(err.body.conflicts);
-      } else if (err?.message === 'invalid_entities') {
-        setError('Uma ou mais entidades são inválidas.');
-      } else if (err?.message === 'category_not_found') {
-        setError('Categoria não encontrada — recarrega a página.');
-      } else {
-        setError(err?.message ?? 'Erro a adicionar entidades.');
-      }
-    }
-  };
-
-  return (
-    <form onSubmit={submit} className="space-y-2">
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            clearFeedback();
-          }}
-          placeholder={`Nova entidade para ${categoryName ?? 'esta categoria'}…`}
-          className="input flex-1"
-          disabled={busy}
-          aria-label="Adicionar entidade ao catálogo global"
-        />
-        <button
-          type="submit"
-          className="btn-primary"
-          disabled={busy || !text.trim()}
-        >
-          <PlusIcon className="h-4 w-4" />
-          Adicionar
-        </button>
-      </div>
-      <p className="text-xs text-sand-400">
-        Várias de uma vez? Separa com vírgulas ou quebras de linha.
-      </p>
-      {error && (
-        <p className="text-xs text-curve-700" role="alert">
-          {error}
-        </p>
-      )}
-      {conflicts.length > 0 && (
-        <div
-          className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
-          role="alert"
-        >
-          <p className="font-medium">
-            {conflicts.length === 1
-              ? 'Esta entidade já está atribuída a outra categoria:'
-              : `${conflicts.length} entidades já estão atribuídas a outras categorias:`}
-          </p>
-          <ul className="mt-1 space-y-0.5">
-            {conflicts.map((c) => (
-              <li key={c.entity}>
-                <strong>{c.entity}</strong> está em{' '}
-                <em>{c.category_name}</em>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-2">
-            Remove-a de lá antes de a trazer para aqui — o catálogo não
-            permite duplicados entre categorias.
-          </p>
-        </div>
-      )}
-    </form>
-  );
-}
 
 function RecentExpenses({ categoryId }) {
   const [rows, setRows] = useState([]);
@@ -2017,10 +2067,10 @@ export default function CategoriesPage() {
     }
   };
 
-  // Admin batch-add of global entities. Called from
-  // AddGlobalEntitiesForm with the parsed string[] — conflicts are
-  // re-thrown verbatim so the form can render `err.body.conflicts`
-  // inline (see the form component above for the translation logic).
+  // Admin batch-add of global entities. Called from `OverridesList`
+  // (admin mode, via the `onAddGlobal` prop) with the parsed string[]
+  // — conflicts are re-thrown verbatim so the form can render
+  // `err.body.conflicts` inline (see OverridesList's `mapError`).
   //
   // Success path has two side effects:
   //   1. Refresh the categories list so the new entities show up in
@@ -2066,6 +2116,17 @@ export default function CategoriesPage() {
             ? `Entidade "${entities[0]}" adicionada.`
             : `${entities.length} entidades adicionadas.`,
       });
+
+      // Re-fetch categories with match counts so the new entries render
+      // their "match c/ N despesas" subtitle immediately. The optimistic
+      // update above puts the row in the list instantly (entities array
+      // patched) but the server's add endpoint does NOT return per-entity
+      // match counts — those come from the `with_match_counts=true`
+      // variant fetched inside `refreshAll`. Without this, the new row
+      // sits with a blank subtitle until the next organic refresh
+      // (page navigation, apply-to-all, etc.) and the user sees a stale
+      // "global" without the count.
+      await refreshAll();
 
       // Dry-run apply-to-all so the banner only appears when there's
       // something to actually apply. `matched === 0` is the common
@@ -2601,7 +2662,8 @@ export default function CategoriesPage() {
                         categoryName={selectedRow.category_name}
                         onCreate={handleCreateOverride}
                         onDelete={handleRequestDeleteOverride}
-                        busy={overrideBusy}
+                        onAddGlobal={isAdmin ? handleAddGlobalEntities : undefined}
+                        busy={overrideBusy || (isAdmin && globalEntityBusy)}
                       />
                     </section>
                   )}
@@ -2618,14 +2680,6 @@ export default function CategoriesPage() {
                       <h3 className="text-xs font-medium uppercase tracking-wide text-sand-400">
                         Catálogo global
                       </h3>
-                      {isAdmin && (
-                        <AddGlobalEntitiesForm
-                          categoryId={selectedRow.category_id}
-                          categoryName={selectedRow.category_name}
-                          onSubmit={handleAddGlobalEntities}
-                          busy={globalEntityBusy}
-                        />
-                      )}
                       <GlobalEntitiesList
                         entities={selectedRow.global_entities}
                         counts={selectedRow.global_entity_counts}
