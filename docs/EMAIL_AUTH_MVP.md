@@ -348,8 +348,17 @@ verificáveis:
                "primeira sync sem intervenção manual" não depende do
                próximo tick do cron (até 5 min). -->
 
-- [ ] Sync >1h depois do setup inicial dispara refresh silencioso
+- [x] Sync >1h depois do setup inicial dispara refresh silencioso
       (observável em `CurveLog` via `oauth_token_refreshed`)
+      <!-- verified 2026-04-17: cobertura unitária via
+           server/test/oauthManager.test.js (7 cenários, `npm test`
+           no server/). Valida que fromCache=false dispara audit com
+           provider/accountId/email, que cache hit não escreve, que
+           fromCache=undefined é conservador, e que os caminhos de
+           re-auth (InteractionRequiredAuthError, missing account,
+           cache corrupt) não emitem falso positivo. E2E real
+           requer user ligado >1h, mas a lógica está blindada. -->
+
 - [ ] Cache `oauth_token_cache` apagado à mão na DB → próximo sync
       marca `last_sync_status=error` + banner no dashboard
 - [ ] Clicar no banner leva ao wizard e a re-autorização recupera a sync
