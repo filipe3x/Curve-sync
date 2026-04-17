@@ -12,7 +12,11 @@ import {
 } from '../services/categoryResolver.js';
 import { reassignCategoryBulk } from '../services/expense.js';
 import { audit, clientIp } from '../services/audit.js';
-import { cycleBoundsFor, formatISODate } from '../services/cycle.js';
+import {
+  cycleBoundsFor,
+  formatISODate,
+  getUserCycleDay,
+} from '../services/cycle.js';
 
 const router = Router();
 
@@ -167,7 +171,12 @@ function parseExpenseDate(str) {
 
 // Resolve the requested cycle into `{ start, end }` Dates + labels.
 // Returns `null` + an error code when the caller supplied a bad range.
-function resolveCycleParam({ cycle, start, end }) {
+//
+// `cycleDay` drives the "current" / "previous" shortcuts so two users
+// with different `sync_cycle_day` settings get different windows on
+// the same request. Explicit `?start=&end=` ranges ignore it (the
+// caller has already picked the bounds they want).
+function resolveCycleParam({ cycle, start, end, cycleDay = 22 }) {
   // Explicit range wins over the `cycle` shortcut so `?start=&end=`
   // behaves predictably even if `cycle` is accidentally kept around.
   if (start || end) {
@@ -188,19 +197,19 @@ function resolveCycleParam({ cycle, start, end }) {
   if (cycle === 'previous') {
     // "Previous cycle" = the cycle ending the day before the current
     // cycle starts. We derive it by walking the current cycle's start
-    // back by one day and rounding to that anchor's 22nd — this
-    // handles year boundaries and variable month lengths for free
-    // (e.g. Mar 22 - Apr 21 previous = Feb 22 - Mar 21, not Jan).
-    const currentBounds = cycleBoundsFor(now);
+    // back by one day and re-anchoring — this handles year boundaries
+    // and variable month lengths for free (e.g. Mar 22 - Apr 21
+    // previous = Feb 22 - Mar 21, not Jan) regardless of cycleDay.
+    const currentBounds = cycleBoundsFor(now, cycleDay);
     const anchor = new Date(currentBounds.start.getTime() - 24 * 60 * 60 * 1000);
-    const bounds = cycleBoundsFor(anchor);
+    const bounds = cycleBoundsFor(anchor, cycleDay);
     return {
       bounds,
       label: { start: formatISODate(bounds.start), end: formatISODate(bounds.end) },
     };
   }
   // Default: current cycle.
-  const bounds = cycleBoundsFor(now);
+  const bounds = cycleBoundsFor(now, cycleDay);
   return {
     bounds,
     label: { start: formatISODate(bounds.start), end: formatISODate(bounds.end) },
@@ -209,10 +218,12 @@ function resolveCycleParam({ cycle, start, end }) {
 
 router.get('/stats', async (req, res) => {
   try {
+    const cycleDay = await getUserCycleDay(req.userId);
     const resolved = resolveCycleParam({
       cycle: req.query.cycle,
       start: req.query.start,
       end: req.query.end,
+      cycleDay,
     });
     if (resolved.error) {
       return res.status(400).json({ error: resolved.error });

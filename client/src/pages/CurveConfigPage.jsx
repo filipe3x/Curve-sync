@@ -458,6 +458,38 @@ export default function CurveConfigPage() {
             ))}
           </select>
         </label>
+
+        {/*
+          Day-of-month cut-off for the expense cycle. Drives: the
+          dashboard "este mês" totals, the /categories/stats windows,
+          the uncategorised count card, and the first-sync imap_since
+          fallback. Clamped to [1, 28] to avoid Feb overflow. See
+          docs/expense-tracking.md → Custom Monthly Cycle.
+        */}
+        <label className="mt-5 block">
+          <span className="mb-1.5 block text-xs font-medium text-sand-500">
+            Dia de início do ciclo
+          </span>
+          <select
+            value={config.sync_cycle_day ?? 22}
+            onChange={(e) =>
+              saveSchedule({ sync_cycle_day: Number(e.target.value) })
+            }
+            disabled={schedSaving || authBroken || authFresh}
+            className="input disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1.5 block text-xs text-sand-500">
+            Dia do mês em que arranca o ciclo de despesas — por defeito
+            22, alinhado com o ciclo salarial. Aplica-se ao dashboard,
+            categorias e à primeira sincronização.
+          </span>
+        </label>
       </section>
 
       {/* ----- Stats card ----- */}

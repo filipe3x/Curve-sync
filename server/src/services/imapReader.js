@@ -56,6 +56,7 @@
 
 import { ImapFlow } from 'imapflow';
 import { getOAuthToken, OAuthReAuthRequired } from './oauthManager.js';
+import { cycleBoundsFor, normaliseCycleDay } from './cycle.js';
 
 /**
  * Structured IMAP error. `code` is one of:
@@ -141,18 +142,32 @@ function isLoopbackHost(host) {
 
 /**
  * Fallback SINCE date when `CurveConfig.imap_since` is null (i.e. the
- * user hasn't set an explicit date yet). Returns 31 days ago in
- * Europe/Lisbon time — the IMAP SINCE command compares against the
- * message's internal date (date-only, no time component), so ±1 day
- * from timezone effects is acceptable for a 31-day window.
+ * user hasn't set an explicit date yet). Returns the start of the
+ * user's current custom cycle — `cycleDay` of this month if today is
+ * on/after `cycleDay`, otherwise `cycleDay` of the previous month.
  *
- * Why Europe/Lisbon: the user is in Portugal and the expense cycle
- * logic (day 22) is defined in local time. Using UTC could shift the
- * cut-off by a day around midnight, which matters when the future
- * cycle-aware mode computes the since date dynamically.
+ * Why cycle-aware: expenses belong to a cycle, not a rolling 31-day
+ * window. A fresh user who enables sync on the 25th should ingest
+ * receipts from the 22nd onward (current cycle) rather than reaching
+ * into the previous cycle's territory. The IMAP SINCE command
+ * compares against the message's internal date (day-precision), so
+ * any UTC midnight boundary is fine for the filter.
+ *
+ * Fallback to 31d (legacy behaviour) when cycleDay is nullish or the
+ * caller forgot to pass a config — preserves the old invariant for
+ * any callsite that still uses the no-arg form.
+ *
+ * @param {{sync_cycle_day?: number}} [config]
  */
-function defaultSince() {
-  // Intl gives us "today in Lisbon" regardless of the server's TZ.
+export function defaultSince(config) {
+  if (config && config.sync_cycle_day != null) {
+    const { start } = cycleBoundsFor(
+      new Date(),
+      normaliseCycleDay(config.sync_cycle_day),
+    );
+    return start;
+  }
+  // Legacy fallback (no cycle day): 31 days ago in Europe/Lisbon.
   const lisbonDate = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Lisbon',
     year: 'numeric',
@@ -160,7 +175,6 @@ function defaultSince() {
     day: '2-digit',
   }).format(new Date());
   const [y, m, d] = lisbonDate.split('-').map(Number);
-  // Construct a local Date at midnight, then subtract 31 days.
   const dt = new Date(y, m - 1, d);
   dt.setDate(dt.getDate() - 31);
   return dt;
@@ -345,7 +359,7 @@ export class ImapReader {
     const maxPerRun = this.config.max_emails_per_run ?? 500;
     const since = this.config.imap_since
       ? new Date(this.config.imap_since)
-      : defaultSince();
+      : defaultSince(this.config);
 
     const criteria = { seen: false };
     if (since) criteria.since = since;
