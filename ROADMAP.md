@@ -650,6 +650,59 @@ Na página de Logs, permitir re-trigger do parsing para logs com status `parse_e
 ### 3.8 Docker
 `Dockerfile` + `docker-compose.yml` para facilitar deploy (Curve Sync + MongoDB, ou apenas Curve Sync apontando para MongoDB externo).
 
+### 3.9 Script de deploy para o servidor de produção (Ubuntu 16) 🚀
+
+Automatizar o deploy em prod com um script único (`scripts/deploy-prod.sh` ou equivalente) que cobre o fluxo actual manual e as suas armadilhas.
+
+**Motivação imediata:** a migração `date_at` da Opção C expôs a dependência de sequência entre código e dados — step 5 (flip do sort default) **tem de** aterrar em prod depois do backfill, senão os utilizadores vêem degradação visível. Hoje a sequência é runbook manual no `README.md` § «Migrações one-shot». Um script que conheça pré-deploys desta natureza evita que a memória operacional se perca entre releases.
+
+**Contexto:** o servidor de produção corre **Ubuntu 16.04 (Xenial)** — package manager antigo, systemd disponível, node/npm instalados à mão. O script não pode assumir ferramentas modernas (ex. `npm ci --omit=dev` funciona; `nvm use --lts` pode não existir).
+
+**Requisitos funcionais:**
+
+| Fase | O que o script faz |
+|------|---------------------|
+| **1. Pré-voo** | Imprime banner com (a) diff de commits desde o último deploy, (b) **avisos prévios conhecidos** sobre migrações de dados e o _porquê_ (ex. «este release muda o sort de `-date` para `-date_at`; o backfill TEM de correr antes, ver commit XYZ»), (c) estado actual do servidor (disco, memória, processos Curve Sync, uptime do MongoDB) |
+| **2. Gate** | Pede confirmação explícita `CONFIRM=yes` ou flag `--yes`. Sem isso, sai com o plano impresso |
+| **3. Pull + build** | `git fetch` + `git checkout` do commit alvo, `npm ci` no client e server, `npm run build` (client), `systemctl stop curve-sync` |
+| **4. Migrações** | Detecta no diff de commits se há scripts em `server/scripts/` com prefixo `migrate-*` OU se o release inclui `docs/DEPLOY_NOTES.md` com bloco `## migration:` — corre esses primeiro. `analyze-expense-dates.js --write --yes` é o primeiro caso concreto |
+| **5. Start** | `systemctl start curve-sync` + health-check (`curl` a `/api/health`) |
+| **6. Rollback hook** | Se health-check falha, automaticamente volta ao commit anterior e reinicia |
+
+**Avisos prévios canónicos conhecidos** (a consolidar num ficheiro tipo `docs/DEPLOY_NOTES.md`):
+
+- **Opção C `date_at`** — «Antes deste release, os sorts do dashboard e /expenses passam de `-date` (lex sobre string) para `-date_at` (Date tipada). O backfill em `server/scripts/analyze-expense-dates.js` tem de correr PRIMEIRO, senão rows sem `date_at` vão aparecer no fundo da lista até o backfill correr. Não é data loss — é degradação visível. Ver README §Migrações one-shot.»
+- Futuros: sempre que um release mude a interpretação de um campo existente no MongoDB, adicionar aqui a nota com o _porquê_ (não só o que).
+
+**Estrutura proposta:**
+
+```
+scripts/
+├── deploy-prod.sh              # entry point
+├── deploy-lib/
+│   ├── preflight.sh            # banner + avisos + estado
+│   ├── gate.sh                 # confirmação interactiva
+│   ├── pull-build.sh           # git + npm ci + build
+│   ├── migrations.sh           # detect + run pending migrations
+│   ├── restart.sh              # systemctl + health check
+│   └── rollback.sh             # emergency revert
+docs/
+└── DEPLOY_NOTES.md             # migration banners, updated per release
+```
+
+**Scope cut consciente para o MVP deste script:**
+
+- Sem blue/green ou zero-downtime — um `systemctl stop` + `start` é aceitável para single-user prod
+- Sem GitHub Actions / CI wiring — corre-se à mão no servidor inicialmente; integração em pipeline é fase 2
+- Sem notificações (Slack, email) em falha — o prompt interactivo basta; um `set -euo pipefail` rigoroso trata o resto
+
+**Dependências:** Nenhuma de código. Depende de acesso SSH + systemd unit já configurado no servidor (já existe).
+
+**Referências:**
+- `README.md` § Migrações one-shot (contém o runbook manual actual da Opção C)
+- `server/scripts/analyze-expense-dates.js` (primeira migração que o script precisa de saber correr)
+- `scripts/setup-pi.sh` + `scripts/check-services.sh` (padrão bash existente no repo, reaproveitar estilo)
+
 ---
 
 ## Multi-User Support
