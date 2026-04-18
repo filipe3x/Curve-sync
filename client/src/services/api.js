@@ -92,6 +92,20 @@ export const getExpenseIds = (params) =>
     `/expenses?${new URLSearchParams({ ...(params ?? {}), fields: '_id' })}`,
   );
 
+// Targeted id-list resolver — fetches expense rows matching the
+// given ObjectIds, scoped server-side to the caller's user_id.
+// Cap 200 ids per call; beyond that, chunk client-side. Used by the
+// /curve/logs §2.10.1 drill-down on bulk exclusion rows — every
+// returned row carries the live `excluded: boolean` flag so the
+// drill-down can show the current state honestly even if the audit
+// row is minutes old.
+export const getExpensesByIds = (ids) => {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return Promise.resolve({ data: [], meta: { total: 0 } });
+  }
+  return request(`/expenses?ids=${encodeURIComponent(ids.join(','))}`);
+};
+
 // Toggle the "don't count for cycle / Savings Score" flag on up to
 // 500 expenses owned by the caller (ROADMAP §2.10). Exclusions live
 // in `curve_expense_exclusions` (Curve-Sync-owned) — we never mutate

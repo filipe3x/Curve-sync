@@ -299,7 +299,14 @@ export default function CurveLogsPage() {
     return () => clearExclusionTimer();
   }, []);
 
-  const handleRemoveSingleFromCycle = async (log) => {
+  // CurveLogs doesn't carry the per-row `excluded` state (logs are
+  // historical records of sync events, not live expense state), so we
+  // cannot render the symmetric toggle from ExpensesPage / Dashboard
+  // honestly. We take the conservative branch: this page can only
+  // EXCLUDE. The POST is idempotent (already-excluded → affected=0
+  // skipped=1), and the banner surfaces that honestly so the user
+  // isn't lied to. To re-include, go to /expenses.
+  const handleExcludeSingleFromCycle = async (log) => {
     if (!log?.expense_id || exclusionBusy) return;
     const ids = [log.expense_id];
     setPickerLogId(null);
@@ -308,7 +315,16 @@ export default function CurveLogsPage() {
       const res = await api.excludeExpenses(ids);
       const affected = res?.affected ?? 1;
       const skipped = res?.skipped ?? 0;
-      const text = `Despesa ${log.entity ?? ''} excluída do ciclo.`;
+      const entity = log.entity ?? '';
+      // When the POST is a no-op (already excluded) we say so
+      // explicitly instead of falsely claiming a fresh exclusion. The
+      // undo still works (DELETE brings the row back to "included"),
+      // which is the right behaviour — the user came here to act, and
+      // the symmetric verb is what's expected.
+      const text =
+        affected === 0 && skipped === 1
+          ? `Despesa ${entity} já estava excluída do ciclo.`
+          : `Despesa ${entity} excluída do ciclo.`;
       setExclusionUndo({
         ids,
         direction: 'excluded',
@@ -480,22 +496,43 @@ export default function CurveLogsPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) =>
-                row.kind === 'batch' ? (
-                  <BatchRow
-                    key={row.key}
-                    batch={row}
-                    isEditable={isEditableLog}
-                    pickerLogId={pickerLogId}
-                    onOpenPicker={setPickerLogId}
-                    onClosePicker={() => !pickerSaving && setPickerLogId(null)}
-                    onPickCategory={handleCategorySave}
-                    onRemoveFromCycle={handleRemoveSingleFromCycle}
-                    categories={categories}
-                    iconByCategory={iconByCategory}
-                    pickerSaving={pickerSaving}
-                  />
-                ) : (
+              {rows.map((row) => {
+                if (row.kind === 'batch') {
+                  return (
+                    <BatchRow
+                      key={row.key}
+                      batch={row}
+                      isEditable={isEditableLog}
+                      pickerLogId={pickerLogId}
+                      onOpenPicker={setPickerLogId}
+                      onClosePicker={() => !pickerSaving && setPickerLogId(null)}
+                      onPickCategory={handleCategorySave}
+                      onToggleCycle={handleExcludeSingleFromCycle}
+                      categories={categories}
+                      iconByCategory={iconByCategory}
+                      pickerSaving={pickerSaving}
+                    />
+                  );
+                }
+                // ROADMAP §2.10.1 — bulk exclusion toggle rows render
+                // as a self-contained expandable row (not via
+                // BatchRow — that clusters multiple `curve_logs`
+                // entries; here one row has N embedded expense_ids).
+                const meta = row.log?.action ? describeLog(row.log) : null;
+                const isBulkExclusion =
+                  meta?.exclusionBatch &&
+                  meta.exclusionBatch.count > 1 &&
+                  meta.exclusionBatch.ids.length > 0;
+                if (isBulkExclusion) {
+                  return (
+                    <ExclusionBatchRow
+                      key={row.log._id}
+                      log={row.log}
+                      meta={meta}
+                    />
+                  );
+                }
+                return (
                   <SingleRow
                     key={row.log._id}
                     log={row.log}
@@ -504,13 +541,13 @@ export default function CurveLogsPage() {
                     onOpenPicker={setPickerLogId}
                     onClosePicker={() => !pickerSaving && setPickerLogId(null)}
                     onPickCategory={handleCategorySave}
-                    onRemoveFromCycle={handleRemoveSingleFromCycle}
+                    onToggleCycle={handleExcludeSingleFromCycle}
                     categories={categories}
                     iconByCategory={iconByCategory}
                     pickerSaving={pickerSaving}
                   />
-                ),
-              )}
+                );
+              })}
             </tbody>
           </table>
 
@@ -554,7 +591,7 @@ function SingleRow({
   onOpenPicker,
   onClosePicker,
   onPickCategory,
-  onRemoveFromCycle,
+  onToggleCycle,
   categories,
   iconByCategory,
   pickerSaving,
@@ -592,7 +629,7 @@ function SingleRow({
                 onOpen={() => onOpenPicker(log._id)}
                 onClose={onClosePicker}
                 onPick={onPickCategory}
-                onRemoveFromCycle={onRemoveFromCycle}
+                onToggleCycle={onToggleCycle}
                 categories={categories}
                 iconByCategory={iconByCategory}
                 saving={pickerSaving}
@@ -620,7 +657,7 @@ function BatchRow({
   onOpenPicker,
   onClosePicker,
   onPickCategory,
-  onRemoveFromCycle,
+  onToggleCycle,
   categories,
   iconByCategory,
   pickerSaving,
@@ -706,7 +743,7 @@ function BatchRow({
                       onOpen={() => onOpenPicker(log._id)}
                       onClose={onClosePicker}
                       onPick={onPickCategory}
-                      onRemoveFromCycle={onRemoveFromCycle}
+                      onToggleCycle={onToggleCycle}
                       categories={categories}
                       iconByCategory={iconByCategory}
                       saving={pickerSaving}
@@ -762,7 +799,7 @@ function EditableResolutionPill({
   onOpen,
   onClose,
   onPick,
-  onRemoveFromCycle,
+  onToggleCycle,
   categories,
   iconByCategory,
   saving,
@@ -830,8 +867,8 @@ function EditableResolutionPill({
           iconByCategory={iconByCategory}
           saving={saving}
           onSelect={(newId) => onPick(log, newId)}
-          onRemoveFromCycle={
-            onRemoveFromCycle ? () => onRemoveFromCycle(log) : null
+          onToggleCycle={
+            onToggleCycle ? () => onToggleCycle(log) : null
           }
           onCancel={onClose}
         />
@@ -853,4 +890,159 @@ function StatusDot({ status }) {
 function formatDate(value) {
   if (!value) return '—';
   return new Date(value).toLocaleString('pt-PT');
+}
+
+// ROADMAP §2.10.1 — bulk exclusion audit row rendered as a
+// self-contained expandable, modelled on <BatchRow>. Unlike BatchRow
+// — which clusters multiple `curve_logs` entries from one sync —
+// this is ONE audit row whose `affected_expense_ids` carries the
+// per-expense drill-down. The ids are resolved lazily on first
+// expand via `api.getExpensesByIds` so a page of 30 logs doesn't
+// fan out into 30 pre-flight fetches.
+//
+// State flow:
+//   collapsed          — header only, chevron right
+//   first expand       — fetch kicks off, spinner under the header
+//   resolved (ok)      — child rows with entity / amount / date /
+//                        live `excluída` badge when still excluded
+//   resolved (error)   — short inline message, no expansion; user
+//                        can retry by collapsing + re-expanding
+//
+// The live `excluded` flag on each fetched row may drift from the
+// audit action (user could have toggled the expense again between
+// the audit and the drill-down). We show today's truth, not a
+// frozen snapshot — consistent with how /expenses renders the flag.
+function ExclusionBatchRow({ log, meta }) {
+  const [open, setOpen] = useState(false);
+  const [expenses, setExpenses] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const { ids, count, direction } = meta.exclusionBatch;
+  const excluded = direction === 'excluded';
+  const badgeTone = excluded
+    ? 'bg-curve-50 text-curve-700'
+    : 'bg-emerald-50 text-emerald-700';
+
+  const handleToggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && expenses === null && !loading) {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await api.getExpensesByIds(ids);
+        setExpenses(res.data ?? []);
+      } catch (err) {
+        setError(err?.message ?? 'Falhou a carregar despesas.');
+        setExpenses([]);
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  return (
+    <Fragment>
+      <tr
+        onClick={handleToggle}
+        className="cursor-pointer border-b border-sand-50 transition-colors hover:bg-sand-50/60"
+      >
+        <DateCell value={log.created_at} />
+        <TypeCell type="despesa" />
+        <td className="px-5 py-3">
+          <div className="flex items-center gap-2 text-sand-900">
+            <ChevronRightIcon
+              className={`h-3.5 w-3.5 text-sand-400 transition-transform ${open ? 'rotate-90' : ''}`}
+            />
+            <span>{meta.title}</span>
+            <span
+              className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${badgeTone}`}
+            >
+              {excluded ? 'Excluídas' : 'Reincluídas'}
+            </span>
+          </div>
+        </td>
+      </tr>
+      {open && (
+        <>
+          {loading && (
+            <tr className="border-b border-sand-50 bg-sand-50/40">
+              <td colSpan={3} className="px-5 py-3 pl-12 text-xs text-sand-500">
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-sand-300 border-t-sand-600" />
+                  A carregar {count} despesa{count === 1 ? '' : 's'}…
+                </span>
+              </td>
+            </tr>
+          )}
+          {!loading && error && (
+            <tr className="border-b border-sand-50 bg-sand-50/40">
+              <td colSpan={3} className="px-5 py-3 pl-12 text-xs text-curve-700">
+                {error}
+              </td>
+            </tr>
+          )}
+          {!loading && !error && Array.isArray(expenses) && expenses.length === 0 && (
+            <tr className="border-b border-sand-50 bg-sand-50/40">
+              <td colSpan={3} className="px-5 py-3 pl-12 text-xs text-sand-400">
+                Nenhuma das {count} despesas continua acessível — podem
+                ter sido apagadas directamente em Embers ou o log é
+                anterior à persistência de `affected_expense_ids`.
+              </td>
+            </tr>
+          )}
+          {!loading && !error && Array.isArray(expenses) && expenses.length > 0 &&
+            expenses.map((exp) => {
+              const liveExcluded = exp.excluded === true;
+              return (
+                <tr
+                  key={exp._id}
+                  className="border-b border-sand-50 bg-sand-50/40"
+                  title={
+                    liveExcluded
+                      ? 'Actualmente excluída do ciclo'
+                      : 'Actualmente a contar para o ciclo'
+                  }
+                >
+                  <td className="px-5 py-2 pl-12 text-xs text-sand-400">
+                    {exp.date ?? '—'}
+                  </td>
+                  <td className="px-5 py-2">
+                    <StatusDot status={liveExcluded ? 'duplicate' : 'ok'} />
+                  </td>
+                  <td className="px-5 py-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-sand-800">{exp.entity ?? '—'}</span>
+                      {exp.amount != null && (
+                        <span className="text-sand-500">
+                          €{Number(exp.amount).toFixed(2)}
+                        </span>
+                      )}
+                      {exp.card && (
+                        <span className="text-sand-400">· {exp.card}</span>
+                      )}
+                      {exp.category_name && (
+                        <span className="badge bg-sand-100 text-sand-600">
+                          {exp.category_name}
+                        </span>
+                      )}
+                      <span
+                        className={`ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          liveExcluded
+                            ? 'bg-sand-200 text-sand-600'
+                            : 'bg-emerald-50 text-emerald-700'
+                        }`}
+                      >
+                        {liveExcluded ? 'Excluída' : 'No ciclo'}
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+        </>
+      )}
+    </Fragment>
+  );
 }

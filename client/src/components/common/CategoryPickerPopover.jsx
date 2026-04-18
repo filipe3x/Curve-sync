@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarOff } from 'lucide-react';
+import { CalendarOff, CalendarCheck } from 'lucide-react';
 import { MagnifyingGlassIcon } from '../layout/Icons';
 import { CategoryIcon } from './CategoryIcon';
 
@@ -80,19 +80,21 @@ import { CategoryIcon } from './CategoryIcon';
  *     loaded icons yet still render cleanly. The map is pulled from
  *     `GET /api/category-icons` by the parent page (ExpensesPage /
  *     DashboardPage) and passed in to avoid a per-popover round-trip.
- *   @param {Function} [onRemoveFromCycle]
- *     Single-mode only. When provided, renders a mini curve-red
- *     `CalendarOff` button to the left of the × close in the header
- *     (ROADMAP §2.10.1). Click fires `onRemoveFromCycle()` and the
- *     parent is expected to call `api.excludeExpenses([expense._id])`
- *     + surface the existing `<ExclusionUndoBanner>` with 6 s Anular.
- *     Hidden in bulk mode (the action bar already has the bulk
- *     toggle) and when `excluded === true` (the row is already out of
- *     the cycle — offering it again would be a no-op).
+ *   @param {Function} [onToggleCycle]
+ *     Single-mode only. When provided, renders a mini toggle button to
+ *     the left of the × close in the header (ROADMAP §2.10.1). The
+ *     button is symmetric:
+ *       - `excluded === false` → curve-red `CalendarOff`, tooltip
+ *         «Remover do ciclo — não conta para Savings Score (reversível)»
+ *       - `excluded === true`  → emerald `CalendarCheck`, tooltip
+ *         «Incluir no ciclo — volta a contar para Savings Score»
+ *     Click fires `onToggleCycle()`; the parent inspects the current
+ *     `excluded` flag and calls either `api.excludeExpenses` or
+ *     `api.includeExpenses`, then surfaces `<ExclusionUndoBanner>`.
+ *     Hidden in bulk mode (the action bar already has the bulk toggle).
  *   @param {boolean} [excluded]
- *     Mirror of `expense.excluded`. When `true`, the remove-from-
- *     cycle button is hidden so the popover doesn't advertise an
- *     action that has no effect.
+ *     Mirror of `expense.excluded`. Flips the toggle's icon, colour
+ *     and tooltip so the popover never advertises a no-op.
  */
 export default function CategoryPickerPopover({
   expense,
@@ -102,7 +104,7 @@ export default function CategoryPickerPopover({
   onCancel,
   saving = false,
   iconByCategory = null,
-  onRemoveFromCycle = null,
+  onToggleCycle = null,
   excluded = false,
 }) {
   const panelRef = useRef(null);
@@ -193,24 +195,40 @@ export default function CategoryPickerPopover({
           {title}
         </h3>
         <div className="flex items-center gap-1">
-          {/* ROADMAP §2.10.1 — single-expense "Remover do ciclo"
-              shortcut. Curve-tinted so it reads as a distinct action
-              (not a second close button); tooltip spells out the
-              semantics because the icon alone is subtle. Hidden in
-              bulk mode and once the row is already excluded. */}
-          {onRemoveFromCycle && !isBulk && !excluded && (
+          {/* ROADMAP §2.10.1 — symmetric cycle toggle. One button,
+              two faces: curve-red CalendarOff for "remover", emerald
+              CalendarCheck for "incluir". The parent owns which API
+              to call (POST vs DELETE /exclusions) based on the same
+              `excluded` flag we use here to pick the icon. Kept
+              distinct from the × close (icon + colour) so it never
+              reads as a second dismiss. Hidden in bulk mode — the
+              /expenses action bar already has the multi-select
+              equivalent. */}
+          {onToggleCycle && !isBulk && (
             <button
               type="button"
-              aria-label="Remover do ciclo"
-              title="Remover do ciclo — não conta para Savings Score (reversível)"
+              aria-label={excluded ? 'Incluir no ciclo' : 'Remover do ciclo'}
+              title={
+                excluded
+                  ? 'Incluir no ciclo — volta a contar para Savings Score'
+                  : 'Remover do ciclo — não conta para Savings Score (reversível)'
+              }
               onClick={() => {
                 if (saving) return;
-                onRemoveFromCycle();
+                onToggleCycle();
               }}
               disabled={saving}
-              className="rounded-full p-1 text-curve-500 transition-colors hover:bg-curve-50 hover:text-curve-700 disabled:opacity-40"
+              className={`rounded-full p-1 transition-colors disabled:opacity-40 ${
+                excluded
+                  ? 'text-emerald-500 hover:bg-emerald-50 hover:text-emerald-700'
+                  : 'text-curve-500 hover:bg-curve-50 hover:text-curve-700'
+              }`}
             >
-              <CalendarOff className="h-4 w-4" strokeWidth={2} />
+              {excluded ? (
+                <CalendarCheck className="h-4 w-4" strokeWidth={2} />
+              ) : (
+                <CalendarOff className="h-4 w-4" strokeWidth={2} />
+              )}
             </button>
           )}
           <button

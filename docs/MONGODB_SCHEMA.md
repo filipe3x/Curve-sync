@@ -198,6 +198,11 @@ const CurveLogSchema = new mongoose.Schema({
   amount:         { type: Number },
   digest:         { type: String },
   expense_id:     { type: mongoose.Schema.Types.ObjectId, ref: 'Expense' },
+  // ROADMAP §2.10.1 — bulk toggle drill-down. Populated only on
+  // `expense_excluded_from_cycle` / `expense_included_in_cycle` rows
+  // with N > 1, capped at 100 ids server-side. Empty for single-row
+  // audits (those use `expense_id`) and for every other action.
+  affected_expense_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Expense' }],
   error_detail:   { type: String },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },

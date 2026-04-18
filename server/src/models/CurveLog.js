@@ -9,6 +9,19 @@ const curveLogSchema = new mongoose.Schema(
     amount: Number,
     digest: String,
     expense_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Expense' },
+    // Bulk toggle audit trail (ROADMAP §2.10.1). When a single audit
+    // row covers N > 1 expenses — today only the
+    // `expense_excluded_from_cycle` / `expense_included_in_cycle`
+    // bulk branches — we persist the full ownedIds list so the
+    // `/curve/logs` page can expand the row into a drill-down of the
+    // affected receipts. Capped at 100 server-side to keep the doc
+    // size bounded (beyond that the expansion falls back to
+    // `count=<N>` alone). Stays empty/undefined for single-row audits
+    // (those already carry `expense_id` + `entity` at the top level)
+    // and for every other audit action.
+    affected_expense_ids: [
+      { type: mongoose.Schema.Types.ObjectId, ref: 'Expense' },
+    ],
     error_detail: String,
     // Distinguishes entries produced by a dry run (syncEmails({..., dryRun:true}))
     // from real syncs. Dry runs still write CurveLog entries for visibility, but

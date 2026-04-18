@@ -44,7 +44,8 @@ and the same TTL (90 days, auto-purged via `expireAfterSeconds` on
   entity:       String,                            // sync events with parsed body
   amount:       Number,                            // sync events with parsed body
   digest:       String,                            // sync events with parsed body
-  expense_id:   ObjectId,                          // sync events that inserted
+  expense_id:   ObjectId,                          // sync events that inserted; single-row audits
+  affected_expense_ids: [ObjectId],                // bulk audit events only (§4 #36/#37) — capped at 100
   error_detail: String,                            // any failure / audit context
   dry_run:      Boolean,                           // sync events from dry runs
   action:       String | null,                     // audit events only — see §4
@@ -135,12 +136,23 @@ status: action.includes('failed') || action === 'session_expired' ? 'error' : 'o
 > a Curve-Sync-owned collection, so no schema change on `expenses`. The
 > single-row-vs-bulk distinction exists because the POST/DELETE endpoints
 > accept `{ expense_ids: [...] }` of arbitrary cardinality and the audit
-> row is written **once per call** (not once per id): a bulk "excluir 10"
-> is one `expense_excluded_from_cycle` row with `error_detail = "count=10"`
-> and `expense_id = null`; a single-row click from the popover header is
-> one row with `expense_id + entity` populated and no `count` key — the
-> renderer in `curveLogsUtils.js` discriminates on whether `expense_id`
-> is set to pick the right canonical message.
+> row is written **once per call** (not once per id):
+>
+> - **single** — `expense_id + entity` set at the top level, no `count`
+>   key, `affected_expense_ids` empty. Title: "Despesa X excluída do ciclo".
+> - **bulk** — `expense_id + entity` null, `error_detail = "count=<N>"`,
+>   `affected_expense_ids` holds the list of ids actually toggled (capped
+>   at 100 server-side). Title: "N despesas excluídas do ciclo"; the row
+>   renders with a chevron that expands to a drill-down of the affected
+>   receipts, resolved lazily via `GET /api/expenses?ids=id1,id2,...`.
+>   Pre-§2.10.1 rows (no `affected_expense_ids`) still show the title
+>   from the count alone but cannot expand — the client falls back to a
+>   collapsed-only row.
+>
+> The renderer in `curveLogsUtils.js` discriminates on whether
+> `expense_id` is set to pick the right canonical message and returns
+> an `exclusionBatch` payload (`{ ids, count, direction }`) for bulk
+> rows so `CurveLogsPage.jsx` can route them to `<ExclusionBatchRow>`.
 
 > **Category management events (#23-35) live in [`docs/Categories.md §13.2`](./Categories.md#132-audit-trail-catálogo--regras--despesas).** That document is
 > the single source of truth for every catalogue / overrides / quick-edit

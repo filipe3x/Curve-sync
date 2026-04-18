@@ -533,35 +533,38 @@ export default function ExpensesPage() {
     return () => clearExclusionTimer();
   }, []);
 
-  // ROADMAP §2.10.1 — single-expense "Remover do ciclo" from inside
-  // the CategoryPickerPopover header. Reuses the same §2.10 infra
-  // (POST /api/expenses/exclusions, api.excludeExpenses) and pushes
-  // into the same `exclusionUndo` slot the bulk toggle uses. Closes
-  // the popover immediately so the user sees the row tint + banner
-  // without an extra click.
-  const handleRemoveSingleFromCycle = async (exp) => {
+  // ROADMAP §2.10.1 — symmetric single-expense cycle toggle from the
+  // popover header. Dispatches between `excludeExpenses` and
+  // `includeExpenses` based on the row's current `excluded` flag and
+  // pushes into the same `exclusionUndo` slot the bulk toggle uses.
+  // Closes the popover immediately so the user sees the row tint flip
+  // + banner without an extra click.
+  const handleToggleSingleCycle = async (exp) => {
     if (!exp?._id || exclusionBusy) return;
-    // Defensive: if the row is already excluded the popover should
-    // have hidden the button, but guard anyway.
-    if (exp.excluded === true) {
-      setPickerExpenseId(null);
-      return;
-    }
+    const currentlyExcluded = exp.excluded === true;
+    const direction = currentlyExcluded ? 'included' : 'excluded';
+    const nextExcluded = !currentlyExcluded;
     const ids = [exp._id];
     const prev = expenses;
     setExpenses((rows) =>
-      rows.map((e) => (e._id === exp._id ? { ...e, excluded: true } : e)),
+      rows.map((e) =>
+        e._id === exp._id ? { ...e, excluded: nextExcluded } : e,
+      ),
     );
     setPickerExpenseId(null);
     setExclusionBusy(true);
     try {
-      const res = await api.excludeExpenses(ids);
+      const call = currentlyExcluded
+        ? api.includeExpenses
+        : api.excludeExpenses;
+      const res = await call(ids);
       const affected = res?.affected ?? 1;
       const skipped = res?.skipped ?? 0;
-      const text = `Despesa ${exp.entity} excluída do ciclo.`;
+      const verbPast = currentlyExcluded ? 'reincluída' : 'excluída';
+      const text = `Despesa ${exp.entity} ${verbPast} ${currentlyExcluded ? 'no' : 'do'} ciclo.`;
       setExclusionUndo({
         ids,
-        direction: 'excluded',
+        direction,
         affected,
         skipped,
         text,
@@ -571,7 +574,11 @@ export default function ExpensesPage() {
       setExpenses(prev);
       setToast({
         type: 'error',
-        text: err?.message ?? 'Não foi possível excluir do ciclo.',
+        text:
+          err?.message ??
+          (currentlyExcluded
+            ? 'Não foi possível reincluir no ciclo.'
+            : 'Não foi possível excluir do ciclo.'),
       });
     } finally {
       setExclusionBusy(false);
@@ -881,9 +888,7 @@ export default function ExpensesPage() {
                           onSelect={(newId) =>
                             handleCategorySave(exp._id, newId)
                           }
-                          onRemoveFromCycle={() =>
-                            handleRemoveSingleFromCycle(exp)
-                          }
+                          onToggleCycle={() => handleToggleSingleCycle(exp)}
                           onCancel={() => {
                             if (pickerSaving) return;
                             setPickerExpenseId(null);

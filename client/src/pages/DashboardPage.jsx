@@ -336,41 +336,50 @@ export default function DashboardPage() {
     return () => clearExclusionTimer();
   }, []);
 
-  const handleRemoveSingleFromCycle = async (exp) => {
+  const handleToggleSingleCycle = async (exp) => {
     if (!exp?._id || exclusionBusy) return;
-    if (exp.excluded === true) {
-      setPickerExpenseId(null);
-      return;
-    }
+    const currentlyExcluded = exp.excluded === true;
+    const direction = currentlyExcluded ? 'included' : 'excluded';
+    const nextExcluded = !currentlyExcluded;
     const ids = [exp._id];
     const prev = recentExpenses;
     setRecentExpenses((rows) =>
-      rows.map((e) => (e._id === exp._id ? { ...e, excluded: true } : e)),
+      rows.map((e) =>
+        e._id === exp._id ? { ...e, excluded: nextExcluded } : e,
+      ),
     );
     setPickerExpenseId(null);
     setExclusionBusy(true);
     try {
-      const res = await api.excludeExpenses(ids);
+      const call = currentlyExcluded
+        ? api.includeExpenses
+        : api.excludeExpenses;
+      const res = await call(ids);
       const affected = res?.affected ?? 1;
       const skipped = res?.skipped ?? 0;
-      const text = `Despesa ${exp.entity} excluída do ciclo.`;
+      const verbPast = currentlyExcluded ? 'reincluída' : 'excluída';
+      const text = `Despesa ${exp.entity} ${verbPast} ${currentlyExcluded ? 'no' : 'do'} ciclo.`;
       setExclusionUndo({
         ids,
-        direction: 'excluded',
+        direction,
         affected,
         skipped,
         text,
       });
       scheduleExclusionDismiss();
       // Refresh the KPI cards — `month_total` and `savings_score`
-      // live in `stats` (meta from getExpenses), so the exclusion has
+      // live in `stats` (meta from getExpenses), so the toggle has
       // to round-trip before the numbers on the dashboard reflect it.
       loadDashboard().catch(() => {});
     } catch (err) {
       setRecentExpenses(prev);
       setCategoryToast({
         type: 'error',
-        text: err?.message ?? 'Não foi possível excluir do ciclo.',
+        text:
+          err?.message ??
+          (currentlyExcluded
+            ? 'Não foi possível reincluir no ciclo.'
+            : 'Não foi possível excluir do ciclo.'),
       });
     } finally {
       setExclusionBusy(false);
@@ -754,9 +763,7 @@ export default function DashboardPage() {
                             onSelect={(newId) =>
                               handleCategorySave(exp._id, newId)
                             }
-                            onRemoveFromCycle={() =>
-                              handleRemoveSingleFromCycle(exp)
-                            }
+                            onToggleCycle={() => handleToggleSingleCycle(exp)}
                             onCancel={() => {
                               if (pickerSaving) return;
                               setPickerExpenseId(null);
