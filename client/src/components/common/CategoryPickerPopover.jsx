@@ -180,16 +180,25 @@ export default function CategoryPickerPopover({
   };
 
   // ROADMAP §2.10.1 — liquid-glass skin when the anchor expense is
-  // already excluded. The reduced opacity + backdrop-blur differentiate
-  // the popover from its "normal" state and quietly hint that the
-  // underlying row is out-of-cycle, while every control stays fully
-  // interactive — the blur is purely cosmetic. `bg-white/70` plays well
-  // against the `bg-sand-50` of excluded rows (the tinted background
-  // reads through as a soft warm wash); in the non-excluded path we
-  // keep the solid `bg-white` because there's nothing semantically
-  // different to signal.
+  // already excluded. Calibrated so you can READ through the glass:
+  //   • Gradient bg with ~40-55 % opacity so the table rows behind
+  //     (entity, amount, date) remain legible through the panel.
+  //   • `backdrop-blur-md` (12 px) — enough to soften the text
+  //     behind without dissolving it; stronger blurs hid content
+  //     entirely and sacrificed the whole point of letting you
+  //     peek back to what you're looking at.
+  //   • `backdrop-saturate-150` — bumps colours that DO come through
+  //     so the glass reads as "optical" rather than a faded wash.
+  //   • `border-white/40` + `ring-1 ring-inset ring-white/30` form
+  //     a frosted edge; the inset ring acts as a soft specular
+  //     highlight on the inside lip of the pane.
+  //   • Warm curve-tinted drop shadow keeps the excluded popover
+  //     feeling a touch hotter than its neutral sibling.
+  // All inner controls (search, chip tiles, Sem categoria) keep
+  // their own solid backgrounds so readability inside never competes
+  // with the translucency outside.
   const glassClass = excluded
-    ? 'bg-white/70 backdrop-blur-xl border-white/50 shadow-2xl ring-1 ring-white/40'
+    ? 'bg-gradient-to-br from-white/55 via-white/45 to-curve-50/40 backdrop-blur-md backdrop-saturate-150 border-white/40 ring-1 ring-inset ring-white/30 shadow-[0_20px_40px_-12px_rgba(212,99,63,0.20)]'
     : 'bg-white border-sand-200 shadow-lg';
   return (
     <div
