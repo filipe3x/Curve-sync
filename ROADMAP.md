@@ -452,6 +452,85 @@ Logo, **não se pode adicionar** um campo `excluded_from_cycle` a `Expense`. A s
 
 ---
 
+### 2.10.1 Atalho «Remover do Ciclo» no popover «Alterar categoria»
+
+Follow-up do §2.10. O toggle de exclusão existe hoje **apenas** no action bar multi-select de `/expenses`; o caso de uso mais comum («abri esta despesa para mudar a categoria, mas afinal o que quero é não a contar no ciclo») exige sair do popover, fechar a linha, seleccionar, e clicar noutro botão. Atalho: um mini botão vermelho no header do `CategoryPickerPopover`, à esquerda do `×`, que chama a infra §2.10 para a expense em foco e fecha o popover com o mesmo banner de undo.
+
+#### TODO 1 — Investigação: como é que o Embers apaga uma despesa?
+
+**Objectivo:** decidir se imitamos o `destroy` do Embers ou se reaproveitamos a infra de exclusão da §2.10.
+
+**Achados** (código fonte em `docs/embers-reference/`):
+
+- `controllers/expenses_controller.rb:64-75` — `def destroy` chama `expense.destroy`, **hard delete** Mongoid. A despesa desaparece da colecção. Sem `Mongoid::Paranoia`, sem campo `deleted_at`.
+- `models/expense.rb` — zero suporte para soft-delete. Única forma de «recuperar» é reprocessar o email original (que tem a flag `\Seen` por causa do `imapReader`, mas continua no arquivo).
+- `frontend/services/expense.js:39-45` — existe `destroy(id)` **e** `undestroy(id)`, mas o controller não implementa `undestroy` — o `undestroy` é só usado por Organizations. **Na prática o delete de expense no Embers é irreversível.**
+- A escolha do Embers faz sentido no contexto dele (single-user, feito manualmente, terminal-first). Não faz sentido no Curve Sync: o schema partilhado proíbe DELETE em `expenses` (CLAUDE.md → «MongoDB Collection Access Rules»: «DELETE is still forbidden — Embers owns the destroy path»), e mesmo que não proibisse, apagar a row fazia o próximo sync re-ingerir a mesma despesa porque o email continua no arquivo (`\Seen` não impede o `imap_since` de a devolver na primeira sync após uma reset do `last_sync_at`).
+
+**Opções em cima da mesa:**
+
+| # | Abordagem | Prós | Contras |
+|---|-----------|------|---------|
+| A | Replicar Embers: `DELETE /api/expenses/:id` com hard delete | Familiar | **Proibido por CLAUDE.md**; irreversível; quebra dedup (digest fica órfão, re-ingestão garantida na próxima sync) |
+| B | Soft-delete via nova flag em `Expense` (ex. `deleted_at`) | Reversível | **Proibido** — altera schema de colecção partilhada com Embers |
+| C | Mover a despesa para uma categoria «Excluída» | Reutiliza o único UPDATE permitido | Polui o catálogo de categorias; perde a categoria original (impossível reverter exactamente); tem que ser filtrada manualmente em todos os agregados |
+| D | **Reaproveitar `CurveExpenseExclusion` (§2.10)** | **Infra completa já existe** — modelo, rotas, filtros em stats, auditoria, banner de undo; respeita access rules; zero schema change; reversível; o email fica `\Seen` mas a despesa também pode ser recuperada via «Incluir no ciclo» (o row volta a contar) | Nenhum — é literalmente a semântica que o utilizador pediu |
+
+**Recomendação:** Opção D. A nota «uma expense pode sempre ser recuperada pois temos o arquivo de email com todos os receipts» é verdadeira mas irrelevante — não precisamos do arquivo porque a despesa nunca é apagada, só é marcada como «não contar para o ciclo», e o toggle é reversível em 1 clique.
+
+**Saída deste TODO:** esta secção do ROADMAP + o commit que a introduz. Nenhum código novo; a decisão é «usar §2.10».
+
+#### TODO 2 — UI: mini botão «Remover do Ciclo» no header do `CategoryPickerPopover`
+
+**Scope:** um novo affordance dentro do popover que já existe. Nada de rotas novas, nada de modelos novos, nada de novas acções de audit — tudo reaproveita §2.10.
+
+**Acceptance criteria:**
+
+1. **Popover** (`client/src/components/common/CategoryPickerPopover.jsx`):
+   - Nova prop opcional `onRemoveFromCycle?: () => void`.
+   - Nova prop opcional `excluded?: boolean` (espelho do `expense.excluded` que o parent já tem).
+   - Renderizar um `<button>` no header, à **esquerda** do `×` de fechar, apenas quando:
+     - `onRemoveFromCycle` é truthy,
+     - modo single (`context?.kind !== 'bulk'`),
+     - a expense **não** está já excluída (`excluded !== true`).
+   - Ícone: `CalendarOff` (ou `CalendarX`) do lucide-react, `h-4 w-4`, tom curve-red — ex. `text-curve-500 hover:bg-curve-50 hover:text-curve-700`. Deliberadamente diferente do cinzento do `×` para não se confundir com «fechar».
+   - `title` / `aria-label`: «Remover do ciclo — não conta para Savings Score (reversível)». `title` nativo já chega — não vale a pena montar um Tooltip component só para isto.
+   - `disabled={saving}` — desactiva durante um PUT de categoria in-flight.
+
+2. **Consumidores** (3 páginas):
+   - **`ExpensesPage.jsx`** — o parent passa `onRemoveFromCycle={() => handleRemoveFromCycleSingle(exp)}` + `excluded={exp.excluded}`. O handler faz:
+     1. Optimistic: `exp.excluded = true` na tabela + fecha o popover (`setPickerExpenseId(null)`).
+     2. Chama `api.excludeExpenses([exp._id])`.
+     3. Regista no `exclusionUndo` existente (mesmo shape que o bulk: `{ ids: [exp._id], direction: 'excluded', affected: 1, skipped: 0, text: 'Despesa <entity> excluída do ciclo.' }`) e agenda o auto-dismiss de 6 s via `scheduleExclusionDismiss`.
+     4. Em erro, rollback do optimistic update + erro inline.
+   - **`DashboardPage.jsx`** — exactamente o mesmo handler, adaptado ao estado local (o dashboard hoje tem row tinting mas não tem banner de undo — migrar o `exclusionUndo` + `CategoryEditUndoBanner`-like banner para cá, ou extrair o banner para `client/src/components/common/ExclusionUndoBanner.jsx` partilhado e importá-lo nas duas páginas). Sub-decisão: **extrair o banner** — 5 min de refactor, elimina duplicação agora e quando a §2.10 ganhar mais consumidores.
+   - **`CurveLogsPage.jsx`** — mesmo tratamento. Este popover é aberto a partir dos pills na timeline de logs; exclusão single-row a partir daqui é legítima e útil.
+
+3. **Undo:** o banner existente já tem o comportamento correcto (6 s, botão «Anular», chama o inverso). Nada a mudar — o parent só precisa de empurrar um novo entry.
+
+4. **Auditoria:** `POST /api/expenses/exclusions` já escreve `expense_excluded_from_cycle` com `expense_id + entity` (single-row). Inverso no `DELETE` escreve `expense_included_in_cycle`. **Zero enum changes.**
+
+5. **Não fazemos** nesta secção:
+   - Não mudar categoria ao mesmo tempo — a acção é ortogonal. Se o user quer mudar categoria E excluir, são dois cliques (um no tile, outro no botão). Misturar os dois numa única API call complica o rollback.
+   - Não adicionar o botão em modo bulk — no action bar de `/expenses` já existe «Excluir do ciclo» multi-select. Duplicá-lo dentro do popover bulk seria redundante.
+   - Não esconder o botão quando o user está a editar a categoria via teclado (o `disabled={saving}` já chega).
+
+**Ficheiros tocados (estimativa):**
+- `client/src/components/common/CategoryPickerPopover.jsx` — novas props + botão.
+- `client/src/components/common/ExclusionUndoBanner.jsx` — **novo** (extrair do `ExpensesPage.jsx`).
+- `client/src/pages/ExpensesPage.jsx` — importar banner extraído, adicionar handler single-row, passar props ao popover.
+- `client/src/pages/DashboardPage.jsx` — idem; herda `exclusionUndo` state + banner.
+- `client/src/pages/CurveLogsPage.jsx` — idem.
+
+**Testes:** manual — abrir o popover, clicar no novo botão, verificar que (a) o row tinta + ganha o badge «excluída», (b) o banner aparece com «Anular», (c) clicar «Anular» dentro de 6 s reverte, (d) esperar 6 s faz dismiss silencioso, (e) o Savings Score no dashboard reflecte a exclusão sem reload.
+
+**Referências:**
+- §2.10 acima — toda a infra backend.
+- `client/src/pages/ExpensesPage.jsx:441-532` — `exclusionUndo` state, timer, `handleExclusionToggle`, `handleExclusionUndo` — template exacto para o novo handler single-row.
+- `client/src/components/common/CategoryPickerPopover.jsx:175-201` — header do popover onde o botão entra.
+
+---
+
 ### ~~2.11 🐛 Dashboard stale após «Sincronizar agora» + tween consistente nos KPIs~~ ✅ — MVP
 
 > **Implementado.** Ver commits abaixo. Resumo do que aterrou:
