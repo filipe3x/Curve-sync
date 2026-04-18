@@ -87,10 +87,18 @@
  *                   env to override.
  */
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import Expense from '../src/models/Expense.js';
 import { parseExpenseDate as parseExpenseDateProto } from '../src/services/expenseDate.js';
+
+// Explicit path — `import 'dotenv/config'` would load ./.env relative
+// to the CWD (usually the repo root when invoked as
+// `node server/scripts/...`), which has no .env. Loading
+// ../../.env would still miss the mark because the canonical file is
+// server/.env. Anchoring to import.meta.url makes the script
+// cwd-agnostic.
+dotenv.config({ path: new URL('../.env', import.meta.url) });
 
 const MONGODB_URI =
   process.env.MONGODB_URI || 'mongodb://localhost:27017/embers_db';
