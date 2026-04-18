@@ -2956,7 +2956,8 @@ Duas tabelas recebem o mesmo componente:
 ### 12.2 Anatomia do popover
 
 ```
-┌─ Alterar categoria ──────────────────── [×] ┐
+┌─ Alterar categoria ──────────── [📅↻] [×] ┐
+│  (📅↻ = liquid-glass shell when excluded)   │
 │                                              │
 │   > Procurar...                              │
 │                                              │
@@ -2974,6 +2975,74 @@ Duas tabelas recebem o mesmo componente:
 │          [ Cancelar ]  [ Guardar ]           │
 └──────────────────────────────────────────────┘
 ```
+
+> **Nota § 2.10.1 (cycle-exclusion shortcut — toggle simétrico).**
+>
+> **O botão.** O header ganhou um mini-botão à **esquerda** do `×` de
+> fechar que reflecte o estado `excluded` da despesa:
+>
+> | estado        | glyph (lucide)  | tom              | tooltip                                                            | API call                               |
+> |---------------|-----------------|------------------|--------------------------------------------------------------------|-----------------------------------------|
+> | `excluded: false` | `CalendarOff`   | curve-red-500    | «Remover do ciclo — não conta para Savings Score (reversível)» | `POST /api/expenses/exclusions`        |
+> | `excluded: true`  | `CalendarCheck` | emerald-500      | «Incluir no ciclo — volta a contar para Savings Score»          | `DELETE /api/expenses/exclusions`      |
+>
+> Uma só prop (`onToggleCycle: () => void`); o parent inspecciona o
+> `excluded` da row no momento do click e chama `api.excludeExpenses`
+> ou `api.includeExpenses`. O popover fecha imediatamente e mostra o
+> `<ExclusionUndoBanner>` com 6 s de Anular (mesma infra §2.10). Por
+> design: mostrado **só em modo single** (`context?.kind !== 'bulk'`
+> — o action bar de `/expenses` já tem o equivalente multi-select) e
+> intencionalmente distinto do `×` (glyph + cor) para nunca ler como
+> uma segunda variante de «fechar».
+>
+> **Liquid-glass skin quando `excluded={true}`.** A shell do popover
+> muda de `bg-white` sólido para uma vidraça semi-transparente que
+> deixa ver as linhas da tabela por trás:
+>
+> ```
+> bg-gradient-to-br from-white/55 via-white/45 to-curve-50/40
+> backdrop-blur-md backdrop-saturate-150
+> border-white/40
+> ring-1 ring-inset ring-white/30
+> shadow-[0_20px_40px_-12px_rgba(212,99,63,0.20)]
+> ```
+>
+> Calibrado a 40-55 % de opacidade e `blur-md` (12 px) para o user
+> poder *ler* a despesa através do pane — um blur mais pesado apagava
+> o contexto. O `backdrop-saturate-150` puxa a cor de qualquer chip
+> que apareça por baixo para reforçar o «é vidro». A shadow tintada
+> curve-red dá warmth subtil que casa com a semântica «fora do ciclo».
+> Quando `excluded={false}` a shell volta ao `bg-white` sólido — não
+> há sinal semântico diferente a comunicar.
+>
+> **Porquê mover `opacity-60` do `<tr>` para cada `<td>` excepto a da
+> categoria** (ver `ExpensesPage.jsx`, `DashboardPage.jsx`):
+> `opacity < 1` cria um novo stacking context. O popover está
+> `position: absolute` com `z-30` mas fica *confinado* a esse
+> contexto — as `<tr>`s seguintes pintam por cima e **intersectam
+> os cliques do toggle** (bug da primeira iteração). Aplicando o
+> dim célula a célula, a célula da categoria mantém opacity 1 e o
+> popover fica livre para sobrepor o resto da tabela normalmente.
+>
+> **Props e call sites.** Contracto: `onToggleCycle?: () => void`
+> (opcional — `null` esconde o botão) + `excluded?: boolean`.
+> Consumidores:
+>
+> - `ExpensesPage.jsx` — passa ambos; handler `handleToggleSingleCycle`
+>   faz o optimistic flip e enche o `exclusionUndo` banner.
+> - `DashboardPage.jsx` — idem, e ainda dispara `loadDashboard()` no
+>   sucesso para `month_total` / `savings_score` refrescarem sem
+>   reload.
+> - `CurveLogsPage.jsx` — passa `onToggleCycle` mas **sem** `excluded`
+>   (os logs não carregam a flag live por-row). Consequência: a shell
+>   é sempre sólida, o botão é sempre vermelho (`CalendarOff`), e o
+>   handler chama exclude incondicionalmente. O POST é idempotente
+>   (`affected=0 skipped=1` quando já estava excluída), e o banner
+>   surface essa verdade com «Despesa X já estava excluída do ciclo.»
+>   em vez de mentir. Para reincluir, ir a `/expenses`.
+>
+> Ver `CategoryPickerPopover.jsx` (JSDoc da prop em cima das
+> definições) e ROADMAP §2.10.1 para o histórico da decisão.
 
 - **Positioning.** Floating panel ancorado na célula do chip
   (`position: absolute` com `right-0 top-full mt-2`), largura

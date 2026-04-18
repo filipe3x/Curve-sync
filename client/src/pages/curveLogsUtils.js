@@ -64,6 +64,12 @@ export function describeLog(log) {
     const despesaActions = [
       'expense_category_changed',
       'expense_category_changed_bulk',
+      // ROADMAP §2.10 + §2.10.1 — cycle-exclusion toggle. These
+      // mutate per-expense state (excluded flag) rather than the
+      // catalogue, so the "despesa" badge is the right bucket — same
+      // colour as the sync rows the user can click through to.
+      'expense_excluded_from_cycle',
+      'expense_included_in_cycle',
     ];
     // Dedicated `catalogo` bucket for rows that mutate the category
     // catalogue / personal overrides — create/update/delete of a rule,
@@ -444,6 +450,65 @@ export function describeLog(log) {
           title: method && p
             ? `Acesso admin recusado: ${method} ${p}`
             : 'Acesso admin recusado',
+        };
+      }
+      case 'expense_excluded_from_cycle':
+      case 'expense_included_in_cycle': {
+        // ROADMAP §2.10 + §2.10.1 — cycle-exclusion toggle audit.
+        // The server writes ONE row per POST/DELETE /exclusions call
+        // (not one row per expense_id in the body), so the same
+        // action value carries both the single and bulk branches.
+        // Discriminator: `expense_id` is populated only on single-
+        // row calls (N == 1), bulk rows leave it null and persist
+        // the full `affected_expense_ids` list for the /curve/logs
+        // drill-down expansion (§2.10.1).
+        //
+        // `error_detail` always contains `count=<N>` (N == affected,
+        // after idempotency collapse — duplicates are `skipped`,
+        // not counted). Canonical pt-PT:
+        //   single → "Despesa <entity> excluída do ciclo"
+        //           / "Despesa <entity> reincluída no ciclo"
+        //   bulk   → "<N> despesas excluídas do ciclo"
+        //           / "<N> despesas reincluídas no ciclo"
+        const excluded = log.action === 'expense_excluded_from_cycle';
+        const verb = excluded ? 'excluída' : 'reincluída';
+        const verbPl = excluded ? 'excluídas' : 'reincluídas';
+        const prep = excluded ? 'do' : 'no';
+        // Single-row branch: `expense_id` set AND `count=1`.
+        const countMatch = log.error_detail?.match(/count=(\d+)/);
+        const count = countMatch ? Number(countMatch[1]) : null;
+        const isSingle =
+          log.expense_id != null && (count == null || count <= 1);
+        if (isSingle) {
+          const entity = log.entity ?? '—';
+          return {
+            type: 'despesa',
+            title: `Despesa ${entity} ${verb} ${prep} ciclo`,
+            hideDetail: true,
+          };
+        }
+        // Bulk branch. The drill-down expansion (§2.10.1) reads
+        // `log.affected_expense_ids` — may be empty on very old rows
+        // (pre-Step B), in which case the row just shows the count
+        // without the chevron. The `exclusionBatch` payload tells
+        // CurveLogsPage that this row should render with the same
+        // expandable pattern as the sync batches in groupSyncBatches.
+        const effectiveCount =
+          count ?? (log.affected_expense_ids?.length ?? 0);
+        const ids = Array.isArray(log.affected_expense_ids)
+          ? log.affected_expense_ids
+          : [];
+        const noun = effectiveCount === 1 ? 'despesa' : 'despesas';
+        const verbBulk = effectiveCount === 1 ? verb : verbPl;
+        return {
+          type: 'despesa',
+          title: `${effectiveCount} ${noun} ${verbBulk} ${prep} ciclo`,
+          hideDetail: true,
+          exclusionBatch: {
+            ids,
+            count: effectiveCount,
+            direction: excluded ? 'excluded' : 'included',
+          },
         };
       }
       case 'override_created':

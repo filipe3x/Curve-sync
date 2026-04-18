@@ -22,8 +22,28 @@ import CurveLog from '../models/CurveLog.js';
  *        `expense_category_changed` (§13.3) for the same reason as
  *        `expenseId` — gives the audit view a filter handle that does
  *        not require parsing error_detail.
+ * @param {import('mongoose').Types.ObjectId[]} [opts.affectedExpenseIds]
+ *        Optional list of expense ids touched by a bulk audit event.
+ *        Populated by the `expense_excluded_from_cycle` /
+ *        `expense_included_in_cycle` bulk branches (ROADMAP §2.10.1)
+ *        so /curve/logs can expand the row into a per-expense
+ *        drill-down. Capped at 100 to bound the doc size; beyond
+ *        that the expansion UI gracefully falls back to `count=<N>`.
+ *        Stays empty for single-row audits (those use `expenseId`).
  */
-export function audit({ action, userId, ip, detail, expenseId, entity }) {
+export function audit({
+  action,
+  userId,
+  ip,
+  detail,
+  expenseId,
+  entity,
+  affectedExpenseIds,
+}) {
+  const capped =
+    Array.isArray(affectedExpenseIds) && affectedExpenseIds.length > 0
+      ? affectedExpenseIds.slice(0, 100)
+      : undefined;
   CurveLog.create({
     user_id: userId,
     action,
@@ -32,6 +52,7 @@ export function audit({ action, userId, ip, detail, expenseId, entity }) {
     error_detail: detail ?? null,
     expense_id: expenseId ?? null,
     entity: entity ?? null,
+    ...(capped ? { affected_expense_ids: capped } : {}),
   }).catch((err) => {
     console.error(`Audit log write failed (${action}): ${err.message}`);
   });

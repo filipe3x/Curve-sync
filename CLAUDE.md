@@ -47,6 +47,7 @@ Server env: copy `server/.env.example` to `server/.env` and set `MONGODB_URI`.
 - **`expenses`** — READ + INSERT + UPDATE of **`category_id` only**. All other fields (`entity`, `amount`, `date`, `card`, `digest`, `user_id`, timestamps) remain INSERT-only. DELETE is still forbidden — Embers owns the destroy path. Re-categorization writes go through the single authorized helper `services/expense.js :: reassignCategoryBulk(filter, category_id)`; no other function in the codebase may call `Expense.update*` with a payload that is not `{ $set: { category_id } }`. This relaxation supports both apply-to-all (multi-doc filter) and the single-expense quick-edit popover (`{ _id, user_id }` filter). See `docs/Categories.md` §4.4 and §12 for the full contract.
 - **`curve_configs`** — Full CRUD (owned by this service, per-user IMAP settings)
 - **`curve_category_overrides`** — Full CRUD (owned by this service, per-user category matching rules: pattern + match_type + target category_id). Embers has no Mongoid model for this collection and never reads or writes it. Access is always scoped by `user_id: req.userId` inside handlers — even admins cannot see or mutate another user's overrides. See `docs/Categories.md` §4.3 for the schema and §7.3 for the permissions matrix.
+- **`curve_expense_exclusions`** — Full CRUD (owned by this service, per-user cycle-exclusion toggle: `{ user_id, expense_id }` with a unique compound index so POST is idempotent). Invisible to Embers. The workaround for the «can't DELETE from `expenses`» constraint — marking an expense as excluded keeps the row intact and simply omits it from `month_total` / `weekly_expenses` / Savings Score aggregates. Always scoped by `user_id: req.userId`. See `docs/MONGODB_SCHEMA.md` for the schema and `docs/Categories.md` §12.2 for the canonical description of the `CategoryPickerPopover`'s symmetric in-cycle/out-of-cycle toggle (`CalendarOff` ↔ `CalendarCheck`) + liquid-glass shell when the row is already excluded. Two UI entry points: action-bar bulk toggle on `/expenses` (ROADMAP §2.10) and the header toggle on `/expenses` + `/` + `/curve/logs` (§2.10.1).
 - **`curve_logs`** — INSERT + READ (audit trail, TTL 90 days). Category-management events (create/update/delete categories, create/update/delete overrides, apply-to-all, single-expense quick-edit, bulk batch-move, admin-denied) add 14 new `action` values to the enum — see `docs/Categories.md` §13.2 for the full catalog and `docs/CURVE_LOGS.md` §4 for the contract that both share.
 
 ### Mongoose Compatibility with Embers (Mongoid)
@@ -110,7 +111,8 @@ client/                 # Vite + React + Tailwind frontend
   src/
     components/layout/  # Shell, Sidebar, Icons
     components/common/  # PageHeader, StatCard, EmptyState,
-                        #   CategoryPickerPopover, ConfirmDialog
+                        #   CategoryPickerPopover, CategoryEditUndoBanner,
+                        #   ExclusionUndoBanner, ConfirmDialog
     components/setup/   # Wizard shell — WizardLayout, Screen, CurveSyncLogo
       steps/            # 6 wizard steps: Hero, Email, Trust, DeviceCode,
                         #   PickFolder, Schedule, Success + folderHeuristic
@@ -124,7 +126,8 @@ server/                 # Express backend
   src/
     middleware/         # authenticate, requireAdmin (admin-only route guard)
     models/             # Mongoose: Expense, Category, User (RO), Session,
-                        #   CurveConfig, CurveLog, CategoryOverride
+                        #   CurveConfig, CurveLog, CategoryOverride,
+                        #   CurveExpenseExclusion
     routes/             # auth, expenses, categories, categoryOverrides,
                         #   curve, curveOAuth, autocomplete
     services/

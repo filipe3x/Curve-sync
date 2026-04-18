@@ -3,6 +3,7 @@ import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
+import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
 
@@ -532,6 +533,58 @@ export default function ExpensesPage() {
     return () => clearExclusionTimer();
   }, []);
 
+  // ROADMAP §2.10.1 — symmetric single-expense cycle toggle from the
+  // popover header. Dispatches between `excludeExpenses` and
+  // `includeExpenses` based on the row's current `excluded` flag and
+  // pushes into the same `exclusionUndo` slot the bulk toggle uses.
+  // Closes the popover immediately so the user sees the row tint flip
+  // + banner without an extra click.
+  const handleToggleSingleCycle = async (exp) => {
+    if (!exp?._id || exclusionBusy) return;
+    const currentlyExcluded = exp.excluded === true;
+    const direction = currentlyExcluded ? 'included' : 'excluded';
+    const nextExcluded = !currentlyExcluded;
+    const ids = [exp._id];
+    const prev = expenses;
+    setExpenses((rows) =>
+      rows.map((e) =>
+        e._id === exp._id ? { ...e, excluded: nextExcluded } : e,
+      ),
+    );
+    setPickerExpenseId(null);
+    setExclusionBusy(true);
+    try {
+      const call = currentlyExcluded
+        ? api.includeExpenses
+        : api.excludeExpenses;
+      const res = await call(ids);
+      const affected = res?.affected ?? 1;
+      const skipped = res?.skipped ?? 0;
+      const verbPast = currentlyExcluded ? 'reincluída' : 'excluída';
+      const text = `Despesa ${exp.entity} ${verbPast} ${currentlyExcluded ? 'no' : 'do'} ciclo.`;
+      setExclusionUndo({
+        ids,
+        direction,
+        affected,
+        skipped,
+        text,
+      });
+      scheduleExclusionDismiss();
+    } catch (err) {
+      setExpenses(prev);
+      setToast({
+        type: 'error',
+        text:
+          err?.message ??
+          (currentlyExcluded
+            ? 'Não foi possível reincluir no ciclo.'
+            : 'Não foi possível excluir do ciclo.'),
+      });
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
   const handleSearch = (e) => {
     e.preventDefault();
     setPage(1);
@@ -586,23 +639,14 @@ export default function ExpensesPage() {
       {/* ROADMAP §2.10 — exclusion undo banner. One-at-a-time (not
           per-row like the category edits) because a bulk "excluir 10"
           is semantically one action the user will want to undo as a
-          whole. 6 s window, same as the category undo. */}
-      {exclusionUndo && (
-        <div
-          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-3 text-sm shadow-sm"
-          role="status"
-        >
-          <span className="text-sand-700">{exclusionUndo.text}</span>
-          <button
-            type="button"
-            onClick={handleExclusionUndo}
-            disabled={exclusionBusy}
-            className="rounded-lg px-3 py-1 text-xs font-medium text-curve-700 transition-colors hover:bg-curve-50 disabled:opacity-50"
-          >
-            Anular
-          </button>
-        </div>
-      )}
+          whole. 6 s window, same as the category undo. §2.10.1 also
+          feeds this banner from the single-expense "Remover do ciclo"
+          button inside the popover header. */}
+      <ExclusionUndoBanner
+        entry={exclusionUndo}
+        onUndo={handleExclusionUndo}
+        busy={exclusionBusy}
+      />
 
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">
@@ -762,14 +806,20 @@ export default function ExpensesPage() {
                 // Row tinting priority: selection > excluded > hover.
                 // Selection stays on top because it communicates the
                 // user's current intent, not a persistent attribute
-                // of the row. Excluded rows lose contrast via
-                // `opacity-60` — spec §2.10: «ligeiramente distinta
-                // para destacar a sua exclusão».
+                // of the row. Excluded rows use a sand background +
+                // per-cell dimming — `opacity` on the <tr> itself
+                // would create a stacking context and trap the
+                // CategoryPickerPopover behind the rows below it,
+                // capturing clicks on the table instead of the toggle
+                // button (bug from §2.10.1 first pass). The category
+                // cell deliberately skips the dim so the chip + the
+                // popover it anchors stay fully clickable.
                 const rowClass = rowSelected
                   ? 'bg-curve-50'
                   : rowExcluded
-                    ? 'bg-sand-50 opacity-60 hover:opacity-75'
+                    ? 'bg-sand-50 hover:bg-sand-100'
                     : 'hover:bg-sand-50';
+                const dimCell = rowExcluded ? 'opacity-60' : '';
                 return (
                   <tr
                     key={exp._id ?? i}
@@ -780,7 +830,7 @@ export default function ExpensesPage() {
                     }
                     className={`border-b border-sand-50 transition-colors duration-150 ${rowClass}`}
                   >
-                    <td className="px-5 py-3">
+                    <td className={`px-5 py-3 ${dimCell}`}>
                       <input
                         type="checkbox"
                         aria-label={`Seleccionar ${exp.entity}`}
@@ -797,13 +847,13 @@ export default function ExpensesPage() {
                         className="h-4 w-4 cursor-pointer rounded border-sand-300 text-curve-600 focus:ring-curve-500"
                       />
                     </td>
-                    <td className="px-5 py-3 font-medium text-sand-900">
+                    <td className={`px-5 py-3 font-medium text-sand-900 ${dimCell}`}>
                       {exp.entity}
                     </td>
-                    <td className="px-5 py-3 font-semibold text-curve-700">
+                    <td className={`px-5 py-3 font-semibold text-curve-700 ${dimCell}`}>
                       €{Number(exp.amount).toFixed(2)}
                     </td>
-                    <td className="px-5 py-3 text-sand-500">
+                    <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>
                       <div className="flex items-center gap-2">
                         <span>{exp.date}</span>
                         {rowExcluded && (
@@ -813,7 +863,7 @@ export default function ExpensesPage() {
                         )}
                       </div>
                     </td>
-                    <td className="px-5 py-3 text-sand-500">{exp.card}</td>
+                    <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>{exp.card}</td>
                     <td className="relative px-5 py-3">
                       <button
                         type="button"
@@ -840,9 +890,11 @@ export default function ExpensesPage() {
                           categories={categories}
                           iconByCategory={iconByCategory}
                           saving={pickerSaving}
+                          excluded={exp.excluded === true}
                           onSelect={(newId) =>
                             handleCategorySave(exp._id, newId)
                           }
+                          onToggleCycle={() => handleToggleSingleCycle(exp)}
                           onCancel={() => {
                             if (pickerSaving) return;
                             setPickerExpenseId(null);

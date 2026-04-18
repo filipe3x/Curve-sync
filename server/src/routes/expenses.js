@@ -89,9 +89,51 @@ router.get('/', async (req, res) => {
       // as "don't count this cycle"; 'included' = only rows they
       // haven't. Default 'all' mirrors pre-§2.10 behaviour.
       exclude_filter,
+      // ROADMAP §2.10.1 — CSV of ObjectIds for the /curve/logs
+      // drill-down of bulk exclusion rows. When present, the
+      // response is scoped to exactly these ids (still enforcing
+      // user_id) and every other filter (category, card, date) is
+      // ignored — the consumer is a targeted resolver, not a search.
+      // Cap 200 ids per call to keep the $in list small; beyond that
+      // the caller should paginate client-side.
+      ids,
     } = req.query;
     const safeSort = sanitiseSort(sort);
     const filter = { user_id: req.userId };
+    // Early exit: targeted id lookup short-circuits every other
+    // filter branch. We still apply user_id scope for safety.
+    if (typeof ids === 'string' && ids.trim() !== '') {
+      const parsed = ids
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => mongoose.isValidObjectId(s))
+        .slice(0, 200);
+      if (parsed.length === 0) {
+        return res.json({ data: [], meta: { total: 0 } });
+      }
+      const rows = await Expense.find({
+        _id: { $in: parsed },
+        user_id: req.userId,
+      })
+        .lean();
+      // Annotate with excluded flag so the drill-down row can show
+      // the current live state (may have drifted since the audit row
+      // was written — e.g. a bulk exclusion partially reverted).
+      const exclusions = await CurveExpenseExclusion.find({
+        user_id: req.userId,
+        expense_id: { $in: rows.map((r) => r._id) },
+      })
+        .select('expense_id')
+        .lean();
+      const excludedSet = new Set(
+        exclusions.map((e) => String(e.expense_id)),
+      );
+      const data = rows.map((r) => ({
+        ...r,
+        excluded: excludedSet.has(String(r._id)),
+      }));
+      return res.json({ data, meta: { total: data.length } });
+    }
     if (search) {
       const regex = new RegExp(escapeRegex(search), 'i');
       filter.$or = [{ entity: regex }, { card: regex }];
@@ -620,8 +662,11 @@ router.post('/exclusions', async (req, res) => {
     const skipped = parsed.unique.length - affected;
 
     // Single-row branch carries expense_id + entity for the
-    // /curve/logs renderer. Bulk branch leaves them null and relies
-    // on `count=N` in detail.
+    // /curve/logs renderer. Bulk branch leaves them null, persists
+    // the full ownedIds into `affected_expense_ids` so the /curve/logs
+    // drill-down (§2.10.1) can resolve them back to expense rows,
+    // and keeps `count=N` in detail for read-paths that only look at
+    // the legacy string.
     const single = ownedIds.length === 1 ? owned[0] : null;
     audit({
       action: 'expense_excluded_from_cycle',
@@ -630,6 +675,7 @@ router.post('/exclusions', async (req, res) => {
       detail: `count=${affected}`,
       expenseId: single?._id,
       entity: single?.entity,
+      affectedExpenseIds: ownedIds.length > 1 ? ownedIds : undefined,
     });
 
     res.json({ affected, skipped });
@@ -670,6 +716,7 @@ router.delete('/exclusions', async (req, res) => {
       detail: `count=${affected}`,
       expenseId: single?._id,
       entity: single?.entity,
+      affectedExpenseIds: ownedIds.length > 1 ? ownedIds : undefined,
     });
 
     res.json({ affected, skipped });

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { CalendarOff, CalendarCheck } from 'lucide-react';
 import { MagnifyingGlassIcon } from '../layout/Icons';
 import { CategoryIcon } from './CategoryIcon';
 
@@ -79,6 +80,21 @@ import { CategoryIcon } from './CategoryIcon';
  *     loaded icons yet still render cleanly. The map is pulled from
  *     `GET /api/category-icons` by the parent page (ExpensesPage /
  *     DashboardPage) and passed in to avoid a per-popover round-trip.
+ *   @param {Function} [onToggleCycle]
+ *     Single-mode only. When provided, renders a mini toggle button to
+ *     the left of the × close in the header (ROADMAP §2.10.1). The
+ *     button is symmetric:
+ *       - `excluded === false` → curve-red `CalendarOff`, tooltip
+ *         «Remover do ciclo — não conta para Savings Score (reversível)»
+ *       - `excluded === true`  → emerald `CalendarCheck`, tooltip
+ *         «Incluir no ciclo — volta a contar para Savings Score»
+ *     Click fires `onToggleCycle()`; the parent inspects the current
+ *     `excluded` flag and calls either `api.excludeExpenses` or
+ *     `api.includeExpenses`, then surfaces `<ExclusionUndoBanner>`.
+ *     Hidden in bulk mode (the action bar already has the bulk toggle).
+ *   @param {boolean} [excluded]
+ *     Mirror of `expense.excluded`. Flips the toggle's icon, colour
+ *     and tooltip so the popover never advertises a no-op.
  */
 export default function CategoryPickerPopover({
   expense,
@@ -88,6 +104,8 @@ export default function CategoryPickerPopover({
   onCancel,
   saving = false,
   iconByCategory = null,
+  onToggleCycle = null,
+  excluded = false,
 }) {
   const panelRef = useRef(null);
   const searchRef = useRef(null);
@@ -161,12 +179,33 @@ export default function CategoryPickerPopover({
     onSelect?.(id);
   };
 
+  // ROADMAP §2.10.1 — liquid-glass skin when the anchor expense is
+  // already excluded. Calibrated so you can READ through the glass:
+  //   • Gradient bg with ~40-55 % opacity so the table rows behind
+  //     (entity, amount, date) remain legible through the panel.
+  //   • `backdrop-blur-md` (12 px) — enough to soften the text
+  //     behind without dissolving it; stronger blurs hid content
+  //     entirely and sacrificed the whole point of letting you
+  //     peek back to what you're looking at.
+  //   • `backdrop-saturate-150` — bumps colours that DO come through
+  //     so the glass reads as "optical" rather than a faded wash.
+  //   • `border-white/40` + `ring-1 ring-inset ring-white/30` form
+  //     a frosted edge; the inset ring acts as a soft specular
+  //     highlight on the inside lip of the pane.
+  //   • Warm curve-tinted drop shadow keeps the excluded popover
+  //     feeling a touch hotter than its neutral sibling.
+  // All inner controls (search, chip tiles, Sem categoria) keep
+  // their own solid backgrounds so readability inside never competes
+  // with the translucency outside.
+  const glassClass = excluded
+    ? 'bg-gradient-to-br from-white/55 via-white/45 to-curve-50/40 backdrop-blur-md backdrop-saturate-150 border-white/40 ring-1 ring-inset ring-white/30 shadow-[0_20px_40px_-12px_rgba(212,99,63,0.20)]'
+    : 'bg-white border-sand-200 shadow-lg';
   return (
     <div
       ref={panelRef}
       role="dialog"
       aria-label="Alterar categoria"
-      className="absolute right-0 top-full z-30 mt-2 w-80 rounded-2xl border border-sand-200 bg-white p-4 shadow-lg animate-fade-in"
+      className={`absolute right-0 top-full z-30 mt-2 w-80 rounded-2xl border p-4 animate-fade-in ${glassClass}`}
       // Keep clicks inside the popover from bubbling up to the table
       // row — the row's hover state should not flicker while the user
       // navigates inside the picker.
@@ -176,28 +215,66 @@ export default function CategoryPickerPopover({
         <h3 className="text-sm font-semibold text-sand-900">
           {title}
         </h3>
-        <button
-          type="button"
-          aria-label="Fechar"
-          onClick={onCancel}
-          disabled={saving}
-          className="rounded-full p-1 text-sand-400 transition-colors hover:bg-sand-100 hover:text-sand-700 disabled:opacity-40"
-        >
-          {/* inline × — lighter than pulling heroicons for one glyph */}
-          <svg
-            className="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
+        <div className="flex items-center gap-1">
+          {/* ROADMAP §2.10.1 — symmetric cycle toggle. One button,
+              two faces: curve-red CalendarOff for "remover", emerald
+              CalendarCheck for "incluir". The parent owns which API
+              to call (POST vs DELETE /exclusions) based on the same
+              `excluded` flag we use here to pick the icon. Kept
+              distinct from the × close (icon + colour) so it never
+              reads as a second dismiss. Hidden in bulk mode — the
+              /expenses action bar already has the multi-select
+              equivalent. */}
+          {onToggleCycle && !isBulk && (
+            <button
+              type="button"
+              aria-label={excluded ? 'Incluir no ciclo' : 'Remover do ciclo'}
+              title={
+                excluded
+                  ? 'Incluir no ciclo — volta a contar para Savings Score'
+                  : 'Remover do ciclo — não conta para Savings Score (reversível)'
+              }
+              onClick={() => {
+                if (saving) return;
+                onToggleCycle();
+              }}
+              disabled={saving}
+              className={`rounded-full p-1 transition-colors disabled:opacity-40 ${
+                excluded
+                  ? 'text-emerald-500 hover:bg-emerald-50 hover:text-emerald-700'
+                  : 'text-curve-500 hover:bg-curve-50 hover:text-curve-700'
+              }`}
+            >
+              {excluded ? (
+                <CalendarCheck className="h-4 w-4" strokeWidth={2} />
+              ) : (
+                <CalendarOff className="h-4 w-4" strokeWidth={2} />
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Fechar"
+            onClick={onCancel}
+            disabled={saving}
+            className="rounded-full p-1 text-sand-400 transition-colors hover:bg-sand-100 hover:text-sand-700 disabled:opacity-40"
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M6 18 18 6M6 6l12 12"
-            />
-          </svg>
-        </button>
+            {/* inline × — lighter than pulling heroicons for one glyph */}
+            <svg
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M6 18 18 6M6 6l12 12"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Search */}

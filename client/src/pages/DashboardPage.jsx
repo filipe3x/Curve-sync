@@ -6,6 +6,7 @@ import AnimatedKPI from '../components/common/AnimatedKPI';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
+import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
 import { formatExpenseDate, formatAbsoluteDate } from '../utils/relativeDate';
@@ -111,6 +112,12 @@ export default function DashboardPage() {
   // ExpensesPage state so /expenses and / share a consistent feel.
   const [categoryEdits, setCategoryEdits] = useState([]);
   const editTimersRef = useRef(new Map());
+  // ROADMAP §2.10.1 — single-expense "Remover do ciclo" from the
+  // popover header. One-at-a-time (not per-row) so the user can
+  // Anular as a whole; same shape + 6 s window as /expenses.
+  const [exclusionUndo, setExclusionUndo] = useState(null);
+  const exclusionUndoTimerRef = useRef(null);
+  const [exclusionBusy, setExclusionBusy] = useState(false);
   // Short-lived inline message for the sync button — success summary
   // or non-banner error. The re-auth banner handles OAuth breakage;
   // this covers everything else (parse errors, IMAP folder gone, etc.)
@@ -306,6 +313,109 @@ export default function DashboardPage() {
         text: err?.message ?? 'Não foi possível anular a alteração.',
       });
       scheduleEditDismiss(entry.id);
+    }
+  };
+
+  // ─── Exclusion banner plumbing (§2.10.1) ──────────────────────
+  // Same timer-ref pattern as the category undo, but a single slot
+  // because the banner is one-at-a-time.
+  const clearExclusionTimer = () => {
+    if (exclusionUndoTimerRef.current) {
+      clearTimeout(exclusionUndoTimerRef.current);
+      exclusionUndoTimerRef.current = null;
+    }
+  };
+  const scheduleExclusionDismiss = () => {
+    clearExclusionTimer();
+    exclusionUndoTimerRef.current = setTimeout(() => {
+      setExclusionUndo(null);
+      exclusionUndoTimerRef.current = null;
+    }, UNDO_WINDOW_MS);
+  };
+  useEffect(() => {
+    return () => clearExclusionTimer();
+  }, []);
+
+  const handleToggleSingleCycle = async (exp) => {
+    if (!exp?._id || exclusionBusy) return;
+    const currentlyExcluded = exp.excluded === true;
+    const direction = currentlyExcluded ? 'included' : 'excluded';
+    const nextExcluded = !currentlyExcluded;
+    const ids = [exp._id];
+    const prev = recentExpenses;
+    setRecentExpenses((rows) =>
+      rows.map((e) =>
+        e._id === exp._id ? { ...e, excluded: nextExcluded } : e,
+      ),
+    );
+    setPickerExpenseId(null);
+    setExclusionBusy(true);
+    try {
+      const call = currentlyExcluded
+        ? api.includeExpenses
+        : api.excludeExpenses;
+      const res = await call(ids);
+      const affected = res?.affected ?? 1;
+      const skipped = res?.skipped ?? 0;
+      const verbPast = currentlyExcluded ? 'reincluída' : 'excluída';
+      const text = `Despesa ${exp.entity} ${verbPast} ${currentlyExcluded ? 'no' : 'do'} ciclo.`;
+      setExclusionUndo({
+        ids,
+        direction,
+        affected,
+        skipped,
+        text,
+      });
+      scheduleExclusionDismiss();
+      // Refresh the KPI cards — `month_total` and `savings_score`
+      // live in `stats` (meta from getExpenses), so the toggle has
+      // to round-trip before the numbers on the dashboard reflect it.
+      loadDashboard().catch(() => {});
+    } catch (err) {
+      setRecentExpenses(prev);
+      setCategoryToast({
+        type: 'error',
+        text:
+          err?.message ??
+          (currentlyExcluded
+            ? 'Não foi possível reincluir no ciclo.'
+            : 'Não foi possível excluir do ciclo.'),
+      });
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
+  const handleExclusionUndo = async () => {
+    if (!exclusionUndo || exclusionBusy) return;
+    clearExclusionTimer();
+    const { ids, direction } = exclusionUndo;
+    const prev = recentExpenses;
+    const revertedExcluded = direction === 'included';
+    setRecentExpenses((rows) =>
+      rows.map((e) =>
+        ids.includes(e._id) ? { ...e, excluded: revertedExcluded } : e,
+      ),
+    );
+    setExclusionBusy(true);
+    try {
+      const call =
+        direction === 'excluded' ? api.includeExpenses : api.excludeExpenses;
+      await call(ids);
+      setExclusionUndo(null);
+      // Refresh the KPI cards + uncategorised count — the exclusion
+      // flipped back, so the month total / savings score need to
+      // pick up the restored expense without a page reload.
+      loadDashboard().catch(() => {});
+    } catch (err) {
+      setRecentExpenses(prev);
+      setCategoryToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível anular.',
+      });
+      scheduleExclusionDismiss();
+    } finally {
+      setExclusionBusy(false);
     }
   };
 
@@ -548,6 +658,15 @@ export default function DashboardPage() {
           onUndo={handleUndoCategoryEdit}
         />
 
+        {/* ROADMAP §2.10.1 — "Remover do ciclo" undo banner. Fed by
+            the mini button in the CategoryPickerPopover header on the
+            "Despesas recentes" table below. */}
+        <ExclusionUndoBanner
+          entry={exclusionUndo}
+          onUndo={handleExclusionUndo}
+          busy={exclusionBusy}
+        />
+
         {error && (
           <p className="mb-4 text-sm text-curve-600">{error}</p>
         )}
@@ -584,6 +703,13 @@ export default function DashboardPage() {
                 {recentExpenses.map((exp, i) => {
                   const pickerOpen = pickerExpenseId === exp._id;
                   const rowExcluded = exp.excluded === true;
+                  // Per-cell dim instead of `opacity-*` on the <tr>
+                  // — the row-level opacity creates a stacking context
+                  // that trapped the CategoryPickerPopover and stole
+                  // clicks on the cycle-toggle button (§2.10.1 bug).
+                  // The category cell keeps full opacity so the chip
+                  // and its popover stay fully interactive.
+                  const dimCell = rowExcluded ? 'opacity-60' : '';
                   return (
                     <tr
                       key={exp._id ?? i}
@@ -594,19 +720,19 @@ export default function DashboardPage() {
                       }
                       className={`border-b border-sand-50 transition-colors duration-150 ${
                         rowExcluded
-                          ? 'bg-sand-50 opacity-60 hover:opacity-75'
+                          ? 'bg-sand-50 hover:bg-sand-100'
                           : 'hover:bg-sand-50'
                       }`}
                       style={{ animationDelay: `${i * 60}ms` }}
                     >
-                      <td className="px-5 py-3 font-medium text-sand-900">
+                      <td className={`px-5 py-3 font-medium text-sand-900 ${dimCell}`}>
                         {exp.entity}
                       </td>
-                      <td className="px-5 py-3 text-curve-700 font-semibold">
+                      <td className={`px-5 py-3 text-curve-700 font-semibold ${dimCell}`}>
                         €{Number(exp.amount).toFixed(2)}
                       </td>
                       <td
-                        className="px-5 py-3 text-sand-500"
+                        className={`px-5 py-3 text-sand-500 ${dimCell}`}
                         title={formatAbsoluteDate(exp.date)}
                       >
                         <div className="flex items-center gap-2">
@@ -618,7 +744,7 @@ export default function DashboardPage() {
                           )}
                         </div>
                       </td>
-                      <td className="px-5 py-3 text-sand-500">{exp.card}</td>
+                      <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>{exp.card}</td>
                       <td className="relative px-5 py-3">
                         <button
                           type="button"
@@ -640,9 +766,11 @@ export default function DashboardPage() {
                             categories={categories}
                             iconByCategory={iconByCategory}
                             saving={pickerSaving}
+                            excluded={exp.excluded === true}
                             onSelect={(newId) =>
                               handleCategorySave(exp._id, newId)
                             }
+                            onToggleCycle={() => handleToggleSingleCycle(exp)}
                             onCancel={() => {
                               if (pickerSaving) return;
                               setPickerExpenseId(null);
