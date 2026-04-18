@@ -2956,7 +2956,7 @@ Duas tabelas recebem o mesmo componente:
 ### 12.2 Anatomia do popover
 
 ```
-┌─ Alterar categoria ──────────────────── [×] ┐
+┌─ Alterar categoria ──────────── [📅✕] [×] ┐
 │                                              │
 │   > Procurar...                              │
 │                                              │
@@ -2974,6 +2974,18 @@ Duas tabelas recebem o mesmo componente:
 │          [ Cancelar ]  [ Guardar ]           │
 └──────────────────────────────────────────────┘
 ```
+
+> **Nota § 2.10.1 (cycle-exclusion shortcut).** O header ganhou um
+> mini-botão `CalendarOff` (lucide, tom curve-red — o `[📅✕]` no
+> esquema acima) à **esquerda** do `×` de fechar. Mostrado só em modo
+> single (`context` ausente) e quando a despesa ainda não está
+> excluída. Tooltip: «Remover do ciclo — não conta para Savings Score
+> (reversível)». Click dispara `onRemoveFromCycle()`, o parent chama
+> `api.excludeExpenses([exp._id])`, fecha o popover, e mostra o
+> `<ExclusionUndoBanner>` com 6 s de Anular. O botão é intencionalmente
+> diferente do `×` (cor + glyph) para não se confundir com «fechar». Ver
+> ROADMAP §2.10.1 e as props `onRemoveFromCycle` + `excluded` em
+> `client/src/components/common/CategoryPickerPopover.jsx`.
 
 - **Positioning.** Floating panel ancorado na célula do chip
   (`position: absolute` com `right-0 top-full mt-2`), largura

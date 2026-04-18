@@ -208,6 +208,40 @@ const CurveLogSchema = new mongoose.Schema({
 CurveLogSchema.index({ created_at: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
 ```
 
+### Collection: `curve_expense_exclusions`
+
+Flag per-user que marca uma despesa como «nao contar para o ciclo /
+Savings Score» (ROADMAP §2.10). Schema de `expenses` fica intocado —
+o DELETE continua proibido por CLAUDE.md → Access Rules; a exclusao
+vive out-of-band neste collection dedicado, exactamente como o
+`curve_category_overrides`.
+
+```javascript
+const CurveExpenseExclusionSchema = new mongoose.Schema({
+  user_id:    { type: mongoose.Schema.Types.ObjectId, ref: 'User',    required: true },
+  expense_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Expense', required: true },
+  note:       { type: String, trim: true, maxlength: 200 },  // opcional, nao exposto na UI MVP
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
+  collection: 'curve_expense_exclusions'
+});
+
+// Unique compound — idempotencia do POST /api/expenses/exclusions.
+// Duplicados silenciosos via upsert (`skipped` no response).
+CurveExpenseExclusionSchema.index({ user_id: 1, expense_id: 1 }, { unique: true });
+
+// Hot query do `computeDashboardStats` — carrega todas as exclusoes
+// do user por fetch.
+CurveExpenseExclusionSchema.index({ user_id: 1 });
+```
+
+- **Endpoints:** `POST /api/expenses/exclusions` + `DELETE /api/expenses/exclusions`, body `{ expense_ids: [...] }`, cap 500. Resposta: `{ affected, skipped }`.
+- **Ownership:** todas as queries filtram por `user_id: req.userId` primeiro (admins inclusive). Regra «personal is sacred», igual ao `curve_category_overrides`.
+- **Integracao com stats:** `server/src/services/expenseStats.js :: computeDashboardStats` carrega o set de `expense_id`s excluidos em paralelo e filtra-os antes de calcular `month_total` + `weekly_expenses` (alimento do Savings Score).
+- **Scope temporal:** global, nao por-ciclo. Excluir uma despesa hoje mantem-na excluida em qualquer ciclo futuro ate ser explicitamente «reincluida» via `DELETE`.
+- **UI entry points:** action bar bulk em `/expenses` (§2.10) + mini-botao `CalendarOff` no header do `CategoryPickerPopover` (§2.10.1 — presente em `/expenses`, `/` e `/curve/logs`).
+- **Auditoria:** cada toggle escreve `curve_logs` com `action: 'expense_excluded_from_cycle'` (POST) ou `'expense_included_in_cycle'` (DELETE). Single-row inclui `expense_id + entity`; bulk inclui so `detail = "count=<N>"`. Ver `docs/CURVE_LOGS.md` §4.
+
 ---
 
 ## Mapa de Relacoes entre Collections

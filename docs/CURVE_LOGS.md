@@ -127,6 +127,20 @@ status: action.includes('failed') || action === 'session_expired' ? 'error' : 'o
 | 20 | `oauth_cancelled` | `routes/curveOAuth.js:151` | `ok` | yes | — | `"Autorização cancelada"` |
 | 21 | `oauth_token_refreshed` | `services/oauthManager.js:191` | `ok` | **no** | `"provider=… accountId=… email=…"` | `"Token Microsoft renovado automaticamente"` |
 | 22 | `first_sync_completed` | `services/syncOrchestrator.js:542` | `ok` | **no** | counts | `"Primeira sincronização concluída"` |
+| 36 | `expense_excluded_from_cycle` | `routes/expenses.js` (POST `/exclusions`) — fired by the `/expenses` action-bar bulk toggle (§2.10) AND by the mini-button in the `CategoryPickerPopover` header on `/expenses`, `/`, `/curve/logs` (§2.10.1) | `ok` | yes | `"count=<N>"` (bulk) · single-row populates `expense_id + entity` and omits the `count` key | `"Despesa <entity> excluída do ciclo"` (single) · `"<N> despesas excluídas do ciclo"` (bulk) |
+| 37 | `expense_included_in_cycle` | `routes/expenses.js` (DELETE `/exclusions`) — inverse of #36, fired by Anular on `<ExclusionUndoBanner>` or by the action-bar toggle when the selection is fully excluded | `ok` | yes | same shape as #36 | `"Despesa <entity> reincluída no ciclo"` (single) · `"<N> despesas reincluídas no ciclo"` (bulk) |
+
+> **Events #36-37** are the cycle-exclusion toggle (ROADMAP §2.10 + §2.10.1).
+> They live on `curve_expense_exclusions` (see `docs/MONGODB_SCHEMA.md`) —
+> a Curve-Sync-owned collection, so no schema change on `expenses`. The
+> single-row-vs-bulk distinction exists because the POST/DELETE endpoints
+> accept `{ expense_ids: [...] }` of arbitrary cardinality and the audit
+> row is written **once per call** (not once per id): a bulk "excluir 10"
+> is one `expense_excluded_from_cycle` row with `error_detail = "count=10"`
+> and `expense_id = null`; a single-row click from the popover header is
+> one row with `expense_id + entity` populated and no `count` key — the
+> renderer in `curveLogsUtils.js` discriminates on whether `expense_id`
+> is set to pick the right canonical message.
 
 > **Category management events (#23-35) live in [`docs/Categories.md §13.2`](./Categories.md#132-audit-trail-catálogo--regras--despesas).** That document is
 > the single source of truth for every catalogue / overrides / quick-edit
