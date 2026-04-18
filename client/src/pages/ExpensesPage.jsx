@@ -88,7 +88,7 @@ export default function ExpensesPage() {
         page,
         limit: PER_PAGE,
         search: effectiveSearch,
-        sort: '-date',
+        sort: '-date_at',
       });
       setExpenses(res.data ?? []);
       setTotal(res.meta?.total ?? 0);
@@ -185,7 +185,7 @@ export default function ExpensesPage() {
     try {
       const res = await api.getExpenseIds({
         search: appliedSearch,
-        sort: '-date',
+        sort: '-date_at',
       });
       setSelectedIds(new Set(res.ids ?? []));
       setLastAnchorId(null);

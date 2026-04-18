@@ -23,12 +23,17 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Allowlist of sortable fields. Anything else falls back to `-date`
-// (default). This prevents a caller from sorting on an indexed field
-// they shouldn't see (e.g. `user_id` would change result ordering but
-// leak nothing since the user filter is applied first; still, tight is
-// better than loose).
+// Allowlist of sortable fields. Anything else falls back to
+// `-date_at` (default). `date` (the raw string) is kept in the
+// allowlist for retro-compat with any client that hasn't migrated
+// yet; it will be removed one or two sprints from now once the
+// dashboards, the /expenses page, and the /categories detail panel
+// are all confirmed to be sending `-date_at`. Sorting on `date`
+// remains broken (lexical on day-first strings + mixed BSON types,
+// see ROADMAP §2.x investigation + scripts/analyze-expense-dates.js);
+// leaving it is an explicit retro-compat choice, not an endorsement.
 const ALLOWED_SORT_FIELDS = new Set([
+  'date_at',
   'date',
   'amount',
   'entity',
@@ -37,10 +42,10 @@ const ALLOWED_SORT_FIELDS = new Set([
 ]);
 
 function sanitiseSort(raw) {
-  if (!raw || typeof raw !== 'string') return '-date';
+  if (!raw || typeof raw !== 'string') return '-date_at';
   const desc = raw.startsWith('-');
   const field = desc ? raw.slice(1) : raw;
-  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date_at';
   return desc ? `-${field}` : field;
 }
 
