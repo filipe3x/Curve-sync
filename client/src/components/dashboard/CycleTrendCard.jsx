@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Bar,
   CartesianGrid,
@@ -230,6 +230,42 @@ function CycleTooltip({ active, payload }) {
 const STORAGE_KEY = 'cycle-trend-window';
 const VALID_SIZES = [6, 12, 24];
 
+// Tailwind's `sm` breakpoint is 640 px, so "mobile" for our purposes
+// is anything below that. At < 640 px the card has ~327 px of plot
+// area (24 px padding × 2 for the card, 48 px for the Y-axis), which
+// fits 6 bars comfortably and 12 bars crowded — 24 bars collapse into
+// 11-px slivers that can't carry a label, so we cap rendering and
+// hide the 24m option entirely on narrow viewports.
+const MOBILE_QUERY = '(max-width: 639px)';
+const MOBILE_MAX_BARS = 12;
+
+// Minimal media-query hook. Lives here (not in hooks/) because nothing
+// else in the app needs it yet — promote to a shared hook the first
+// time a second consumer appears. SSR-safe via the `matchMedia`
+// optional-chain, even though this project is CSR-only (belt and
+// braces for the eventual Vite SSR migration or component-test
+// environment).
+function useMediaQuery(query) {
+  const getMatches = () => {
+    const mql = globalThis.matchMedia?.(query);
+    return mql ? mql.matches : false;
+  };
+  const [matches, setMatches] = useState(getMatches);
+  useEffect(() => {
+    const mql = globalThis.matchMedia?.(query);
+    if (!mql) return undefined;
+    const onChange = (event) => setMatches(event.matches);
+    // `addEventListener('change', ...)` is supported on every browser
+    // we care about (Safari 14+, Chrome 67+). The older
+    // `addListener`/`removeListener` pair is not wired here — if we
+    // ever need to support pre-2020 Safari, swap it in.
+    mql.addEventListener('change', onChange);
+    setMatches(mql.matches); // sync if the query changed between
+    return () => mql.removeEventListener('change', onChange);
+  }, [query]);
+  return matches;
+}
+
 function readStoredSize() {
   try {
     const raw = globalThis.localStorage?.getItem(STORAGE_KEY);
@@ -251,33 +287,45 @@ function writeStoredSize(size) {
 
 export default function CycleTrendCard({ history }) {
   const navigate = useNavigate();
+  const isMobile = useMediaQuery(MOBILE_QUERY);
 
   const allCycles = history?.cycles ?? [];
   const available = allCycles.length;
 
   // Initial window resolution, in order of precedence:
   //   1. User's explicit persisted preference (localStorage).
-  //   2. Data-size heuristic — ≤ 6 cycles → 6m, otherwise 12m.
+  //   2. Viewport-aware heuristic:
+  //      - Mobile  → always 6m, regardless of data volume. 12 bars at
+  //        375 px is already crowded; respecting desktop's "12m when
+  //        history > 6" would crush the chart on a phone.
+  //      - Desktop → ≤ 6 cycles → 6m, otherwise 12m.
   // The persisted value may be *larger* than `available` (user saved
-  // 24m, then lost most of their data). That's fine: `effectiveSize`
-  // below caps to what exists on every render, so the chart always
+  // 24m, then lost most of their data) or than what the viewport can
+  // render (saved 24m on desktop, opened on mobile). `effectiveSize`
+  // below clamps both cases on every render, so the chart always
   // paints the right number of bars. `size` is preserved verbatim so
-  // that when the history grows back above 6 the user's preference
-  // resurfaces automatically instead of being clobbered to 12.
+  // that when history grows back or the user rotates to landscape
+  // their 24m preference resurfaces automatically.
   const [size, setSize] = useState(() => {
     const stored = readStoredSize();
     if (stored != null) return stored;
+    if (isMobile) return 6;
     return available <= 6 ? 6 : 12;
   });
 
   // Size may drift when the parent re-renders with a longer/shorter
-  // history. Re-derive what's actually renderable without mutating
-  // state unless the user explicitly picks something out of range.
+  // history or when the viewport rotates. Re-derive what's actually
+  // renderable without mutating state unless the user explicitly
+  // picks something out of range.
   const effectiveSize = useMemo(() => {
     if (available === 0) return 0;
     if (available <= 6) return Math.min(6, available);
-    return Math.min(size, available);
-  }, [available, size]);
+    // Mobile clamps to 12 even if `size` is 24 — 24 bars at 375 px
+    // collapse to unreadable slivers. The raw preference stays in
+    // state so desktop restores the full 24 once the viewport grows.
+    const target = isMobile ? Math.min(size, MOBILE_MAX_BARS) : size;
+    return Math.min(target, available);
+  }, [available, size, isMobile]);
 
   // Wrapping setSize — every click-through-to-change goes through
   // here so localStorage and state stay in sync. The `disabled` gate
@@ -324,7 +372,11 @@ export default function CycleTrendCard({ history }) {
     );
   }
 
-  const toggleOptions = [6, 12, 24];
+  // 24m is hidden on mobile (not disabled) — listing an option the
+  // user can never meaningfully pick just clutters the toggle. The
+  // stored preference stays 24 if they set it on desktop; viewport
+  // clamping handles the render.
+  const toggleOptions = isMobile ? [6, 12] : [6, 12, 24];
   const budget = history.monthly_budget;
   const average = history.average;
 
