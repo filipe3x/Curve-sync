@@ -179,12 +179,24 @@ export default function CategoryPickerPopover({
     onSelect?.(id);
   };
 
+  // ROADMAP §2.10.1 — liquid-glass skin when the anchor expense is
+  // already excluded. The reduced opacity + backdrop-blur differentiate
+  // the popover from its "normal" state and quietly hint that the
+  // underlying row is out-of-cycle, while every control stays fully
+  // interactive — the blur is purely cosmetic. `bg-white/70` plays well
+  // against the `bg-sand-50` of excluded rows (the tinted background
+  // reads through as a soft warm wash); in the non-excluded path we
+  // keep the solid `bg-white` because there's nothing semantically
+  // different to signal.
+  const glassClass = excluded
+    ? 'bg-white/70 backdrop-blur-xl border-white/50 shadow-2xl ring-1 ring-white/40'
+    : 'bg-white border-sand-200 shadow-lg';
   return (
     <div
       ref={panelRef}
       role="dialog"
       aria-label="Alterar categoria"
-      className="absolute right-0 top-full z-30 mt-2 w-80 rounded-2xl border border-sand-200 bg-white p-4 shadow-lg animate-fade-in"
+      className={`absolute right-0 top-full z-30 mt-2 w-80 rounded-2xl border p-4 animate-fade-in ${glassClass}`}
       // Keep clicks inside the popover from bubbling up to the table
       // row — the row's hover state should not flicker while the user
       // navigates inside the picker.

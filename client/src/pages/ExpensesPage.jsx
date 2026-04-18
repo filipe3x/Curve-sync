@@ -806,14 +806,20 @@ export default function ExpensesPage() {
                 // Row tinting priority: selection > excluded > hover.
                 // Selection stays on top because it communicates the
                 // user's current intent, not a persistent attribute
-                // of the row. Excluded rows lose contrast via
-                // `opacity-60` — spec §2.10: «ligeiramente distinta
-                // para destacar a sua exclusão».
+                // of the row. Excluded rows use a sand background +
+                // per-cell dimming — `opacity` on the <tr> itself
+                // would create a stacking context and trap the
+                // CategoryPickerPopover behind the rows below it,
+                // capturing clicks on the table instead of the toggle
+                // button (bug from §2.10.1 first pass). The category
+                // cell deliberately skips the dim so the chip + the
+                // popover it anchors stay fully clickable.
                 const rowClass = rowSelected
                   ? 'bg-curve-50'
                   : rowExcluded
-                    ? 'bg-sand-50 opacity-60 hover:opacity-75'
+                    ? 'bg-sand-50 hover:bg-sand-100'
                     : 'hover:bg-sand-50';
+                const dimCell = rowExcluded ? 'opacity-60' : '';
                 return (
                   <tr
                     key={exp._id ?? i}
@@ -824,7 +830,7 @@ export default function ExpensesPage() {
                     }
                     className={`border-b border-sand-50 transition-colors duration-150 ${rowClass}`}
                   >
-                    <td className="px-5 py-3">
+                    <td className={`px-5 py-3 ${dimCell}`}>
                       <input
                         type="checkbox"
                         aria-label={`Seleccionar ${exp.entity}`}
@@ -841,13 +847,13 @@ export default function ExpensesPage() {
                         className="h-4 w-4 cursor-pointer rounded border-sand-300 text-curve-600 focus:ring-curve-500"
                       />
                     </td>
-                    <td className="px-5 py-3 font-medium text-sand-900">
+                    <td className={`px-5 py-3 font-medium text-sand-900 ${dimCell}`}>
                       {exp.entity}
                     </td>
-                    <td className="px-5 py-3 font-semibold text-curve-700">
+                    <td className={`px-5 py-3 font-semibold text-curve-700 ${dimCell}`}>
                       €{Number(exp.amount).toFixed(2)}
                     </td>
-                    <td className="px-5 py-3 text-sand-500">
+                    <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>
                       <div className="flex items-center gap-2">
                         <span>{exp.date}</span>
                         {rowExcluded && (
@@ -857,7 +863,7 @@ export default function ExpensesPage() {
                         )}
                       </div>
                     </td>
-                    <td className="px-5 py-3 text-sand-500">{exp.card}</td>
+                    <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>{exp.card}</td>
                     <td className="relative px-5 py-3">
                       <button
                         type="button"

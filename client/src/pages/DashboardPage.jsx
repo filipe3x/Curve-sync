@@ -703,6 +703,13 @@ export default function DashboardPage() {
                 {recentExpenses.map((exp, i) => {
                   const pickerOpen = pickerExpenseId === exp._id;
                   const rowExcluded = exp.excluded === true;
+                  // Per-cell dim instead of `opacity-*` on the <tr>
+                  // — the row-level opacity creates a stacking context
+                  // that trapped the CategoryPickerPopover and stole
+                  // clicks on the cycle-toggle button (§2.10.1 bug).
+                  // The category cell keeps full opacity so the chip
+                  // and its popover stay fully interactive.
+                  const dimCell = rowExcluded ? 'opacity-60' : '';
                   return (
                     <tr
                       key={exp._id ?? i}
@@ -713,19 +720,19 @@ export default function DashboardPage() {
                       }
                       className={`border-b border-sand-50 transition-colors duration-150 ${
                         rowExcluded
-                          ? 'bg-sand-50 opacity-60 hover:opacity-75'
+                          ? 'bg-sand-50 hover:bg-sand-100'
                           : 'hover:bg-sand-50'
                       }`}
                       style={{ animationDelay: `${i * 60}ms` }}
                     >
-                      <td className="px-5 py-3 font-medium text-sand-900">
+                      <td className={`px-5 py-3 font-medium text-sand-900 ${dimCell}`}>
                         {exp.entity}
                       </td>
-                      <td className="px-5 py-3 text-curve-700 font-semibold">
+                      <td className={`px-5 py-3 text-curve-700 font-semibold ${dimCell}`}>
                         €{Number(exp.amount).toFixed(2)}
                       </td>
                       <td
-                        className="px-5 py-3 text-sand-500"
+                        className={`px-5 py-3 text-sand-500 ${dimCell}`}
                         title={formatAbsoluteDate(exp.date)}
                       >
                         <div className="flex items-center gap-2">
@@ -737,7 +744,7 @@ export default function DashboardPage() {
                           )}
                         </div>
                       </td>
-                      <td className="px-5 py-3 text-sand-500">{exp.card}</td>
+                      <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>{exp.card}</td>
                       <td className="relative px-5 py-3">
                         <button
                           type="button"
