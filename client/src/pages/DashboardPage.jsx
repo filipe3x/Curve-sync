@@ -6,6 +6,7 @@ import AnimatedKPI from '../components/common/AnimatedKPI';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
+import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
 import { formatExpenseDate, formatAbsoluteDate } from '../utils/relativeDate';
@@ -111,6 +112,12 @@ export default function DashboardPage() {
   // ExpensesPage state so /expenses and / share a consistent feel.
   const [categoryEdits, setCategoryEdits] = useState([]);
   const editTimersRef = useRef(new Map());
+  // ROADMAP §2.10.1 — single-expense "Remover do ciclo" from the
+  // popover header. One-at-a-time (not per-row) so the user can
+  // Anular as a whole; same shape + 6 s window as /expenses.
+  const [exclusionUndo, setExclusionUndo] = useState(null);
+  const exclusionUndoTimerRef = useRef(null);
+  const [exclusionBusy, setExclusionBusy] = useState(false);
   // Short-lived inline message for the sync button — success summary
   // or non-banner error. The re-auth banner handles OAuth breakage;
   // this covers everything else (parse errors, IMAP folder gone, etc.)
@@ -306,6 +313,100 @@ export default function DashboardPage() {
         text: err?.message ?? 'Não foi possível anular a alteração.',
       });
       scheduleEditDismiss(entry.id);
+    }
+  };
+
+  // ─── Exclusion banner plumbing (§2.10.1) ──────────────────────
+  // Same timer-ref pattern as the category undo, but a single slot
+  // because the banner is one-at-a-time.
+  const clearExclusionTimer = () => {
+    if (exclusionUndoTimerRef.current) {
+      clearTimeout(exclusionUndoTimerRef.current);
+      exclusionUndoTimerRef.current = null;
+    }
+  };
+  const scheduleExclusionDismiss = () => {
+    clearExclusionTimer();
+    exclusionUndoTimerRef.current = setTimeout(() => {
+      setExclusionUndo(null);
+      exclusionUndoTimerRef.current = null;
+    }, UNDO_WINDOW_MS);
+  };
+  useEffect(() => {
+    return () => clearExclusionTimer();
+  }, []);
+
+  const handleRemoveSingleFromCycle = async (exp) => {
+    if (!exp?._id || exclusionBusy) return;
+    if (exp.excluded === true) {
+      setPickerExpenseId(null);
+      return;
+    }
+    const ids = [exp._id];
+    const prev = recentExpenses;
+    setRecentExpenses((rows) =>
+      rows.map((e) => (e._id === exp._id ? { ...e, excluded: true } : e)),
+    );
+    setPickerExpenseId(null);
+    setExclusionBusy(true);
+    try {
+      const res = await api.excludeExpenses(ids);
+      const affected = res?.affected ?? 1;
+      const skipped = res?.skipped ?? 0;
+      const text = `Despesa ${exp.entity} excluída do ciclo.`;
+      setExclusionUndo({
+        ids,
+        direction: 'excluded',
+        affected,
+        skipped,
+        text,
+      });
+      scheduleExclusionDismiss();
+      // Refresh the KPI cards — `month_total` and `savings_score`
+      // live in `stats` (meta from getExpenses), so the exclusion has
+      // to round-trip before the numbers on the dashboard reflect it.
+      loadDashboard().catch(() => {});
+    } catch (err) {
+      setRecentExpenses(prev);
+      setCategoryToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível excluir do ciclo.',
+      });
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
+  const handleExclusionUndo = async () => {
+    if (!exclusionUndo || exclusionBusy) return;
+    clearExclusionTimer();
+    const { ids, direction } = exclusionUndo;
+    const prev = recentExpenses;
+    const revertedExcluded = direction === 'included';
+    setRecentExpenses((rows) =>
+      rows.map((e) =>
+        ids.includes(e._id) ? { ...e, excluded: revertedExcluded } : e,
+      ),
+    );
+    setExclusionBusy(true);
+    try {
+      const call =
+        direction === 'excluded' ? api.includeExpenses : api.excludeExpenses;
+      await call(ids);
+      setExclusionUndo(null);
+      // Refresh the KPI cards + uncategorised count — the exclusion
+      // flipped back, so the month total / savings score need to
+      // pick up the restored expense without a page reload.
+      loadDashboard().catch(() => {});
+    } catch (err) {
+      setRecentExpenses(prev);
+      setCategoryToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível anular.',
+      });
+      scheduleExclusionDismiss();
+    } finally {
+      setExclusionBusy(false);
     }
   };
 
@@ -548,6 +649,15 @@ export default function DashboardPage() {
           onUndo={handleUndoCategoryEdit}
         />
 
+        {/* ROADMAP §2.10.1 — "Remover do ciclo" undo banner. Fed by
+            the mini button in the CategoryPickerPopover header on the
+            "Despesas recentes" table below. */}
+        <ExclusionUndoBanner
+          entry={exclusionUndo}
+          onUndo={handleExclusionUndo}
+          busy={exclusionBusy}
+        />
+
         {error && (
           <p className="mb-4 text-sm text-curve-600">{error}</p>
         )}
@@ -640,8 +750,12 @@ export default function DashboardPage() {
                             categories={categories}
                             iconByCategory={iconByCategory}
                             saving={pickerSaving}
+                            excluded={exp.excluded === true}
                             onSelect={(newId) =>
                               handleCategorySave(exp._id, newId)
+                            }
+                            onRemoveFromCycle={() =>
+                              handleRemoveSingleFromCycle(exp)
                             }
                             onCancel={() => {
                               if (pickerSaving) return;

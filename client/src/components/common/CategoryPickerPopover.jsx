@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { CalendarOff } from 'lucide-react';
 import { MagnifyingGlassIcon } from '../layout/Icons';
 import { CategoryIcon } from './CategoryIcon';
 
@@ -79,6 +80,19 @@ import { CategoryIcon } from './CategoryIcon';
  *     loaded icons yet still render cleanly. The map is pulled from
  *     `GET /api/category-icons` by the parent page (ExpensesPage /
  *     DashboardPage) and passed in to avoid a per-popover round-trip.
+ *   @param {Function} [onRemoveFromCycle]
+ *     Single-mode only. When provided, renders a mini curve-red
+ *     `CalendarOff` button to the left of the × close in the header
+ *     (ROADMAP §2.10.1). Click fires `onRemoveFromCycle()` and the
+ *     parent is expected to call `api.excludeExpenses([expense._id])`
+ *     + surface the existing `<ExclusionUndoBanner>` with 6 s Anular.
+ *     Hidden in bulk mode (the action bar already has the bulk
+ *     toggle) and when `excluded === true` (the row is already out of
+ *     the cycle — offering it again would be a no-op).
+ *   @param {boolean} [excluded]
+ *     Mirror of `expense.excluded`. When `true`, the remove-from-
+ *     cycle button is hidden so the popover doesn't advertise an
+ *     action that has no effect.
  */
 export default function CategoryPickerPopover({
   expense,
@@ -88,6 +102,8 @@ export default function CategoryPickerPopover({
   onCancel,
   saving = false,
   iconByCategory = null,
+  onRemoveFromCycle = null,
+  excluded = false,
 }) {
   const panelRef = useRef(null);
   const searchRef = useRef(null);
@@ -176,28 +192,50 @@ export default function CategoryPickerPopover({
         <h3 className="text-sm font-semibold text-sand-900">
           {title}
         </h3>
-        <button
-          type="button"
-          aria-label="Fechar"
-          onClick={onCancel}
-          disabled={saving}
-          className="rounded-full p-1 text-sand-400 transition-colors hover:bg-sand-100 hover:text-sand-700 disabled:opacity-40"
-        >
-          {/* inline × — lighter than pulling heroicons for one glyph */}
-          <svg
-            className="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
+        <div className="flex items-center gap-1">
+          {/* ROADMAP §2.10.1 — single-expense "Remover do ciclo"
+              shortcut. Curve-tinted so it reads as a distinct action
+              (not a second close button); tooltip spells out the
+              semantics because the icon alone is subtle. Hidden in
+              bulk mode and once the row is already excluded. */}
+          {onRemoveFromCycle && !isBulk && !excluded && (
+            <button
+              type="button"
+              aria-label="Remover do ciclo"
+              title="Remover do ciclo — não conta para Savings Score (reversível)"
+              onClick={() => {
+                if (saving) return;
+                onRemoveFromCycle();
+              }}
+              disabled={saving}
+              className="rounded-full p-1 text-curve-500 transition-colors hover:bg-curve-50 hover:text-curve-700 disabled:opacity-40"
+            >
+              <CalendarOff className="h-4 w-4" strokeWidth={2} />
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Fechar"
+            onClick={onCancel}
+            disabled={saving}
+            className="rounded-full p-1 text-sand-400 transition-colors hover:bg-sand-100 hover:text-sand-700 disabled:opacity-40"
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M6 18 18 6M6 6l12 12"
-            />
-          </svg>
-        </button>
+            {/* inline × — lighter than pulling heroicons for one glyph */}
+            <svg
+              className="h-4 w-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M6 18 18 6M6 6l12 12"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Search */}

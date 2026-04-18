@@ -4,6 +4,7 @@ import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
+import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
 import * as api from '../services/api';
@@ -110,6 +111,13 @@ export default function CurveLogsPage() {
   // the next refetch, but optimistic state is what the user sees).
   const [categoryEdits, setCategoryEdits] = useState([]);
   const editTimersRef = useRef(new Map());
+  // ROADMAP §2.10.1 — "Remover do ciclo" shortcut from the popover
+  // header. On /curve/logs the row doesn't carry an `excluded` flag
+  // (logs are historical records, not the expense itself), so there
+  // is no optimistic list update — the banner is the only feedback.
+  const [exclusionUndo, setExclusionUndo] = useState(null);
+  const exclusionUndoTimerRef = useRef(null);
+  const [exclusionBusy, setExclusionBusy] = useState(false);
 
   useEffect(() => {
     api
@@ -273,6 +281,73 @@ export default function CurveLogsPage() {
     }
   };
 
+  // ─── Exclusion shortcut (§2.10.1) ────────────────────────────
+  const clearExclusionTimer = () => {
+    if (exclusionUndoTimerRef.current) {
+      clearTimeout(exclusionUndoTimerRef.current);
+      exclusionUndoTimerRef.current = null;
+    }
+  };
+  const scheduleExclusionDismiss = () => {
+    clearExclusionTimer();
+    exclusionUndoTimerRef.current = setTimeout(() => {
+      setExclusionUndo(null);
+      exclusionUndoTimerRef.current = null;
+    }, UNDO_WINDOW_MS);
+  };
+  useEffect(() => {
+    return () => clearExclusionTimer();
+  }, []);
+
+  const handleRemoveSingleFromCycle = async (log) => {
+    if (!log?.expense_id || exclusionBusy) return;
+    const ids = [log.expense_id];
+    setPickerLogId(null);
+    setExclusionBusy(true);
+    try {
+      const res = await api.excludeExpenses(ids);
+      const affected = res?.affected ?? 1;
+      const skipped = res?.skipped ?? 0;
+      const text = `Despesa ${log.entity ?? ''} excluída do ciclo.`;
+      setExclusionUndo({
+        ids,
+        direction: 'excluded',
+        affected,
+        skipped,
+        text,
+      });
+      scheduleExclusionDismiss();
+    } catch (err) {
+      toast.error(
+        err?.message ?? 'Não foi possível excluir do ciclo.',
+        { id: 'logs-exclusion' },
+      );
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
+  const handleExclusionUndo = async () => {
+    if (!exclusionUndo || exclusionBusy) return;
+    clearExclusionTimer();
+    const { ids, direction } = exclusionUndo;
+    setExclusionBusy(true);
+    try {
+      const call =
+        direction === 'excluded' ? api.includeExpenses : api.excludeExpenses;
+      await call(ids);
+      setExclusionUndo(null);
+    } catch (err) {
+      toast.error(
+        err?.message ?? 'Não foi possível anular.',
+        { id: 'logs-exclusion-undo' },
+      );
+      scheduleExclusionDismiss();
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
   const handleUndoCategoryEdit = async (entry) => {
     clearEditTimer(entry.id);
     setCategoryEdits((prev) =>
@@ -329,6 +404,14 @@ export default function CurveLogsPage() {
           />
         </div>
       )}
+
+      {/* ROADMAP §2.10.1 — "Remover do ciclo" banner fed by the mini
+          button in the resolution pill's popover header. */}
+      <ExclusionUndoBanner
+        entry={exclusionUndo}
+        onUndo={handleExclusionUndo}
+        busy={exclusionBusy}
+      />
 
       <div className="mb-4 flex gap-1 rounded-xl border border-sand-200 bg-white p-1 text-sm">
         {TABS.map((t) => (
@@ -407,6 +490,7 @@ export default function CurveLogsPage() {
                     onOpenPicker={setPickerLogId}
                     onClosePicker={() => !pickerSaving && setPickerLogId(null)}
                     onPickCategory={handleCategorySave}
+                    onRemoveFromCycle={handleRemoveSingleFromCycle}
                     categories={categories}
                     iconByCategory={iconByCategory}
                     pickerSaving={pickerSaving}
@@ -420,6 +504,7 @@ export default function CurveLogsPage() {
                     onOpenPicker={setPickerLogId}
                     onClosePicker={() => !pickerSaving && setPickerLogId(null)}
                     onPickCategory={handleCategorySave}
+                    onRemoveFromCycle={handleRemoveSingleFromCycle}
                     categories={categories}
                     iconByCategory={iconByCategory}
                     pickerSaving={pickerSaving}
@@ -469,6 +554,7 @@ function SingleRow({
   onOpenPicker,
   onClosePicker,
   onPickCategory,
+  onRemoveFromCycle,
   categories,
   iconByCategory,
   pickerSaving,
@@ -506,6 +592,7 @@ function SingleRow({
                 onOpen={() => onOpenPicker(log._id)}
                 onClose={onClosePicker}
                 onPick={onPickCategory}
+                onRemoveFromCycle={onRemoveFromCycle}
                 categories={categories}
                 iconByCategory={iconByCategory}
                 saving={pickerSaving}
@@ -533,6 +620,7 @@ function BatchRow({
   onOpenPicker,
   onClosePicker,
   onPickCategory,
+  onRemoveFromCycle,
   categories,
   iconByCategory,
   pickerSaving,
@@ -618,6 +706,7 @@ function BatchRow({
                       onOpen={() => onOpenPicker(log._id)}
                       onClose={onClosePicker}
                       onPick={onPickCategory}
+                      onRemoveFromCycle={onRemoveFromCycle}
                       categories={categories}
                       iconByCategory={iconByCategory}
                       saving={pickerSaving}
@@ -673,6 +762,7 @@ function EditableResolutionPill({
   onOpen,
   onClose,
   onPick,
+  onRemoveFromCycle,
   categories,
   iconByCategory,
   saving,
@@ -740,6 +830,9 @@ function EditableResolutionPill({
           iconByCategory={iconByCategory}
           saving={saving}
           onSelect={(newId) => onPick(log, newId)}
+          onRemoveFromCycle={
+            onRemoveFromCycle ? () => onRemoveFromCycle(log) : null
+          }
           onCancel={onClose}
         />
       )}

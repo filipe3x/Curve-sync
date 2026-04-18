@@ -3,6 +3,7 @@ import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
+import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import * as api from '../services/api';
 
@@ -532,6 +533,51 @@ export default function ExpensesPage() {
     return () => clearExclusionTimer();
   }, []);
 
+  // ROADMAP §2.10.1 — single-expense "Remover do ciclo" from inside
+  // the CategoryPickerPopover header. Reuses the same §2.10 infra
+  // (POST /api/expenses/exclusions, api.excludeExpenses) and pushes
+  // into the same `exclusionUndo` slot the bulk toggle uses. Closes
+  // the popover immediately so the user sees the row tint + banner
+  // without an extra click.
+  const handleRemoveSingleFromCycle = async (exp) => {
+    if (!exp?._id || exclusionBusy) return;
+    // Defensive: if the row is already excluded the popover should
+    // have hidden the button, but guard anyway.
+    if (exp.excluded === true) {
+      setPickerExpenseId(null);
+      return;
+    }
+    const ids = [exp._id];
+    const prev = expenses;
+    setExpenses((rows) =>
+      rows.map((e) => (e._id === exp._id ? { ...e, excluded: true } : e)),
+    );
+    setPickerExpenseId(null);
+    setExclusionBusy(true);
+    try {
+      const res = await api.excludeExpenses(ids);
+      const affected = res?.affected ?? 1;
+      const skipped = res?.skipped ?? 0;
+      const text = `Despesa ${exp.entity} excluída do ciclo.`;
+      setExclusionUndo({
+        ids,
+        direction: 'excluded',
+        affected,
+        skipped,
+        text,
+      });
+      scheduleExclusionDismiss();
+    } catch (err) {
+      setExpenses(prev);
+      setToast({
+        type: 'error',
+        text: err?.message ?? 'Não foi possível excluir do ciclo.',
+      });
+    } finally {
+      setExclusionBusy(false);
+    }
+  };
+
   const handleSearch = (e) => {
     e.preventDefault();
     setPage(1);
@@ -586,23 +632,14 @@ export default function ExpensesPage() {
       {/* ROADMAP §2.10 — exclusion undo banner. One-at-a-time (not
           per-row like the category edits) because a bulk "excluir 10"
           is semantically one action the user will want to undo as a
-          whole. 6 s window, same as the category undo. */}
-      {exclusionUndo && (
-        <div
-          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-3 text-sm shadow-sm"
-          role="status"
-        >
-          <span className="text-sand-700">{exclusionUndo.text}</span>
-          <button
-            type="button"
-            onClick={handleExclusionUndo}
-            disabled={exclusionBusy}
-            className="rounded-lg px-3 py-1 text-xs font-medium text-curve-700 transition-colors hover:bg-curve-50 disabled:opacity-50"
-          >
-            Anular
-          </button>
-        </div>
-      )}
+          whole. 6 s window, same as the category undo. §2.10.1 also
+          feeds this banner from the single-expense "Remover do ciclo"
+          button inside the popover header. */}
+      <ExclusionUndoBanner
+        entry={exclusionUndo}
+        onUndo={handleExclusionUndo}
+        busy={exclusionBusy}
+      />
 
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">
@@ -840,8 +877,12 @@ export default function ExpensesPage() {
                           categories={categories}
                           iconByCategory={iconByCategory}
                           saving={pickerSaving}
+                          excluded={exp.excluded === true}
                           onSelect={(newId) =>
                             handleCategorySave(exp._id, newId)
+                          }
+                          onRemoveFromCycle={() =>
+                            handleRemoveSingleFromCycle(exp)
                           }
                           onCancel={() => {
                             if (pickerSaving) return;
