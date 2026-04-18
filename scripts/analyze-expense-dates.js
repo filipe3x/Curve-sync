@@ -2,8 +2,8 @@
 /* eslint-disable no-console */
 
 /**
- * scripts/analyze-expense-dates.js — read-only recon for ROADMAP §2.9/§2.10
- * follow-up (Opção C in the investigation comment).
+ * scripts/analyze-expense-dates.js — expense-date triage + backfill tool
+ * for ROADMAP §2.x Opção C.
  *
  * Problem we are sizing up
  * ------------------------
@@ -13,45 +13,96 @@
  * /categories detail panel. Because the string is day-first ("06 April
  * 2026 08:53:31"), a lexical sort in Mongo orders primarily by day-of-
  * month — so the most recent row can easily land at the bottom of the
- * list. The issue is proven at `ROADMAP §2.x investigation`.
+ * list. On top of that, a quick BSON peek at the dev dump showed the
+ * field has MIXED TYPES — some rows are strings (curve-sync path),
+ * others are BSON Dates (Embers' Mongoid writes, field :date, type:
+ * DateTime). BSON's canonical type order puts String < Date, so when
+ * the two types coexist a `sort({date: -1})` groups all Date rows at
+ * the top and all String rows afterwards regardless of chronology.
  *
- * On top of that, a quick BSON peek at the dev dump showed the field
- * has MIXED TYPES today — some rows are strings, others are real BSON
- * Dates. BSON's canonical type order puts String < Date, so when the
- * two types coexist a `sort({date: -1})` groups all Date rows at the
- * top and all String rows afterwards, regardless of chronology. Any
- * backfill algorithm has to handle both shapes.
+ * The long-term fix (Opção C) adds a sibling `date_at: Date` field
+ * and moves the sort there. This script handles two of the six steps:
+ * read-only audit (any step) and the one-shot backfill (step 3).
  *
- * What this script does
- * ---------------------
- * Strictly READ-ONLY. Connects to the same MongoDB as the server (via
- * MONGODB_URI, same default as server/src/config/db.js), reads every
- * row from the `expenses` collection, and prints:
+ * Modes of operation
+ * ------------------
+ * The script has three progressive modes, gated by CLI flags:
  *
- *   1. A histogram of concrete BSON types present in `date`.
- *   2. Parse coverage of the prototype `parseExpenseDate()` helper on
- *      the String rows, with samples of any rows it cannot handle.
- *   3. A side-by-side comparison of the CURRENT broken sort vs the
- *      PROPOSED chronological sort (head + tail) so the delta is
- *      obvious at a glance.
- *   4. A migration summary: how many rows would need backfill, how
- *      many are already typed, and any that would need manual review.
+ *   1. READ-ONLY AUDIT (default, no flags)
+ *      Connects, loads every `expenses` row, prints a BSON-type
+ *      histogram + prototype parser coverage + side-by-side sort
+ *      comparison + migration budget. Zero writes. Safe against prod.
  *
- * Nothing is written. No network writes. Safe to run against prod.
+ *   2. BACKFILL PLAN (--write, without --yes)
+ *      Same audit output as mode 1 PLUS a plan for the rows that
+ *      would be updated: count of rows missing `date_at`, how many
+ *      the prototype can parse, how many would stay null
+ *      (unparseable), sample ids of each. Still zero writes — this
+ *      is the confirmation gate. Rerun with `--yes` to execute.
+ *
+ *   3. BACKFILL EXECUTION (--write --yes)
+ *      Runs the audit, prints the plan, then applies `$set: { date_at }`
+ *      via bulkWrite to the rows that need it. Writes are:
+ *
+ *         • ONLY to rows where `date_at` is currently null/missing
+ *           (idempotent — re-running is a no-op);
+ *         • chunked at 500 ops per bulkWrite call (scales to tens of
+ *           thousands without a fat single request);
+ *         • UNORDERED so a single bad row can't halt the batch;
+ *         • silent about rows the parser can't handle — they stay at
+ *           `date_at: null`, listed in the final report for manual
+ *           review. The scripted operator decides what to do with
+ *           them (delete, hand-edit, leave alone).
+ *
+ *      No CurveLog audit rows are written — the backfill is a one-shot
+ *      operator action, not a user mutation, so flooding `curve_logs`
+ *      with one row per expense would be noise. The script's printed
+ *      report is the sole record.
+ *
+ * The two-flag confirmation (--write --yes) is deliberate: destructive
+ * or data-mutating scripts should never write on a single typo. If
+ * you forget --yes, you see the plan and bail; if you add --yes by
+ * mistake, --write alone still does nothing.
  *
  * Usage
  * -----
- *   MONGODB_URI=mongodb://... node scripts/analyze-expense-dates.js
- *   # or from the server dir so the existing .env is picked up:
- *   cd server && node -r dotenv/config ../scripts/analyze-expense-dates.js
+ *   # Audit (safe, default)
+ *   node scripts/analyze-expense-dates.js
+ *
+ *   # Preview backfill plan
+ *   node scripts/analyze-expense-dates.js --write
+ *
+ *   # Execute backfill
+ *   node scripts/analyze-expense-dates.js --write --yes
+ *
+ * Environment
+ * -----------
+ *   MONGODB_URI   — same default as server/src/config/db.js
+ *                   (mongodb://localhost:27017/embers_db).
+ *                   Loaded via dotenv; set before running or let the
+ *                   server's .env pick it up.
  */
 
 import 'dotenv/config';
 import mongoose from 'mongoose';
+import Expense from '../server/src/models/Expense.js';
 import { parseExpenseDate as parseExpenseDateProto } from '../server/src/services/expenseDate.js';
 
 const MONGODB_URI =
   process.env.MONGODB_URI || 'mongodb://localhost:27017/embers_db';
+
+// CLI flags. `--write` without `--yes` stops at the plan; `--write
+// --yes` actually writes. Unknown flags are ignored silently (the
+// script has nothing else to customise).
+const CLI_FLAGS = new Set(process.argv.slice(2));
+const WRITE = CLI_FLAGS.has('--write');
+const CONFIRMED = CLI_FLAGS.has('--yes');
+
+// Bulk-op chunk size. Small enough that a single network round-trip
+// is not huge, large enough that tens of thousands of rows finish in
+// a handful of round-trips. unordered mode means one failure doesn't
+// halt the chunk — the failed op is reported in the write result.
+const BULK_CHUNK = 500;
 
 // The parser itself lives in `server/src/services/expenseDate.js` so
 // the write paths (sync orchestrator + manual POST) and this script
@@ -128,12 +179,14 @@ async function main() {
   console.log(`connecting to ${MONGODB_URI}…`);
   await mongoose.connect(MONGODB_URI);
 
-  const Expense = mongoose.connection.collection('expenses');
-
+  // Using the Mongoose model (not the raw collection) so its
+  // `date_at` schema + partial index are synced to Mongo on connect.
+  // `.lean()` keeps the rows as plain objects — we don't need
+  // hydrated docs and the backfill uses bulkWrite directly anyway.
   const rows = await Expense.find(
     {},
-    { projection: { _id: 1, date: 1, created_at: 1, entity: 1, user_id: 1 } },
-  ).toArray();
+    { _id: 1, date: 1, date_at: 1, created_at: 1, entity: 1, user_id: 1 },
+  ).lean();
 
   console.log(`loaded ${rows.length} expense rows\n`);
 
@@ -251,8 +304,131 @@ async function main() {
     );
   }
 
+  // ─── Backfill mode (--write) ─────────────────────────────────────
+  //
+  // The read-only audit above already showed what WOULD happen; now
+  // we translate that into either a plan (without --yes) or a write
+  // (with --yes). Only rows where `date_at` is currently null/missing
+  // are touched — running the script a second time after a clean
+  // backfill is a no-op because every row already has `date_at` set.
+
+  if (WRITE) {
+    console.log('\n── 6. Backfill plan ──');
+    const writeOps = [];
+    const targetCount = {
+      already_has_date_at: 0,
+      will_set: 0,
+      will_stay_null: 0,
+    };
+    const willStayNullSamples = [];
+    for (const r of rows) {
+      if (r.date_at != null) {
+        targetCount.already_has_date_at++;
+        continue;
+      }
+      const p = parsed.get(r._id.toString());
+      if (p.date) {
+        writeOps.push({
+          updateOne: {
+            filter: { _id: r._id, date_at: null },
+            update: { $set: { date_at: p.date } },
+          },
+        });
+        targetCount.will_set++;
+      } else {
+        targetCount.will_stay_null++;
+        if (willStayNullSamples.length < 10) willStayNullSamples.push(r);
+      }
+    }
+    console.log(
+      `  rows with date_at already set  : ${targetCount.already_has_date_at} — skip`,
+    );
+    console.log(
+      `  rows to populate this run      : ${targetCount.will_set}`,
+    );
+    console.log(
+      `  rows that would stay null      : ${targetCount.will_stay_null}`,
+    );
+    if (willStayNullSamples.length > 0) {
+      console.log(
+        '  sample ids (would stay null — manual review after this run):',
+      );
+      for (const r of willStayNullSamples) {
+        console.log(
+          `    ${r._id.toString()}  ${formatDisplayDate(r.date)}`,
+        );
+      }
+    }
+
+    if (!CONFIRMED) {
+      console.log(
+        '\nDRY-RUN — no writes performed. Re-run with --write --yes to execute.',
+      );
+      await mongoose.disconnect();
+      return;
+    }
+
+    // Gate passed — actually run the chunks.
+    if (writeOps.length === 0) {
+      console.log('\nnothing to do — all rows already have date_at set.');
+      await mongoose.disconnect();
+      return;
+    }
+
+    console.log(
+      `\nExecuting backfill: ${writeOps.length} ops in chunks of ${BULK_CHUNK}, unordered.`,
+    );
+    const started = Date.now();
+    let writtenOk = 0;
+    let writtenFailed = 0;
+    for (let i = 0; i < writeOps.length; i += BULK_CHUNK) {
+      const chunk = writeOps.slice(i, i + BULK_CHUNK);
+      try {
+        const result = await Expense.bulkWrite(chunk, { ordered: false });
+        const modified = result.modifiedCount ?? 0;
+        writtenOk += modified;
+        // `writeErrors` is only populated when individual ops failed;
+        // unordered means the rest of the chunk still went through.
+        const errs = result.getWriteErrors?.() ?? [];
+        writtenFailed += errs.length;
+        if (errs.length > 0) {
+          console.log(
+            `  chunk ${i}–${i + chunk.length - 1}: ${modified} ok, ${errs.length} failed`,
+          );
+          for (const e of errs.slice(0, 3)) {
+            console.log(
+              `    op ${e.index ?? '?'} failed: ${e.errmsg ?? e.message ?? e}`,
+            );
+          }
+        } else {
+          console.log(
+            `  chunk ${i}–${i + chunk.length - 1}: ${modified} ok`,
+          );
+        }
+      } catch (err) {
+        // `bulkWrite` rejects only on connection-level failures in
+        // unordered mode; per-op errors land on `writeErrors` above.
+        console.log(
+          `  chunk ${i}–${i + chunk.length - 1}: aborted — ${err.message}`,
+        );
+        writtenFailed += chunk.length;
+      }
+    }
+    const elapsed = ((Date.now() - started) / 1000).toFixed(2);
+    console.log(
+      `\nbackfill complete — ok=${writtenOk} failed=${writtenFailed} duration=${elapsed}s`,
+    );
+    if (targetCount.will_stay_null > 0) {
+      console.log(
+        `${targetCount.will_stay_null} rows remain with date_at=null (unparseable). See sample list above for manual review.`,
+      );
+    }
+    await mongoose.disconnect();
+    return;
+  }
+
   console.log(
-    '\nDONE. No writes. Re-run after any schema / pipeline change to verify.',
+    '\nDONE (read-only). Re-run with --write to preview a backfill plan, or --write --yes to execute.',
   );
   await mongoose.disconnect();
 }
