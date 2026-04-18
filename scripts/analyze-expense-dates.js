@@ -48,85 +48,16 @@
 
 import 'dotenv/config';
 import mongoose from 'mongoose';
+import { parseExpenseDate as parseExpenseDateProto } from '../server/src/services/expenseDate.js';
 
 const MONGODB_URI =
   process.env.MONGODB_URI || 'mongodb://localhost:27017/embers_db';
 
-// ─── Prototype parser ────────────────────────────────────────────────
-//
-// This is the proposed backfill / on-insert helper. Returns a Date
-// (or null) from whatever shape `Expense.date` may hold today:
-//
-//   1. already a Date   → return as-is
-//   2. string           → try V8 Date.parse (handles "06 April 2026
-//                         08:53:31", "25 Dec 2025, 14:30", and most
-//                         Curve formats); fall back to an explicit
-//                         "DD Month YYYY HH:MM(:SS)?" regex that
-//                         parses the numbers manually — this is the
-//                         safety net for locales where Date.parse
-//                         disagrees (Node builds vary with ICU)
-//   3. anything else    → null, row goes on the "needs review" list
-//
-// The regex uses English month names because that's the one format
-// the Curve pipeline produces (see services/emailParser.js — the
-// primary + regex fallback both target English months). Portuguese
-// month names never land in the DB via this pipeline.
-const MONTHS = {
-  jan: 0, january: 0,
-  feb: 1, february: 1,
-  mar: 2, march: 2,
-  apr: 3, april: 3,
-  may: 4,
-  jun: 5, june: 5,
-  jul: 6, july: 6,
-  aug: 7, august: 7,
-  sep: 8, sept: 8, september: 8,
-  oct: 9, october: 9,
-  nov: 10, november: 10,
-  dec: 11, december: 11,
-};
-
-function parseExpenseDateProto(value) {
-  if (value == null) return { date: null, reason: 'null_or_undefined' };
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) {
-      return { date: null, reason: 'invalid_date_object' };
-    }
-    return { date: value, reason: 'already_date' };
-  }
-  if (typeof value !== 'string') {
-    return { date: null, reason: `unsupported_type:${typeof value}` };
-  }
-  const trimmed = value.trim();
-  if (trimmed === '') return { date: null, reason: 'empty_string' };
-
-  // Path 1 — V8 Date.parse. Handles the canonical Curve string, ISO,
-  // RFC 2822, and most reasonable variants. On success we still pass
-  // it through `new Date(...)` to normalise.
-  const t = Date.parse(trimmed);
-  if (!Number.isNaN(t)) return { date: new Date(t), reason: 'parse_ok' };
-
-  // Path 2 — explicit DD Month YYYY HH:MM(:SS)? regex. Safety net.
-  const m = trimmed.match(
-    /^(\d{1,2})\s+([A-Za-z]+)(?:,)?\s+(\d{4})(?:[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
-  );
-  if (m) {
-    const day = Number(m[1]);
-    const month = MONTHS[m[2].toLowerCase()];
-    const year = Number(m[3]);
-    const hour = Number(m[4] ?? 0);
-    const minute = Number(m[5] ?? 0);
-    const second = Number(m[6] ?? 0);
-    if (month != null) {
-      const d = new Date(Date.UTC(year, month, day, hour, minute, second));
-      if (!Number.isNaN(d.getTime())) {
-        return { date: d, reason: 'regex_ok' };
-      }
-    }
-  }
-
-  return { date: null, reason: 'unparseable' };
-}
+// The parser itself lives in `server/src/services/expenseDate.js` so
+// the write paths (sync orchestrator + manual POST) and this script
+// share one canonical implementation. Imported under the old name
+// (`parseExpenseDateProto`) to keep the rest of this file identical
+// to its pre-refactor shape.
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 

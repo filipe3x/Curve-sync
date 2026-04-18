@@ -10,6 +10,7 @@ import {
 } from '../services/expense.js';
 import { loadContext, resolveCategory } from '../services/categoryResolver.js';
 import { computeDashboardStats } from '../services/expenseStats.js';
+import { parseExpenseDateOrNull } from '../services/expenseDate.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
@@ -267,6 +268,15 @@ router.post('/', async (req, res) => {
       entity,
       amount,
       date,
+      // Typed chronological companion. This handler has no validator
+      // gate today (unlike the sync path via emailParser.validateParsed),
+      // so `date` may be missing or malformed when the caller bypasses
+      // the frontend form. `parseExpenseDateOrNull` returns null for
+      // anything it can't parse — the row still inserts, it just
+      // won't appear in the `-date_at` sort (sparse index). Never a
+      // good outcome but strictly better than the current lex-on-
+      // string behaviour, and the frontend form enforces the shape.
+      date_at: parseExpenseDateOrNull(date),
       card,
       digest,
       user_id: req.userId,
