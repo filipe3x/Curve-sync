@@ -9,7 +9,10 @@ import {
   reassignCategoryBulk,
 } from '../services/expense.js';
 import { loadContext, resolveCategory } from '../services/categoryResolver.js';
-import { computeDashboardStats } from '../services/expenseStats.js';
+import {
+  computeDashboardStats,
+  computeCycleHistory,
+} from '../services/expenseStats.js';
 import { parseExpenseDateOrNull } from '../services/expenseDate.js';
 import { audit, clientIp } from '../services/audit.js';
 
@@ -269,17 +272,31 @@ router.get('/', async (req, res) => {
       excluded: excludedSet.has(e._id.toString()),
     }));
 
-    // Dashboard KPIs — computed in parallel with the list fetch above
-    // so adding stats doesn't bump the `/expenses` latency. Keeping
-    // them on `meta` (instead of a dedicated /stats endpoint) means the
-    // dashboard's single `getExpenses({ limit: 5 })` call wires all
-    // four StatCards at once. Fast-fail: any error collapses to zeros
-    // rather than 500ing the listing — the stat cards handle `null`.
-    let dashboardStats = null;
-    try {
-      dashboardStats = await computeDashboardStats({ userId: req.userId });
-    } catch (e) {
-      console.warn(`dashboard stats failed: ${e.message}`);
+    // Dashboard KPIs + cycle history — computed in parallel so
+    // adding the trend chart doesn't bump the `/expenses` latency.
+    // Keeping them on `meta` (instead of dedicated /stats endpoints)
+    // means the dashboard's single `getExpenses({ limit: 5 })` call
+    // wires the four StatCards AND the trend card at once.
+    // Fast-fail per branch: either helper blowing up collapses to
+    // null rather than 500ing the listing — the UI handles `null`.
+    const [statsRes, historyRes] = await Promise.allSettled([
+      computeDashboardStats({ userId: req.userId }),
+      computeCycleHistory({
+        userId: req.userId,
+        // Always return the max window (24) so the 6m/12m/24m
+        // toggle is a pure client-side slice with no round-trip.
+        cycles: 24,
+      }),
+    ]);
+    const dashboardStats =
+      statsRes.status === 'fulfilled' ? statsRes.value : null;
+    if (statsRes.status === 'rejected') {
+      console.warn(`dashboard stats failed: ${statsRes.reason?.message}`);
+    }
+    const cycleHistory =
+      historyRes.status === 'fulfilled' ? historyRes.value : null;
+    if (historyRes.status === 'rejected') {
+      console.warn(`cycle history failed: ${historyRes.reason?.message}`);
     }
 
     res.json({
@@ -289,6 +306,7 @@ router.get('/', async (req, res) => {
         page: Number(page),
         limit: Number(limit),
         ...(dashboardStats ?? {}),
+        cycle_history: cycleHistory,
       },
     });
   } catch (err) {

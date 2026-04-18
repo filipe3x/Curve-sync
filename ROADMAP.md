@@ -154,9 +154,30 @@ Query params novos em `GET /api/expenses` — **todos opcionais, todos aditivos*
 ### ~~2.7 Encriptação de credenciais IMAP~~ ✅
 Movido para MU-5 e implementado: AES-256-GCM at rest, decrypt on-the-fly, backwards-compat com plaintext. Ver `server/src/services/crypto.js`.
 
-### 2.8 Gráfico evolutivo agregador por ciclo 📈 — **tracked em PR separado**
+### ~~2.8 Gráfico evolutivo agregador por ciclo~~ ✅ 📈
 
-> **Scope cut deste PR:** a especificação abaixo fica documentada; a implementação (instalar `recharts`, criar `computeCycleHistory`, compor `CycleTrendCard`) é feita num PR dedicado porque o bundle-size impact (~55–65 kB gzip) e a verificação de `prefers-reduced-motion` justificam uma revisão de UI focada.
+> **Implementado.**
+>
+> Backend:
+> - `server/src/services/expenseStats.js :: computeCycleHistory({ userId, cycles })` — agregação multi-ciclo pura (overrides `{ now, config, expenses, exclusions, categories }` para testes hermeticos). Cap [1, 36]. Exclusões da §2.10 filtradas do total, do `top_entity` e do `top_category`, em paridade com o `month_total`. Cada ciclo carrega `delta_absolute`, `delta_pct`, `moving_avg_3` (trailing 3), `top_entity: { name, total }`, `top_category: { name, pct }`, e `in_progress: boolean`. O `trend` global só dispara com ≥ 3 ciclos completos (ignora o in-progress) e colapsa para `null` quando a janela está toda a zero. O `monthly_budget` é calculado como `weekly_budget × 30.4375 / 7` para servir de linha horizontal de referência.
+> - `server/src/routes/expenses.js` — `meta.cycle_history` no `GET /api/expenses` (sempre 24 ciclos; o frontend fatia local via toggle para evitar round-trips). Stats + history paralelizados via `Promise.allSettled`, cada ramo cai para `null` sem 500ar a listagem.
+> - `server/test/expenseStats.test.js` — +7 testes (delta, cap, exclusões, moving avg, vazio, trend "down", top_category resolvido via override). Paralelamente, todos os testes pré-existentes que chamavam `computeDashboardStats` sem `exclusions: []` ganharam o override (estavam a 500ar contra `CurveExpenseExclusion.find()` num userId string).
+>
+> Frontend:
+> - `client/src/components/dashboard/CycleTrendCard.jsx` — `recharts` `ComposedChart` com `Bar`, `Line` (MA 3 ciclos) e `ReferenceLine` (orçamento). Cor por barra: `emerald-500` (gastou menos), `curve-600` (gastou mais), `sand-400` (primeiro ciclo). Barra do ciclo em curso com pattern hachurado + stroke dashed. Tooltip custom com janela completa, total, delta, nº despesas, top entidade, categoria dominante. Badge contextual de tendência no header (`↓`/`↑`/`→`). Click numa barra → `/expenses?start=<cycle_start>&end=<cycle_end>` (liga na §2.6). Tabela `sr-only` com os mesmos dados para leitores de ecrã; `role="img"` + `aria-label` no wrapper do chart.
+> - **Toggle 6m / 12m / 24m** no topo direito. Default 12m. Se o utilizador tiver ≤ 6 ciclos de histórico, snap a 6m e as opções 12m/24m ficam `disabled` com `title="Precisas de N ciclos de histórico"`. O `effectiveSize` recalcula-se quando o volume de dados muda sem obrigar a re-set explícito.
+> - Estado vazio (≤ 1 ciclo): ilustração suave + copy «Regressa daqui a um ciclo para veres a tua tendência.»
+> - **`React.lazy` + `Suspense`** — o chunk `CycleTrendCard` (recharts + d3) isola-se em 115 kB gzip; o bundle principal mantém-se em 152 kB gzip (vs. 146 antes). Fallback é skeleton `h-80` com `animate-pulse` para evitar CLS enquanto o chunk streameia.
+> - `DashboardPage.jsx` — card aterra abaixo de «Despesas recentes», condicionado a `stats?.cycle_history`.
+>
+> **`prefers-reduced-motion`:** coberto pelo bloco global em `index.css` — todas as animações do recharts (incluindo `isAnimationActive`) caem a `0.01ms !important` quando o utilizador tem a flag ligada.
+>
+> **Decisões face à spec:**
+> - Moving avg **inclui** o ciclo in-progress (smooths sozinho); se se mostrar ruidoso na prática, vira prop `excludeInProgress`.
+> - `top_entity` / `top_category` per-ciclo saem como enriquecimento da spec original — dão contexto no tooltip sem obrigar o user a deep-linkar. Custo: mais um `Category.find({ _id: { $in } })` restrito aos ids que apareceram como "top" em algum bucket (lean).
+> - `monthly_budget` como linha horizontal tracejada. A spec original falava em `weekly_budget × 4`; subi para `× 30.4375 / 7` (≈ 4,348) porque os ciclos têm 28-31 dias reais.
+
+### 2.8 — nota histórica (spec original)
 
 Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em EUR e destaque visualmente os altos e baixos entre ciclos consecutivos — i.e., quanto se gastou a mais ou a menos do ciclo anterior para o seguinte. O objectivo é responder de relance a «estou a gastar mais ou menos do que há 3 meses?» sem ter de abrir `/expenses`.
 
