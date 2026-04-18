@@ -66,48 +66,31 @@
  *
  * Usage
  * -----
- * Run from anywhere inside the repo — the script self-loads the
- * server's .env via createRequire, so no `cd server` or
- * `-r dotenv/config` dance:
+ * The script lives under server/scripts/ so its ESM imports resolve
+ * against server/node_modules (mongoose, dotenv, …). Run from the
+ * repo root:
  *
  *   # Audit (safe, default)
- *   node scripts/analyze-expense-dates.js
+ *   node server/scripts/analyze-expense-dates.js
  *
  *   # Preview backfill plan
- *   node scripts/analyze-expense-dates.js --write
+ *   node server/scripts/analyze-expense-dates.js --write
  *
  *   # Execute backfill
- *   node scripts/analyze-expense-dates.js --write --yes
+ *   node server/scripts/analyze-expense-dates.js --write --yes
  *
  * Environment
  * -----------
  *   MONGODB_URI   — same default as server/src/config/db.js
- *                   (mongodb://localhost:27017/embers_db). Loaded
- *                   from server/.env automatically; also honoured
- *                   if set directly in the process env (overrides
- *                   the .env value).
+ *                   (mongodb://localhost:27017/embers_db). Auto-loaded
+ *                   from server/.env via dotenv; set in the process
+ *                   env to override.
  */
 
-import { createRequire } from 'node:module';
+import 'dotenv/config';
 import mongoose from 'mongoose';
-import Expense from '../server/src/models/Expense.js';
-import { parseExpenseDate as parseExpenseDateProto } from '../server/src/services/expenseDate.js';
-
-// Load the server's .env ourselves so the script is self-contained —
-// runs from anywhere (repo root, server/, scripts/) without needing
-// `-r dotenv/config` at invocation. dotenv lives in
-// server/node_modules, so we borrow it via createRequire rather than
-// making the repo root npm install it separately.
-const require = createRequire(import.meta.url);
-try {
-  const dotenv = require('../server/node_modules/dotenv');
-  dotenv.config({
-    path: new URL('../server/.env', import.meta.url).pathname,
-  });
-} catch {
-  // .env is optional — MONGODB_URI can come from the process
-  // environment directly (e.g. `MONGODB_URI=... node scripts/...`).
-}
+import Expense from '../src/models/Expense.js';
+import { parseExpenseDate as parseExpenseDateProto } from '../src/services/expenseDate.js';
 
 const MONGODB_URI =
   process.env.MONGODB_URI || 'mongodb://localhost:27017/embers_db';
