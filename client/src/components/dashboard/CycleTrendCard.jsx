@@ -222,15 +222,53 @@ function CycleTooltip({ active, payload }) {
   );
 }
 
+// localStorage key for the user's preferred window size. Any code
+// that reads/writes the chart toggle goes through the helpers below —
+// they tolerate a disabled / quota-exceeded / SSR-absent `localStorage`
+// without throwing, so a sandboxed iframe or Safari Private Mode can
+// still render the chart (they just lose the persistence benefit).
+const STORAGE_KEY = 'cycle-trend-window';
+const VALID_SIZES = [6, 12, 24];
+
+function readStoredSize() {
+  try {
+    const raw = globalThis.localStorage?.getItem(STORAGE_KEY);
+    const parsed = Number(raw);
+    if (VALID_SIZES.includes(parsed)) return parsed;
+  } catch {
+    /* localStorage unavailable — ignore */
+  }
+  return null;
+}
+
+function writeStoredSize(size) {
+  try {
+    globalThis.localStorage?.setItem(STORAGE_KEY, String(size));
+  } catch {
+    /* best-effort; a failed write shouldn't crash the toggle click */
+  }
+}
+
 export default function CycleTrendCard({ history }) {
   const navigate = useNavigate();
 
   const allCycles = history?.cycles ?? [];
   const available = allCycles.length;
 
-  // Default follows data: ≤ 6 cycles forces the 6m window and only
-  // that button is enabled. Above 6, default 12m.
-  const [size, setSize] = useState(() => (available <= 6 ? 6 : 12));
+  // Initial window resolution, in order of precedence:
+  //   1. User's explicit persisted preference (localStorage).
+  //   2. Data-size heuristic — ≤ 6 cycles → 6m, otherwise 12m.
+  // The persisted value may be *larger* than `available` (user saved
+  // 24m, then lost most of their data). That's fine: `effectiveSize`
+  // below caps to what exists on every render, so the chart always
+  // paints the right number of bars. `size` is preserved verbatim so
+  // that when the history grows back above 6 the user's preference
+  // resurfaces automatically instead of being clobbered to 12.
+  const [size, setSize] = useState(() => {
+    const stored = readStoredSize();
+    if (stored != null) return stored;
+    return available <= 6 ? 6 : 12;
+  });
 
   // Size may drift when the parent re-renders with a longer/shorter
   // history. Re-derive what's actually renderable without mutating
@@ -240,6 +278,18 @@ export default function CycleTrendCard({ history }) {
     if (available <= 6) return Math.min(6, available);
     return Math.min(size, available);
   }, [available, size]);
+
+  // Wrapping setSize — every click-through-to-change goes through
+  // here so localStorage and state stay in sync. The `disabled` gate
+  // on the button itself prevents invalid values from reaching this
+  // handler, but we re-check against `VALID_SIZES` as defence in depth
+  // (callers evolve; a stray `setSize(NaN)` would silently poison the
+  // storage key for next mount).
+  const handlePickSize = (opt) => {
+    if (!VALID_SIZES.includes(opt)) return;
+    setSize(opt);
+    writeStoredSize(opt);
+  };
 
   const visible = useMemo(
     () => allCycles.slice(-effectiveSize),
@@ -326,7 +376,7 @@ export default function CycleTrendCard({ history }) {
               <button
                 key={opt}
                 type="button"
-                onClick={() => !disabled && setSize(opt)}
+                onClick={() => !disabled && handlePickSize(opt)}
                 disabled={disabled}
                 aria-pressed={active}
                 className={`rounded-full px-3 py-1 font-medium transition-colors ${
