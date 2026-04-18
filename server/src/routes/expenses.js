@@ -3,12 +3,14 @@ import mongoose from 'mongoose';
 import Expense from '../models/Expense.js';
 import Category from '../models/Category.js';
 import CurveLog from '../models/CurveLog.js';
+import CurveExpenseExclusion from '../models/CurveExpenseExclusion.js';
 import {
   computeDigest,
   reassignCategoryBulk,
 } from '../services/expense.js';
 import { loadContext, resolveCategory } from '../services/categoryResolver.js';
 import { computeDashboardStats } from '../services/expenseStats.js';
+import { parseExpenseDateOrNull } from '../services/expenseDate.js';
 import { audit, clientIp } from '../services/audit.js';
 
 const router = Router();
@@ -21,12 +23,17 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Allowlist of sortable fields. Anything else falls back to `-date`
-// (default). This prevents a caller from sorting on an indexed field
-// they shouldn't see (e.g. `user_id` would change result ordering but
-// leak nothing since the user filter is applied first; still, tight is
-// better than loose).
+// Allowlist of sortable fields. Anything else falls back to
+// `-date_at` (default). `date` (the raw string) is kept in the
+// allowlist for retro-compat with any client that hasn't migrated
+// yet; it will be removed one or two sprints from now once the
+// dashboards, the /expenses page, and the /categories detail panel
+// are all confirmed to be sending `-date_at`. Sorting on `date`
+// remains broken (lexical on day-first strings + mixed BSON types,
+// see ROADMAP §2.x investigation + scripts/analyze-expense-dates.js);
+// leaving it is an explicit retro-compat choice, not an endorsement.
 const ALLOWED_SORT_FIELDS = new Set([
+  'date_at',
   'date',
   'amount',
   'entity',
@@ -35,10 +42,10 @@ const ALLOWED_SORT_FIELDS = new Set([
 ]);
 
 function sanitiseSort(raw) {
-  if (!raw || typeof raw !== 'string') return '-date';
+  if (!raw || typeof raw !== 'string') return '-date_at';
   const desc = raw.startsWith('-');
   const field = desc ? raw.slice(1) : raw;
-  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date_at';
   return desc ? `-${field}` : field;
 }
 
@@ -78,6 +85,10 @@ router.get('/', async (req, res) => {
       start,
       end,
       fields,
+      // ROADMAP §2.10 — 'excluded' = only rows the user has flagged
+      // as "don't count this cycle"; 'included' = only rows they
+      // haven't. Default 'all' mirrors pre-§2.10 behaviour.
+      exclude_filter,
     } = req.query;
     const safeSort = sanitiseSort(sort);
     const filter = { user_id: req.userId };
@@ -146,6 +157,32 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // Pre-compute the user's exclusion set once — used both to filter
+    // by `exclude_filter` (if present) and to annotate each returned
+    // row with `excluded: boolean`. At MVP scale this set is small
+    // (dozens per user at most) so a single in-memory Set is the
+    // simplest join strategy.
+    const exclusionRows = await CurveExpenseExclusion.find({
+      user_id: req.userId,
+    })
+      .select('expense_id')
+      .lean();
+    const excludedSet = new Set(
+      exclusionRows.map((r) => r.expense_id.toString()),
+    );
+
+    if (exclude_filter === 'excluded' || exclude_filter === 'included') {
+      // Narrow the Mongo filter by the excluded ids before counting.
+      // An empty exclusion set + `exclude_filter=excluded` correctly
+      // yields zero rows (via `_id: { $in: [] }`).
+      const idList = [...excludedSet];
+      if (exclude_filter === 'excluded') {
+        filter._id = { $in: idList };
+      } else {
+        filter._id = { $nin: idList };
+      }
+    }
+
     // ──────── Compact id-only mode ────────
     if (fields === '_id') {
       const total = await Expense.countDocuments(filter);
@@ -185,6 +222,9 @@ router.get('/', async (req, res) => {
     const enriched = data.map((e) => ({
       ...e,
       category_name: e.category_id ? catMap[e.category_id.toString()] ?? null : null,
+      // `excluded` is derived from the exclusion set loaded above;
+      // the `CurveExpenseExclusion` collection is the source of truth.
+      excluded: excludedSet.has(e._id.toString()),
     }));
 
     // Dashboard KPIs — computed in parallel with the list fetch above
@@ -233,6 +273,15 @@ router.post('/', async (req, res) => {
       entity,
       amount,
       date,
+      // Typed chronological companion. This handler has no validator
+      // gate today (unlike the sync path via emailParser.validateParsed),
+      // so `date` may be missing or malformed when the caller bypasses
+      // the frontend form. `parseExpenseDateOrNull` returns null for
+      // anything it can't parse — the row still inserts, it just
+      // won't appear in the `-date_at` sort (sparse index). Never a
+      // good outcome but strictly better than the current lex-on-
+      // string behaviour, and the frontend form enforces the shape.
+      date_at: parseExpenseDateOrNull(date),
       card,
       digest,
       user_id: req.userId,
@@ -481,6 +530,149 @@ router.put('/bulk-category', async (req, res) => {
       skipped,
       target_category_name: targetCategory?.name ?? null,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /api/expenses/exclusions
+// DELETE /api/expenses/exclusions
+//
+// Toggle the "do not count for cycle / savings score" flag on up to
+// 500 expenses owned by the caller (ROADMAP §2.10). The exclusion
+// lives in the Curve-Sync-owned `curve_expense_exclusions` collection
+// — we never mutate `expenses` beyond the §4.4 `category_id`
+// relaxation (CLAUDE.md → MongoDB Collection Access Rules).
+//
+// Body: `{ expense_ids: [String] }` (1..500 hex strings). DELETE
+// accepts the same shape for symmetry; RESTful sensibilities want a
+// body on DELETE rarely but here it's worth it — a URL with 500 ids
+// would be unwieldy and the handlers mirror each other's validation.
+//
+// Authorisation: req.userId from the router-level `authenticate`
+// middleware. Every write is scoped by `{ user_id: req.userId, expense_id }`
+// so cross-user payloads silently no-op. We also re-check that every
+// id in the payload actually belongs to the caller before writing —
+// this is belt-and-braces (the write itself is already safe) but it
+// keeps the `count` in the audit row honest.
+//
+// Responses:
+//   200 { affected, skipped }
+//       `affected` = number of exclusions actually created (POST) or
+//                     deleted (DELETE). POST absorbs duplicates
+//                     silently (idempotent — unique index on
+//                     (user_id, expense_id)); DELETE collapses to 0
+//                     when the row wasn't excluded.
+//       `skipped`  = ids the user doesn't own OR ids that were
+//                     already in the target state.
+//   400 invalid_body           — array missing, empty, > 500, or
+//                                containing malformed hex strings
+// ─────────────────────────────────────────────────────────────────────
+const MAX_EXCLUSION_BATCH = 500;
+
+function parseExclusionBody(body) {
+  const ids = body?.expense_ids;
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_EXCLUSION_BATCH) {
+    return { error: 'invalid_body' };
+  }
+  const unique = [...new Set(ids)];
+  if (unique.some((id) => !mongoose.isValidObjectId(id))) {
+    return { error: 'invalid_body' };
+  }
+  return { unique };
+}
+
+router.post('/exclusions', async (req, res) => {
+  try {
+    const parsed = parseExclusionBody(req.body);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    // Filter down to ids the caller actually owns — anything else
+    // contributes to `skipped` without ever touching the DB.
+    const owned = await Expense.find({
+      _id: { $in: parsed.unique },
+      user_id: req.userId,
+    })
+      .select('_id entity')
+      .lean();
+    const ownedIds = owned.map((r) => r._id);
+
+    // Bulk upsert: one write per id, but the unique index on
+    // (user_id, expense_id) collapses duplicates to the existing row
+    // with no-op. `bulkWrite` in unordered mode returns `upsertedCount`
+    // — the number of *new* exclusions, which is what the user sees
+    // as "N excluídas" in the toast.
+    let affected = 0;
+    if (ownedIds.length > 0) {
+      const ops = ownedIds.map((id) => ({
+        updateOne: {
+          filter: { user_id: req.userId, expense_id: id },
+          update: { $setOnInsert: { user_id: req.userId, expense_id: id } },
+          upsert: true,
+        },
+      }));
+      const result = await CurveExpenseExclusion.bulkWrite(ops, {
+        ordered: false,
+      });
+      affected = result.upsertedCount ?? 0;
+    }
+    const skipped = parsed.unique.length - affected;
+
+    // Single-row branch carries expense_id + entity for the
+    // /curve/logs renderer. Bulk branch leaves them null and relies
+    // on `count=N` in detail.
+    const single = ownedIds.length === 1 ? owned[0] : null;
+    audit({
+      action: 'expense_excluded_from_cycle',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `count=${affected}`,
+      expenseId: single?._id,
+      entity: single?.entity,
+    });
+
+    res.json({ affected, skipped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/exclusions', async (req, res) => {
+  try {
+    const parsed = parseExclusionBody(req.body);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    // Validate ownership first — same belt-and-braces as POST.
+    const owned = await Expense.find({
+      _id: { $in: parsed.unique },
+      user_id: req.userId,
+    })
+      .select('_id entity')
+      .lean();
+    const ownedIds = owned.map((r) => r._id);
+
+    let affected = 0;
+    if (ownedIds.length > 0) {
+      const result = await CurveExpenseExclusion.deleteMany({
+        user_id: req.userId,
+        expense_id: { $in: ownedIds },
+      });
+      affected = result.deletedCount ?? 0;
+    }
+    const skipped = parsed.unique.length - affected;
+
+    const single = ownedIds.length === 1 ? owned[0] : null;
+    audit({
+      action: 'expense_included_in_cycle',
+      userId: req.userId,
+      ip: clientIp(req),
+      detail: `count=${affected}`,
+      expenseId: single?._id,
+      entity: single?.entity,
+    });
+
+    res.json({ affected, skipped });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

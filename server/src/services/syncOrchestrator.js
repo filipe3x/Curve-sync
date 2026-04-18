@@ -51,6 +51,7 @@ import CurveLog from '../models/CurveLog.js';
 import Expense from '../models/Expense.js';
 import { parseEmail, ParseError, validateParsed } from './emailParser.js';
 import { loadContext, resolveCategoryDetailed } from './categoryResolver.js';
+import { parseExpenseDateOrNull } from './expenseDate.js';
 import { ImapReader } from './imapReader.js';
 import { audit } from './audit.js';
 
@@ -537,6 +538,13 @@ export async function syncEmails({ config, reader, dryRun = false }) {
           entity: parsed.entity,
           amount: parsed.amount,
           date: parsed.date,
+          // Typed chronological companion. The `validateParsed` gate
+          // above already rejected emails whose date string doesn't
+          // pass Date.parse, so `parseExpenseDateOrNull` should
+          // return a real Date here; we still tolerate null defensively
+          // (e.g. a future parser change that widens what it accepts)
+          // and let the sparse index on `date_at` drop such rows.
+          date_at: parseExpenseDateOrNull(parsed.date),
           card: parsed.card,
           digest: parsed.digest,
           user_id: config.user_id,

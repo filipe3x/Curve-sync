@@ -123,6 +123,29 @@ Interface inspirada no Curve.com — sóbria, monocromática, com cantos arredon
 - **`curve`** — tons de vermelho escuro/castanho (#a03d27 → #3b160f)
 - **`sand`** — cinzentos quentes (#faf9f7 → #2f2a24)
 
+## Migrações one-shot
+
+### Expense `date_at` (ROADMAP §2.x — Opção C)
+
+Desde o PR [`claude/improve-expense-date-display-YFA21`] a listagem de `/expenses`, a dashboard «Despesas recentes» e o painel de detalhe em `/categories` sortam por `-date_at` — um campo `Date` tipado que vive lado-a-lado com o legacy `date: String`. Antes, o default era `-date` e estava quebrado: sort lexical sobre strings day-first («06 April 2026 08:53:31») + BSON type order (`String < Date`) em campos mixed-type colocavam rows antigas no topo e recentes no fundo da lista. Ver `server/scripts/analyze-expense-dates.js` para o diagnóstico completo.
+
+⚠️ **Sequência importante para o deploy:** esta migração tem os steps 1-5 empilhados. **Só se merge o step 5 para prod depois de correr o backfill lá também.** Se o flip aterrar em prod antes do backfill, rows sem `date_at` caem para o fundo da lista (null sort descendente) — visível, não é data loss, mas degradação visível da UX até o backfill correr.
+
+Runbook canónico:
+
+1. **Deploy dos steps 1-4** (schema + INSERT path + script). Novos inserts já gravam `date_at`, nenhum query lê esse campo ainda. Zero impacto para o utilizador.
+2. **Correr o backfill em prod:**
+   ```bash
+   node server/scripts/analyze-expense-dates.js              # audit
+   node server/scripts/analyze-expense-dates.js --write      # plano
+   node server/scripts/analyze-expense-dates.js --write --yes # execução
+   node server/scripts/analyze-expense-dates.js --write      # idempotência
+   ```
+   Antes de avançar, confirmar no último comando: `rows to populate this run: 0` e `rows unparseable: 0`.
+3. **Deploy do step 5** (flip do sort default para `-date_at`). Listagens passam a ficar correctas.
+
+Se o step 5 já aterrou sem o backfill ter corrido, a recuperação é correr o backfill o quanto antes — não há data loss, os rows só ficam temporariamente sortados no fim.
+
 ## Raspberry Pi / Deployment
 
 O projecto funciona num Raspberry Pi 5 (ARM64) com Node.js >= 18 e MongoDB >= 5.0. Existem scripts de verificação na pasta `scripts/`:

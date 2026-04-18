@@ -256,6 +256,316 @@ Adicionar ao dashboard um gráfico que mostre, ciclo-a-ciclo, o consumo total em
 - `CLAUDE.md` → Custom Monthly Cycle
 - Fase 2.5 deste roadmap — mesma pipeline de `computeDashboardStats` estende-se a `computeCycleHistory`
 
+### ~~2.9 Data relativa user-friendly na tabela de despesas recentes~~ ✅ — MVP
+
+> **Implementado.**
+> - `client/src/utils/relativeDate.js` — `formatExpenseDate(iso, now?)` + `formatAbsoluteDate(iso)`; sete bandas civil-day-aware (`ontem` é o dia civil anterior em fuso local, não rolling 24 h). `Intl.DateTimeFormat('pt-PT')` com cache do formatter.
+> - `DashboardPage.jsx` + `ExpensesPage.jsx` — coluna Data agora renderiza `formatExpenseDate(exp.date)` com `title={formatAbsoluteDate(exp.date)}` na `<td>` para tooltip com a data completa.
+> - Sem impacto no backend, no schema, ou no pipeline de sync.
+
+### 2.9 — nota histórica (spec original)
+
+Substituir a string crua de `Expense.date` na coluna **Data** da tabela «Despesas recentes» do Dashboard (e, por extensão, da tabela de `/expenses`) por uma formulação relativa em português, mais legível de relance. A ideia é que uma despesa de hoje se leia como «há 3 min» ou «há 2 h» e uma dos últimos dias como «ontem», «anteontem» ou «há N dias» (até um máximo de **5** dias), caindo para a data absoluta (ex. `17 Abr 2026`) a partir daí.
+
+**Estado actual:**
+
+- O Dashboard já tem um formatter relativo (`formatRelativePt`) em `client/src/pages/DashboardPage.jsx:22` — mas **só o usa para o StatCard «Último sync»**. A coluna Data da tabela renderiza `exp.date` cru (linha `<td className="px-5 py-3 text-sand-500">{exp.date}</td>`)
+- `/expenses` também renderiza `exp.date` cru
+- `Expense.date` é armazenado como string (vem do parser cheerio — ver `emailParser.js` e o padrão de `parseExpenseDate` em `expenseStats.js`), portanto é necessário passar por `Date.parse` antes de comparar
+
+**Requisitos funcionais:**
+
+| Diferença face a `now` | Texto renderizado |
+|------------------------|-------------------|
+| `< 60 s` | `há segundos` |
+| `< 60 min` | `há N min` |
+| `< 24 h` | `há N h` |
+| 1 dia (mesmo dia civil anterior) | `ontem` |
+| 2 dias | `anteontem` |
+| 3–5 dias | `há N dias` |
+| `> 5 dias` ou data no futuro | fallback para a data absoluta `DD MMM YYYY` (pt-PT, `Intl.DateTimeFormat`) |
+
+- A decisão **dia civil vs. 24 h rolling** importa: «ontem» deve ser o dia civil anterior ao de hoje no fuso local, não «entre 24 e 48 h atrás». Uma despesa feita ontem às 23:00 e vista hoje às 08:00 deve ler «ontem», não «há 9 h»
+- O `title` attribute da `<td>` passa a carregar a data absoluta completa (para o utilizador passar o cursor e ver o valor exacto)
+- Datas não parseáveis caem silenciosamente para o texto original — nunca quebrar a linha
+
+**Estrutura de implementação:**
+
+1. **Frontend — novo helper partilhado**
+   - `client/src/utils/relativeDate.js` — `formatExpenseDate(iso, now = Date.now())` puro, testável; cobre as 7 bandas acima + fallback absoluto
+   - `DashboardPage.jsx` — substituir `{exp.date}` por `{formatExpenseDate(exp.date)}` e mover `formatRelativePt` (StatCard do "Último sync") para usar a banda curta do mesmo helper para consistência
+   - `ExpensesPage.jsx` — idem na coluna Data
+   - Adicionar `title={formatAbsoluteDate(exp.date)}` à `<td>` em ambos os sítios
+
+2. **Testes**
+   - `client/src/utils/__tests__/relativeDate.test.js` (ou homólogo server-side se optarmos por fazer o cálculo no backend — ver nota abaixo) com casos:
+     - `now - 30 s` → `há segundos`
+     - `now - 5 min` → `há 5 min`
+     - `now - 3 h` → `há 3 h`
+     - Ontem 23:00 visto hoje 08:00 → `ontem` (não `há 9 h`)
+     - Anteontem → `anteontem`
+     - `now - 4 dias` → `há 4 dias`
+     - `now - 6 dias` → fallback absoluto
+     - Data inválida / vazia → string original devolvida sem crash
+     - Fuso: deve respeitar timezone local (o server é UTC, o cliente é pt-PT)
+
+3. **Decisão aberta — client-side vs server-side**
+   - **Opção A (preferida):** cálculo no cliente. Prós: timezone local nativo, re-renderiza ao navegar entre páginas sem stale, zero bytes na wire. Contras: se a aba ficar aberta 5 horas, `há 2 min` fica parada até um re-render (mitigável com um `setInterval(60_000)` no dashboard)
+   - **Opção B:** calcular no backend em `parseExpenseDate` e serializar. Prós: uma única fonte de verdade, testes em Node. Contras: perde timezone do utilizador (o backend é UTC), envelhece assim que o payload é servido
+   - A opção A ganha pela UX e pela ausência de mudança no contrato da API
+
+**Notas de design:**
+
+- Máximo de 5 dias não é arbitrário — acima disso o texto relativo perde utilidade («há 17 dias» diz menos do que `30 Mar 2026`) e a data absoluta é mais rápida de ler
+- A data absoluta usa `Intl.DateTimeFormat('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' })`, consistente com o resto da app
+- Não mexer em `Expense.date` no schema — o campo continua string, a formatação é apenas de apresentação
+
+**Dependências:** Nenhuma. É puramente visual; zero impacto no backend, no schema, ou no pipeline de sync.
+
+**Referências:**
+- `client/src/pages/DashboardPage.jsx:22` — `formatRelativePt` actual (apenas «Último sync»)
+- `server/src/services/expenseStats.js` — `parseExpenseDate` defensivo (mesma estratégia de parsing se optarmos por Opção B)
+- `docs/UIX_DESIGN.md` — tom/voz pt-PT
+
+---
+
+### ~~2.10 Excluir despesa do ciclo / Savings Score~~ ✅ — MVP
+
+> **Implementado.**
+>
+> Backend:
+> - `server/src/models/CurveExpenseExclusion.js` — nova colecção Curve-Sync-owned (`curve_expense_exclusions`), mesmo padrão do `CategoryOverride`. Unique index em `(user_id, expense_id)` torna o POST idempotente. Schema de `expenses` intocado (respeita CLAUDE.md → MongoDB Collection Access Rules).
+> - `server/src/routes/expenses.js` — `POST /api/expenses/exclusions` + `DELETE /api/expenses/exclusions`, body `{ expense_ids: [...] }`, cap 500. Validação de ownership antes de escrever (cross-user silently no-op). Respostas `{ affected, skipped }`.
+> - `GET /api/expenses` — cada row ganha `excluded: boolean`; query param `?exclude_filter=excluded|included|all` (default `all`) para filtrar a vista.
+> - `server/src/services/expenseStats.js :: computeDashboardStats` — exclusões carregadas em paralelo e filtradas do `month_total` **e** do `weekly_expenses`, portanto o `savings_score` também desce automaticamente. Override de testes aceita `{ exclusions }` no mesmo shape.
+> - `server/src/models/CurveLog.js` — dois novos valores de `action`: `expense_excluded_from_cycle`, `expense_included_in_cycle`. Single-row carrega `expense_id + entity`; bulk carrega só `detail = "count=<N>"`.
+>
+> Frontend:
+> - `client/src/services/api.js` — `excludeExpenses(ids)`, `includeExpenses(ids)`.
+> - `ExpensesPage.jsx` — botão «Excluir do ciclo / Incluir no ciclo» no action bar (label flipa conforme `selectionAllExcluded`). Optimistic update, banner de undo inline (6 s, mesmo padrão da §2.5), row tinting `bg-sand-50 opacity-60` + badge `excluída` na coluna Data.
+> - `DashboardPage.jsx` — row tinting e badge espelham o visual da `/expenses` (sem toggle UI — exclusão só se controla a partir de `/expenses`).
+>
+> Scope cut vs spec original:
+> - Undo é one-at-a-time (não per-expense como o banner de categorias) porque um «excluir 10» é semanticamente uma acção única que o user vai querer anular como um todo — menos clutter na UI.
+> - Testes server-side não foram adicionados neste PR (follow-up: estender `expenseStats.test.js` + novo `expenseExclusions.test.js`).
+
+### 2.10 — nota histórica (spec original)
+
+Permitir ao utilizador marcar uma despesa como **excluída do cálculo do ciclo actual e do Savings Score**, sem a apagar (DELETE em `expenses` continua proibido — Embers é owner). O caso de uso canónico: uma despesa anormal (reembolso pendente, pagamento de grupo que outra pessoa vai devolver, erro de categorização que obriga a duplicado) que distorce o «Despesas este mês» ou o Savings Score sem razão estrutural.
+
+**Requisitos funcionais:**
+
+- Em `/expenses`, o action bar actual «*N* despesa(s) seleccionada(s) · Limpar · Mover para…» passa a ter uma terceira acção: **«Excluir do ciclo»** (toggle — se toda a selecção já está excluída, o botão passa a «**Incluir no ciclo**»)
+- Despesas excluídas aparecem **com cor de fundo distinta** na tabela (ex. `bg-sand-50` + texto `text-sand-400` + badge discreto `excluída` na coluna Categoria ou Data) para o utilizador perceber de relance que não contam para os totais
+- No Dashboard, as mesmas despesas aparecem com a mesma estilização na «Despesas recentes»
+- Os `StatCard` do Dashboard (**Despesas este mês** e **Savings Score**) **ignoram** despesas excluídas no ciclo actual — tanto `month_total` como o `weekly_expenses` da fórmula do score
+- A coluna «Sem categoria» continua a contar o que o utilizador vê; excluir não re-categoriza
+- Undo curto (mesmo padrão da §2.5 / docs/Categories.md §12 — 6 s para anular a última exclusão/inclusão via banner)
+- Auditoria: cada toggle escreve em `curve_logs` com novas acções `expense_excluded_from_cycle` e `expense_included_in_cycle` (ver `docs/CURVE_LOGS.md` §4 para o contrato e `docs/Categories.md` §13.2 para o padrão de enumeração)
+
+**Constraint crítico — não se pode alterar o schema de `Expense`:**
+
+Por `CLAUDE.md` → MongoDB Collection Access Rules, a coleção `expenses` só aceita UPDATE ao campo `category_id`:
+
+> **`expenses`** — READ + INSERT + UPDATE of **`category_id` only**. All other fields [...] remain INSERT-only. DELETE is still forbidden — Embers owns the destroy path.
+
+Logo, **não se pode adicionar** um campo `excluded_from_cycle` a `Expense`. A solução segue o mesmo padrão do `CategoryOverride` (§2 do `docs/Categories.md`): nova colecção **owned exclusivamente pela Curve Sync**, invisível ao Embers.
+
+**Modelo novo — `CurveExpenseExclusion`:**
+
+```js
+// server/src/models/CurveExpenseExclusion.js
+{
+  user_id:    ObjectId,  // required, indexed
+  expense_id: ObjectId,  // required — ref Expense
+  created_at: Date,      // when it was excluded
+  note:       String,    // optional short reason typed by the user
+}
+// Unique index: { user_id: 1, expense_id: 1 }
+// Collection name (explicit): 'curve_expense_exclusions'
+// Access control: always scoped by `user_id: req.userId`
+```
+
+**Estrutura de implementação:**
+
+1. **Backend — modelo + routes**
+   - `server/src/models/CurveExpenseExclusion.js` — schema acima, `strict: true`, `timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }`
+   - `server/src/routes/expenseExclusions.js` (ou estender `routes/expenses.js`):
+     - `POST /api/expenses/exclusions` — body `{ expense_ids: [...] }`; upsert por par `(user_id, expense_id)`; devolve contagem criada/existente
+     - `DELETE /api/expenses/exclusions` — body `{ expense_ids: [...] }`; remove exclusões para os ids
+     - Single-row também válido (`POST` com um id), para o banner undo
+   - Todas as handlers filtram por `req.userId` primeiro (exactamente como `CategoryOverride`)
+
+2. **Backend — integração com stats**
+   - `expenseStats.js :: computeDashboardStats` passa a carregar `CurveExpenseExclusion.find({ user_id }).select('expense_id').lean()` e filtra o agregado:
+     ```js
+     const excluded = new Set(exclusions.map(e => String(e.expense_id)));
+     const effective = expenses.filter(e => !excluded.has(String(e._id)));
+     ```
+   - O mesmo filtro aplica-se tanto a `month_total` como a `weekly_expenses` (que alimenta `computeSavingsScore`). Logs de auditoria NÃO são recalculados — a exclusão é de *apresentação*, não de *existência* da despesa
+   - `computeCycleHistory` (§2.8, quando aterrar) lê o mesmo conjunto e aplica o mesmo filtro por ciclo para que o gráfico seja coerente
+
+3. **Backend — listagem de despesas**
+   - `GET /api/expenses` junta a cada row o booleano `excluded: true|false` via `$lookup` ou join em memória (preferir in-memory para escala actual — 1 query extra por página, pequena)
+   - Query param opcional `?exclude_filter=excluded|included|all` (default `all`) para o utilizador filtrar a vista
+
+4. **Frontend — action bar em `/expenses`**
+   - `ExpensesPage.jsx` — adicionar botão «Excluir do ciclo» no bloco `{selectedIds.size > 0 && (...)}` (linha ~492). Texto alterna para «Incluir no ciclo» quando `selectedIds.every(id => row.excluded === true)`
+   - Handler chama `POST/DELETE /api/expenses/exclusions`, actualiza rows optimisticamente, e empurra um undo banner (mesma infra do `categoryEdits` — ver `CategoryEditUndoBanner`)
+
+5. **Frontend — estilização de rows excluídas**
+   - `<tr>` ganha `className` condicional: `data-excluded={exp.excluded}` + uma classe tailwind `opacity-60 bg-sand-50` quando excluído
+   - Badge `excluída` pequeno na coluna Data (reaproveitar `.badge bg-sand-100 text-sand-400`)
+   - Mesma estilização em `DashboardPage.jsx :: Despesas recentes`
+   - `title` na row explica «Esta despesa está excluída do cálculo do ciclo e do Savings Score»
+
+6. **Auditoria (`curve_logs`)**
+   - 2 novas acções: `expense_excluded_from_cycle`, `expense_included_in_cycle`
+   - Payload inclui `expense_id`, `entity`, `amount`, `count` (para toggles em massa). Ver contrato em `docs/CURVE_LOGS.md` §4
+   - Lista `/curve/logs` ganha labels pt-PT para os novos tipos (mesmo padrão das 13 acções de categorias)
+
+**Testes:**
+
+- `server/test/expenseExclusions.test.js` — CRUD de exclusões (scoped por `user_id`, não pode ver exclusões de outros), toggle idempotente
+- `server/test/expenseStats.test.js` — estender os casos existentes: `computeDashboardStats` com 3 expenses, 1 excluída → `month_total` e `weekly_expenses` ignoram-na; Savings Score sobe em conformidade
+- `client` — smoke test do botão (se houver setup de testes frontend) ou teste manual documentado
+
+**Notas de design:**
+
+- **Porquê toggle em vez de soft-delete?** «Excluir» sugere acção destrutiva; a ideia é apenas «não contar para este mês». O verbo «Excluir do ciclo / Incluir no ciclo» é explícito e reversível
+- **Scope da exclusão é global, não por-ciclo**: uma vez excluída, a despesa não conta para nenhum cálculo (ciclo actual, histórico, score). Permitir exclusão *só no ciclo X* seria sobre-engenharia — quase ninguém volta a ver um ciclo passado
+- **Não aparece em `/curve/logs?tab=uncategorised`**: a exclusão é ortogonal à categorização
+- **Por-user, sempre**: mesmo admin não vê nem mexe em exclusões de outros (mesmo padrão de `CurveCategoryOverride`)
+
+**Dependências:**
+- Requer **2.5** (stats no Dashboard) — estende `computeDashboardStats`
+- Beneficia de **2.6** (filtros `/expenses`) — o `?exclude_filter=` encaixa nos query params existentes
+- Não depende de **2.8** (gráfico por ciclo), mas o gráfico deve aplicar o mesmo filtro quando aterrar
+
+**Referências:**
+- `CLAUDE.md` → «MongoDB Collection Access Rules» (constraint de não-mexer no schema de `expenses`)
+- `server/src/models/CategoryOverride.js` — template para uma colecção Curve-Sync-only
+- `server/src/services/expenseStats.js` — `computeDashboardStats` e `computeSavingsScore`
+- `client/src/pages/ExpensesPage.jsx:492` — bloco do action bar da selecção
+- `docs/Categories.md` §12 — padrão do undo banner optimista (reutilizar)
+- `docs/CURVE_LOGS.md` §4 — contrato do `curve_logs` para as 2 novas acções
+
+---
+
+### ~~2.11 🐛 Dashboard stale após «Sincronizar agora» + tween consistente nos KPIs~~ ✅ — MVP
+
+> **Implementado.** Ver commits abaixo. Resumo do que aterrou:
+>
+> - `DashboardPage.jsx` — seis fetches consolidados em `loadDashboard()`; chamado no mount e no `finally` de `handleSync` em substituição dos três fetches soltos. Inclui `getExpenses` — que é o que alimenta `stats.month_total` + `stats.savings_score` + `recentExpenses` e, antes, ficava stale até reload
+> - `client/src/components/common/AnimatedKPI.jsx` — novo componente partilhado (variantes `default` para o dashboard e `compact` para o KPI strip de `/categories`). Os três cards numéricos do dashboard (Despesas este mês, Savings Score, Sem categoria) passam a usá-lo; o StatCard «Último sync» mantém-se (valor relativo em texto, não numérico)
+> - `hooks/useCountUp.js` — tween agora parte de `previousValue` em updates (via ref), só parte de 0 no primeiro paint. Um score a subir de 8.1 → 8.3 já não regride visualmente a 0 antes de climbar
+> - **Savings Score = 10** ganha o efeito subtil `kpi-perfect` (`index.css`): shimmer horizontal clipado ao número em gradiente `curve-700 → amber-400 → curve-700`, breathing scale 1 ↔ 1.03 em 2.8 s, halo de `drop-shadow` em `amber-300/55`. Só activa depois do tween aterrar (`Math.abs(tweened - 10) < 0.05`) — senão o efeito piscaria ao atravessar 10.0 durante a subida. Os três layers respeitam `prefers-reduced-motion: reduce` via o bloco global em `index.css`
+> - `CategoriesPage.jsx` — migrada para o `AnimatedKPI` partilhado (`variant="compact"`); zero regressão visual no KPI strip
+
+### 2.11 — nota histórica 🐛 (spec original)
+
+**Bug.** Depois de clicar «Sincronizar agora» no Dashboard e o sync importar despesas novas com sucesso, os `StatCard` de **«Despesas este mês»** e **«Savings Score»** continuam a mostrar os valores antigos. A tabela «Despesas recentes» também fica stale. Só o card «Sem categoria» e «Último sync» actualizam, porque são os únicos que `handleSync` re-fetcha. O utilizador tem de recarregar a página para ver o resultado real da sincronização — o que contraria o próprio propósito do botão.
+
+**Root cause.** `DashboardPage.jsx :: handleSync` (linha ~317) faz, no `finally`:
+
+```js
+await refreshStatuses();                   // sync_status + oauth_status
+api.getUncategorisedStats().then(...)      // uncategorised count
+```
+
+Mas **nunca** re-invoca `api.getExpenses({ limit: 5, sort: '-date' })`, que é o endpoint que alimenta:
+
+- `recentExpenses` (tabela inteira)
+- `stats` (do `meta`): `month_total`, `savings_score`, `weekly_savings`, `weekly_budget`, `emails_processed`
+
+O `useEffect` de mount só corre uma vez, portanto tudo o que depende de `stats` fica congelado no valor inicial.
+
+**Fix de dados:**
+
+- Extrair a fetch inicial do `useEffect` para um helper `loadDashboard()` (paralelo, `Promise.allSettled`)
+- Chamá-lo também no `finally` de `handleSync` em vez do bloco actual de 3 fetches dispersos
+- O helper devolve quatro coisas em paralelo: `getExpenses({ limit: 5 })`, `getSyncStatus`, `getOAuthStatus`, `getUncategorisedStats` — todos com fallback silencioso (fetch que falhe não bloqueia o resto)
+
+**Fix de UX — tween estilo slot machine em todos os KPIs numéricos:**
+
+Relacionado mas não dependente: quando os valores **mudam** (post-sync, ou quando o utilizador re-categoriza uma despesa e o Savings Score se mexe), os números devem **re-animar** do valor anterior até ao novo valor, igual ao que já acontece em `/categories` — não um swap instantâneo. Hoje:
+
+| Card | Estado actual | Deve |
+|------|---------------|------|
+| Despesas este mês | `EUR.format(stats.month_total)` directo | tween €prev → €next |
+| Savings Score | `stats.savings_score.toFixed(1)` directo | tween 0.0 → 8.1 |
+| Sem categoria | já usa `useCountUp(uncategorisedCount ?? 0)` | ✅ ok |
+| Último sync | `formatRelativePt(...)` | N/A (não é numérico) |
+| `emails_processed` (sub-label) | `.toLocaleString('pt-PT')` directo | tween do contador |
+
+O padrão já existe e está provado em `client/src/pages/CategoriesPage.jsx:300` — o componente `AnimatedKPI` (`const tweened = useCountUp(value, 800)` + formatador à volta). **Reaproveitar — não recriar.**
+
+**Estrutura de implementação:**
+
+1. **Componente partilhado** — mover `AnimatedKPI` de `CategoriesPage.jsx` para `client/src/components/common/AnimatedKPI.jsx`:
+   ```jsx
+   export function AnimatedKPI({ label, value, format, sub, accent, title }) {
+     const tweened = useCountUp(value ?? 0, 800);
+     return (
+       <StatCard
+         label={label}
+         value={value == null ? '—' : format(tweened)}
+         sub={sub}
+         accent={accent}
+         title={title}
+       />
+     );
+   }
+   ```
+   - Notar: `value == null` → `—` (não mostra `0` durante o primeiro paint se o fetch ainda não resolveu)
+   - Reusa o `StatCard` existente para manter o visual consistente
+
+2. **Dashboard — adoptar `AnimatedKPI` nos três cards numéricos:**
+   ```jsx
+   <AnimatedKPI
+     label="Despesas este mês"
+     value={stats?.month_total}
+     format={(v) => EUR.format(v)}
+     sub={stats?.cycle ? `${stats.cycle.start} → ${stats.cycle.end}` : undefined}
+   />
+   <AnimatedKPI
+     label="Savings Score"
+     value={stats?.savings_score}
+     format={(v) => v.toFixed(1)}
+     sub={...}
+     title="..."
+     accent
+   />
+   ```
+   - Para «Sem categoria» já existe uma versão manual do `useCountUp`; substituir pela nova abstracção para cortar o código duplicado
+
+3. **`loadDashboard()` helper** — consolida todas as fetches num único ponto de entrada; chamado no mount e em `handleSync.finally`. Cada fetch individual continua a falhar silenciosamente para preservar o comportamento actual de «a dashboard nunca é hostage de um endpoint que esteja em baixo».
+
+4. **`useCountUp` — pequeno ajuste** (opcional, afina a UX):
+   - Hoje o hook anima sempre de `0 → value`. Isso é correcto no primeiro paint, mas em updates (post-sync) fica jumpy: um score que passa de `8.1` para `8.3` recua visivelmente para `0` e sobe
+   - Alterar o hook para animar de **`previousValue` → `value`** em transições subsequentes, mantendo `0` só como valor inicial do primeiro paint. O spec em `/categories` também beneficia — hoje disfarça-se porque mudar de categoria reseta visualmente os quatro cartões, mas a animação ainda assim «vem do 0»
+   - Implementação: guardar o `value` anterior num `ref`, usar `ref.current` como `from` no `tick`, actualizar no fim do rAF
+   - `prefers-reduced-motion: reduce` continua a cortar a animação inteira
+
+**Testes:**
+
+- `client/src/hooks/__tests__/useCountUp.test.js` — novo caso para previous-value animation (update de 5 → 8 não passa por 0)
+- Smoke manual no dashboard: clicar «Sincronizar agora» → confirmar que os quatro cards actualizam sem reload e que os números tween-am do valor anterior para o novo
+
+**Scope cut consciente:**
+
+- Não estender o tween à tabela «Despesas recentes» (só aos KPIs). A tabela já tem `animate-slide-in-right`-style delay por linha (`style={{ animationDelay: ... }}`) que dá a sensação de refresh — misturar com tween numérico fica barulhento
+- Não mexer nos StatCards das outras páginas (`/curve/config`, `/curve/logs`); cada uma pode migrar para `AnimatedKPI` em PRs separados se se mostrar útil
+
+**Dependências:** Nenhuma. É um bug fix frontend puro + reuso do hook `useCountUp` já existente.
+
+**Referências:**
+- `client/src/pages/DashboardPage.jsx:317` — `handleSync` actual (onde falta o refetch de `getExpenses`)
+- `client/src/pages/DashboardPage.jsx:131` — `useEffect` de mount (a extrair para `loadDashboard`)
+- `client/src/pages/CategoriesPage.jsx:300` — `AnimatedKPI` existente (a promover a partilhado)
+- `client/src/hooks/useCountUp.js` — hook a estender (0→value vira prev→value em updates)
+- `client/src/components/common/StatCard.jsx` — componente base inalterado
+
 ---
 
 ## Fase 3 — Polimento (Prioridade Baixa)
@@ -339,6 +649,59 @@ Na página de Logs, permitir re-trigger do parsing para logs com status `parse_e
 
 ### 3.8 Docker
 `Dockerfile` + `docker-compose.yml` para facilitar deploy (Curve Sync + MongoDB, ou apenas Curve Sync apontando para MongoDB externo).
+
+### 3.9 Script de deploy para o servidor de produção (Ubuntu 16) 🚀
+
+Automatizar o deploy em prod com um script único (`scripts/deploy-prod.sh` ou equivalente) que cobre o fluxo actual manual e as suas armadilhas.
+
+**Motivação imediata:** a migração `date_at` da Opção C expôs a dependência de sequência entre código e dados — step 5 (flip do sort default) **tem de** aterrar em prod depois do backfill, senão os utilizadores vêem degradação visível. Hoje a sequência é runbook manual no `README.md` § «Migrações one-shot». Um script que conheça pré-deploys desta natureza evita que a memória operacional se perca entre releases.
+
+**Contexto:** o servidor de produção corre **Ubuntu 16.04 (Xenial)** — package manager antigo, systemd disponível, node/npm instalados à mão. O script não pode assumir ferramentas modernas (ex. `npm ci --omit=dev` funciona; `nvm use --lts` pode não existir).
+
+**Requisitos funcionais:**
+
+| Fase | O que o script faz |
+|------|---------------------|
+| **1. Pré-voo** | Imprime banner com (a) diff de commits desde o último deploy, (b) **avisos prévios conhecidos** sobre migrações de dados e o _porquê_ (ex. «este release muda o sort de `-date` para `-date_at`; o backfill TEM de correr antes, ver commit XYZ»), (c) estado actual do servidor (disco, memória, processos Curve Sync, uptime do MongoDB) |
+| **2. Gate** | Pede confirmação explícita `CONFIRM=yes` ou flag `--yes`. Sem isso, sai com o plano impresso |
+| **3. Pull + build** | `git fetch` + `git checkout` do commit alvo, `npm ci` no client e server, `npm run build` (client), `systemctl stop curve-sync` |
+| **4. Migrações** | Detecta no diff de commits se há scripts em `server/scripts/` com prefixo `migrate-*` OU se o release inclui `docs/DEPLOY_NOTES.md` com bloco `## migration:` — corre esses primeiro. `analyze-expense-dates.js --write --yes` é o primeiro caso concreto |
+| **5. Start** | `systemctl start curve-sync` + health-check (`curl` a `/api/health`) |
+| **6. Rollback hook** | Se health-check falha, automaticamente volta ao commit anterior e reinicia |
+
+**Avisos prévios canónicos conhecidos** (a consolidar num ficheiro tipo `docs/DEPLOY_NOTES.md`):
+
+- **Opção C `date_at`** — «Antes deste release, os sorts do dashboard e /expenses passam de `-date` (lex sobre string) para `-date_at` (Date tipada). O backfill em `server/scripts/analyze-expense-dates.js` tem de correr PRIMEIRO, senão rows sem `date_at` vão aparecer no fundo da lista até o backfill correr. Não é data loss — é degradação visível. Ver README §Migrações one-shot.»
+- Futuros: sempre que um release mude a interpretação de um campo existente no MongoDB, adicionar aqui a nota com o _porquê_ (não só o que).
+
+**Estrutura proposta:**
+
+```
+scripts/
+├── deploy-prod.sh              # entry point
+├── deploy-lib/
+│   ├── preflight.sh            # banner + avisos + estado
+│   ├── gate.sh                 # confirmação interactiva
+│   ├── pull-build.sh           # git + npm ci + build
+│   ├── migrations.sh           # detect + run pending migrations
+│   ├── restart.sh              # systemctl + health check
+│   └── rollback.sh             # emergency revert
+docs/
+└── DEPLOY_NOTES.md             # migration banners, updated per release
+```
+
+**Scope cut consciente para o MVP deste script:**
+
+- Sem blue/green ou zero-downtime — um `systemctl stop` + `start` é aceitável para single-user prod
+- Sem GitHub Actions / CI wiring — corre-se à mão no servidor inicialmente; integração em pipeline é fase 2
+- Sem notificações (Slack, email) em falha — o prompt interactivo basta; um `set -euo pipefail` rigoroso trata o resto
+
+**Dependências:** Nenhuma de código. Depende de acesso SSH + systemd unit já configurado no servidor (já existe).
+
+**Referências:**
+- `README.md` § Migrações one-shot (contém o runbook manual actual da Opção C)
+- `server/scripts/analyze-expense-dates.js` (primeira migração que o script precisa de saber correr)
+- `scripts/setup-pi.sh` + `scripts/check-services.sh` (padrão bash existente no repo, reaproveitar estilo)
 
 ---
 

@@ -27,6 +27,7 @@
 
 import Expense from '../models/Expense.js';
 import CurveConfig from '../models/CurveConfig.js';
+import CurveExpenseExclusion from '../models/CurveExpenseExclusion.js';
 import { cycleBoundsFor, normaliseCycleDay } from './cycle.js';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -118,8 +119,9 @@ export function computeSavingsScore(weeklySavings, weeklyBudget) {
  *
  * @param {object} args
  * @param {import('mongoose').Types.ObjectId|string} args.userId
- * @param {object} [overrides] Test-only: `{ config, expenses, now }`
- *   bypasses the mongoose lookups so unit tests stay hermetic.
+ * @param {object} [overrides] Test-only: `{ config, expenses,
+ *   exclusions, now }` bypasses the mongoose lookups so unit tests
+ *   stay hermetic. `exclusions` is an array of `{ expense_id }` rows.
  * @returns {Promise<{
  *   month_total: number,
  *   weekly_expenses: number,
@@ -157,16 +159,36 @@ export async function computeDashboardStats({ userId }, overrides = {}) {
   const { start: cycleStart, end: cycleEnd } = cycleBoundsFor(now, cycleDay);
   const weekStart = new Date(now.getTime() - WEEK_MS);
 
+  // Expenses selected with `_id` so the excluded-set lookup below can
+  // skip them. The extra bytes are tiny compared to the wire cost of
+  // the full document — amount + date + _id is still a few dozen
+  // bytes per row.
   const rows =
     overrides.expenses !== undefined
       ? overrides.expenses
       : await Expense.find({ user_id: userId })
-          .select('amount date')
+          .select('_id amount date')
           .lean();
+
+  // Exclusions loaded in parallel-enough fashion (consecutive awaits
+  // are fine at this volume — each finds is a few dozen ObjectIds).
+  // ROADMAP §2.10: excluded rows drop out of BOTH `month_total` and
+  // `weekly_expenses`, so they can't inflate spending or depress the
+  // Savings Score.
+  const exclusions =
+    overrides.exclusions !== undefined
+      ? overrides.exclusions
+      : await CurveExpenseExclusion.find({ user_id: userId })
+          .select('expense_id')
+          .lean();
+  const excludedIds = new Set(
+    exclusions.map((e) => e.expense_id?.toString()).filter(Boolean),
+  );
 
   let monthTotal = 0;
   let weeklyExpenses = 0;
   for (const r of rows) {
+    if (r._id && excludedIds.has(r._id.toString())) continue;
     const when = parseExpenseDate(r.date);
     if (!when) continue;
     const amount = typeof r.amount === 'number' ? r.amount : Number(r.amount);
