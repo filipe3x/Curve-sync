@@ -194,6 +194,22 @@ async function main() {
 
   console.log(`loaded ${rows.length} expense rows\n`);
 
+  // Loud zero-row guard. When this fires it's almost always MONGODB_URI
+  // pointing at the default fallback `embers_db` instead of the real
+  // `embers_db_dev` / prod database. The script continues so the
+  // operator can still see the empty sections, but we flag it so the
+  // 0-row audit isn't mistaken for a clean migration result.
+  if (rows.length === 0) {
+    console.warn(
+      `⚠  No expenses found in the target database.\n` +
+        `   Connected to: ${MONGODB_URI}\n` +
+        `   If this is unexpected, verify server/.env or set MONGODB_URI ` +
+        `explicitly:\n` +
+        `     MONGODB_URI=mongodb://localhost:27017/embers_db_dev \\\n` +
+        `       node server/scripts/analyze-expense-dates.js\n`,
+    );
+  }
+
   // 1) Type histogram
   const typeHist = new Map();
   for (const r of rows) {
