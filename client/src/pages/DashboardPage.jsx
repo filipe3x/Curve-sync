@@ -8,11 +8,16 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
+import CycleTrendSkeleton from '../components/dashboard/CycleTrendSkeleton';
 
 // recharts pulls in ~120 kB gzip of d3-* — bigger than the whole rest
 // of the dashboard combined. Splitting it into its own chunk means
 // first paint (stat cards + recent expenses) stays fast; the trend
 // chart streams in on the next tick. See ROADMAP §2.8 build-size note.
+// The skeleton is NOT lazy — it's a few hundred bytes of JSX and it
+// needs to be on the main chunk so the Suspense fallback can render
+// instantly on first paint (lazy-loading the fallback would defeat
+// the purpose).
 const CycleTrendCard = lazy(
   () => import('../components/dashboard/CycleTrendCard'),
 );
@@ -805,11 +810,7 @@ export default function DashboardPage() {
           recharts chunk streams. */}
       {stats?.cycle_history && (
         <section className="mt-8">
-          <Suspense
-            fallback={
-              <div className="card h-80 animate-pulse bg-sand-50" aria-hidden="true" />
-            }
-          >
+          <Suspense fallback={<CycleTrendSkeleton />}>
             <CycleTrendCard history={stats.cycle_history} />
           </Suspense>
         </section>

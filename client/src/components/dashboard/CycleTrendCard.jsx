@@ -40,9 +40,12 @@ import { useNavigate } from 'react-router-dom';
  *   window bigger than the data.
  *
  * - **Budget line is a reference, not a target.** Dashed horizontal
- *   line at `weekly_budget × 4.33` (≈ monthly equivalent). Bars that
- *   cross it read naturally as overspend without us having to add
- *   text.
+ *   line at `weekly_budget × (30.4375 / 7)` — the monthly equivalent
+ *   based on the average Gregorian month (30.44 days). With the
+ *   default `weekly_budget = €73.75` the line lands at **€321**.
+ *   Bars that cross it read naturally as overspend without us having
+ *   to add text. Full rationale + worked examples in
+ *   `docs/expense-tracking.md` → "Linha de orçamento…".
  */
 
 const MONTHS_PT = [
@@ -94,6 +97,22 @@ function fullCycleWindowLabel(cycleStart, cycleEnd) {
   const sStr = `${s.getUTCDate()} ${MONTHS_PT[s.getUTCMonth()]}`;
   const eStr = `${e.getUTCDate()} ${MONTHS_PT[e.getUTCMonth()]} ${e.getUTCFullYear()}`;
   return `${sStr} → ${eStr}`;
+}
+
+// Portuguese copy for the "days remaining" line on the in-progress
+// bar's tooltip. The cycle end from the API is a YYYY-MM-DD anchored
+// at inclusive end-of-day UTC, so ceil() rounds "up to midnight" into
+// "1 dia" and the last-day case collapses to "Termina hoje" without
+// ever showing "0 dias" (which would feel wrong to a reader).
+function daysRemainingCopy(cycleEndIso, now = Date.now()) {
+  const endTs = Date.parse(`${cycleEndIso}T23:59:59.999Z`);
+  if (!Number.isFinite(endTs)) return null;
+  const diff = endTs - now;
+  if (diff < 0) return null; // cycle already closed (server clock drift)
+  const days = Math.ceil(diff / 86_400_000);
+  if (days <= 0) return 'Termina hoje';
+  if (days === 1) return 'Termina amanhã';
+  return `Faltam ${days} dias até ao fim do ciclo`;
 }
 
 // Tailwind tokens resolved to concrete hex so recharts (which doesn't
@@ -181,6 +200,11 @@ function CycleTooltip({ active, payload }) {
           </span>
         )}
       </div>
+      {row.in_progress && (
+        <p className="mt-0.5 text-[11px] text-amber-700">
+          {daysRemainingCopy(row.cycle_end)}
+        </p>
+      )}
       <p className="mt-2 text-base font-semibold text-sand-900">
         {EUR.format(row.total)}
         <span className="ml-2 text-xs font-normal text-sand-500">

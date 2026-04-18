@@ -38,12 +38,24 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // up to MAX so the client can slice locally without a round-trip.
 const DEFAULT_CYCLE_HISTORY_COUNT = 12;
 const MAX_CYCLE_HISTORY_COUNT = 36;
-// Rough conversion from weekly budget to a comparable monthly reference
-// line on the trend chart. A Gregorian month averages ≈ 30.44 days,
-// i.e. 30.44 / 7 ≈ 4.348 weeks. Using the constant keeps the
-// reference line stable regardless of how many days the actual cycle
-// contains (28-31) — the goal is a single horizontal baseline, not a
-// per-cycle budget.
+// Conversion from the per-user weekly budget to the monthly-equivalent
+// value drawn as a horizontal reference line on the cycle-trend chart.
+//
+//   monthly_budget = weekly_budget * (30.4375 / 7)
+//                  ≈ weekly_budget * 4.348
+//
+// With the default weekly_budget = €73.75 the line lands at **€321**.
+// See `docs/expense-tracking.md` → "Linha de orçamento no gráfico
+// «Evolução por ciclo»" for the full rationale — TL;DR: using × 4
+// (the naive "4 weeks = 1 month") lands the line at €295, which reads
+// as overspend in every 30-31 day cycle even when the user is exactly
+// on budget. A Gregorian month averages 365.25 / 12 = 30.4375 days,
+// i.e. 4.348 weeks, which matches real cycle length.
+//
+// Kept as a constant (not per-cycle) on purpose: a horizontal line is
+// easier to read as a reference than a stepped line that jumps by
+// ± 3 % every February. If that trade-off ever flips, swap the
+// ReferenceLine on the frontend for a Line fed with `cycle_days`.
 const WEEKS_PER_MONTH = 30.4375 / 7;
 
 /**
