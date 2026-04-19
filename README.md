@@ -243,51 +243,16 @@ cd /var/www/curve-sync && npm run install:all && npm run build
 pm2 start npm --name curve-sync --cwd /var/www/curve-sync -- run start
 pm2 save
 
-# 4. Apache2 vhost (mods necessários: proxy, proxy_http, rewrite, headers, ssl)
-sudo a2enmod proxy proxy_http rewrite headers ssl
-
-sudo tee /etc/apache2/sites-available/curvsync.brasume.com.conf >/dev/null <<'APACHE'
-<VirtualHost *:80>
-  ServerName curvsync.brasume.com
-  Redirect permanent / https://curvsync.brasume.com/
-</VirtualHost>
-
-<VirtualHost *:443>
-  ServerName curvsync.brasume.com
-
-  DocumentRoot /var/www/curve-sync/client/dist
-
-  <Directory /var/www/curve-sync/client/dist>
-    Options -Indexes +FollowSymLinks
-    AllowOverride None
-    Require all granted
-
-    # SPA fallback — qualquer rota client-side devolve index.html
-    RewriteEngine On
-    RewriteCond %{REQUEST_URI} !^/api/
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^ /index.html [L]
-  </Directory>
-
-  # API → Express :3002 (loopback)
-  ProxyPreserveHost On
-  ProxyPass        /api/  http://127.0.0.1:3002/api/
-  ProxyPassReverse /api/  http://127.0.0.1:3002/api/
-  RequestHeader set X-Forwarded-Proto "https"
-
-  # SSL (preenchido pelo certbot --apache, manter os paths reais)
-  SSLEngine on
-  SSLCertificateFile    /etc/letsencrypt/live/curvsync.brasume.com/fullchain.pem
-  SSLCertificateKeyFile /etc/letsencrypt/live/curvsync.brasume.com/privkey.pem
-  Include /etc/letsencrypt/options-ssl-apache.conf
-</VirtualHost>
-APACHE
-
+# 4. Apache2 vhost — usa o template já preparado
+sudo a2enmod proxy proxy_http rewrite headers ssl deflate mime
+sudo cp /var/www/curve-sync/scripts/apache/curvsync.brasume.com.conf.example \
+        /etc/apache2/sites-available/curvsync.brasume.com.conf
 sudo a2ensite curvsync.brasume.com.conf
-sudo certbot --apache -d curvsync.brasume.com    # emite o cert e re-escreve a vhost
+sudo certbot --apache -d curvsync.brasume.com    # emite o cert e ajusta a vhost
 sudo apache2ctl configtest && sudo systemctl reload apache2
 ```
+
+> O template em [`scripts/apache/curvsync.brasume.com.conf.example`](scripts/apache/curvsync.brasume.com.conf.example) tem duas vhosts (porta 80 → redirect HTTPS, porta 443 → SPA + reverse proxy `/api → :3002`), MIME types para módulos ES, e suporte a `.gz` pré-comprimido — o mesmo padrão usado para `words.brasume.com` neste VPS.
 
 A partir daqui o `./scripts/deploy-prod.sh` trata de tudo em cada release.
 
