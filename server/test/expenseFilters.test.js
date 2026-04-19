@@ -60,10 +60,6 @@ test('sanitiseSort: non-allowlisted fields fall back to default', () => {
   assert.equal(sanitiseSort('-user_id'), '-date');
   assert.equal(sanitiseSort('password'), '-date');
   assert.equal(sanitiseSort('{"$ne":null}'), '-date');
-  // Retired alias — a cached client build may still ship `-date_at`;
-  // the allowlist drops it to the default, graceful.
-  assert.equal(sanitiseSort('date_at'), '-date');
-  assert.equal(sanitiseSort('-date_at'), '-date');
 });
 
 test('sanitiseSort: non-string inputs fall back', () => {

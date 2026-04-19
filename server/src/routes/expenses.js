@@ -26,11 +26,9 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Allowlist of sortable fields. Anything else — including the retired
-// `date_at` alias clients may still send from a cached build — falls
-// back to `-date` (default, chronological descending). `date` is now
-// a uniformly typed BSON Date (see models/Expense.js), so sorting on
-// it is the canonical chronological order.
+// Allowlist of sortable fields. Anything else falls back to `-date`
+// (default, chronological descending). `date` is a uniformly typed
+// BSON Date — see models/Expense.js.
 const ALLOWED_SORT_FIELDS = new Set([
   'date',
   'amount',
