@@ -12,7 +12,7 @@ Portar a lógica do `curve.py` (BeautifulSoup) para JavaScript/cheerio. Extrair 
 - **Implementado:** `server/src/services/emailParser.js`
 
 ### ~~1.2 Leitor IMAP directo~~ ✅
-Implementar ligação IMAP directa (substituindo offlineimap) para ler emails da pasta configurada. Usar a flag `UNSEEN` para saber quais emails já foram processados. Marcar como `Seen` apenas após processamento com sucesso. Inclui safety net `imap_since` (SEARCH UNSEEN SINCE) + `max_emails_per_run` (hard cap 500) para evitar first-sync massivo.
+Implementar ligação IMAP directa (substituindo offlineimap) para ler emails da pasta configurada. Usar a flag `UNSEEN` para saber quais emails já foram processados. Marcar como `Seen` apenas após processamento com sucesso. Janela do `SEARCH UNSEEN SINCE` ancorada ao início do ciclo actual (derivado de `sync_cycle_day`, default dia 22) + `max_emails_per_run` (hard cap 500) para evitar first-sync massivo. Ver `docs/EMAIL.md` → «Sync scope».
 
 - **Implementado:** `server/src/services/imapReader.js`
 

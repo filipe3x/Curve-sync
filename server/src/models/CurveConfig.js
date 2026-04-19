@@ -24,11 +24,12 @@ const curveConfigSchema = new mongoose.Schema(
     sync_interval_minutes: { type: Number, default: 5 },
     // Day-of-month that starts the user's expense cycle. Defaults to
     // 22 (pay cycle alignment — see CLAUDE.md → Custom Monthly Cycle)
-    // and drives three things uniformly per user: the reader's
-    // `imap_since` fallback, the dashboard's "este mês" totals, and
-    // the /categories/stats + /curve/stats/uncategorised windows.
-    // Clamped to [1, 28] in services/cycle.js → normaliseCycleDay to
-    // avoid Feb overflow when a user picks something like 31.
+    // and drives three things uniformly per user: the IMAP reader's
+    // SINCE window (sync only looks at the current cycle), the
+    // dashboard's "este mês" totals, and the /categories/stats +
+    // /curve/stats/uncategorised windows. Clamped to [1, 28] in
+    // services/cycle.js → normaliseCycleDay to avoid Feb overflow
+    // when a user picks something like 31.
     sync_cycle_day: { type: Number, default: 22, min: 1, max: 28 },
     // Weekly spending budget in EUR — feeds the dashboard savings-score
     // KPI. Default of 73.75 comes from the original Embers analysis
@@ -36,19 +37,17 @@ const curveConfigSchema = new mongoose.Schema(
     // to their own pay; the score formula lives in
     // services/expenseStats.js → computeSavingsScore.
     weekly_budget: { type: Number, default: 73.75, min: 0 },
-    // IMAP SEARCH SINCE filter. When set, the reader appends
-    // `SINCE <date>` to the SEARCH UNSEEN query so the IMAP server
-    // filters old messages server-side before sending. When `null`,
-    // the reader falls back to the start of the user's current cycle
-    // (based on `sync_cycle_day` above) so first-sync only picks up
-    // expenses from the current pay window. See imapReader.js →
-    // defaultSince for the exact computation.
-    imap_since: { type: Date, default: null },
-    // Hard cap on emails fetched per sync run. Prevents a first-time
-    // sync against a folder with thousands of UNSEEN historical emails
-    // from blocking the lock for hours. The reader stops yielding
-    // after this many messages and sets a `capped` flag that the
-    // summary surfaces. Remaining emails stay UNSEEN for the next run.
+    // Hard cap on emails fetched per sync run. Belt-and-suspenders
+    // alongside the cycle-start SINCE filter (see imapReader.js →
+    // defaultSince): even within a single cycle, a mailbox carrying
+    // thousands of UNSEEN receipts could blow the request budget. The
+    // reader stops yielding after this many messages and sets a
+    // `capped` flag that the summary surfaces. Remaining emails stay
+    // UNSEEN for the next run.
+    //
+    // Note: `imap_since` was removed in the drop-date_at release —
+    // the SINCE filter is now always cycle-start, non-overridable.
+    // See imapReader.js :: defaultSince for the rationale.
     max_emails_per_run: { type: Number, default: 500 },
     last_sync_at: { type: Date },
     last_sync_status: { type: String, enum: ['ok', 'error', null], default: null },

@@ -1070,43 +1070,53 @@ renamed. The migration is the user clicking one button.
 - [ ] `POST /api/curve/test-connection` already returns
       `{ folders: string[] }` — no changes needed there
 
-### First-sync safety net — `imap_since` + `max_emails_per_run`
+### Sync scope — cycle-start SINCE + `max_emails_per_run`
 
-Without guards, the first `POST /sync` against a folder with years of
-UNSEEN Curve receipts would pull every single email in one shot. The
-digest unique index protects against data corruption (everything
-already in Embers lands as `duplicate`), but the run would block the
-sync lock for minutes to hours and could trigger Outlook rate limits.
+Every sync run anchors to the **start of the user's current custom
+cycle** (see CLAUDE.md → Custom Monthly Cycle). The IMAP query is
+`SEARCH UNSEEN SINCE <cycle_start>`, so emails older than the cycle
+boundary are invisible to the reader server-side.
 
-Two new `CurveConfig` fields solve this:
+Why cycle-only (and not "all UNSEEN ever"):
 
-| Field | Type | Default | Where enforced |
-|-------|------|---------|----------------|
-| `imap_since` | `Date \| null` | `null` (→ fallback 31 days ago, Europe/Lisbon) | IMAP server-side via `SEARCH UNSEEN SINCE <date>` |
-| `max_emails_per_run` | `Number` | `500` | Client-side in `ImapReader.fetchUnseen()` |
+- **Embers/curve.py never marked SEEN.** Every historical Curve
+  receipt in the mailbox is still UNSEEN. A broader window would
+  re-ingest thousands of rows on the first sync.
+- **Older Curve templates drift.** `scripts/dryrun-date-schema.js`'s
+  Check C shows ~6-month cycles where digests from today's parser
+  don't match what was stored historically. A re-ingest of an
+  old-template email produces a different digest → unique index
+  accepts it → duplicate row. Scoping to the current cycle keeps
+  the digest universe to "templates the current parser handles".
+- **No UX surface reads across cycles anyway.** Dashboard,
+  `/categories/stats`, `/curve/stats/uncategorised` all scope to the
+  current cycle, so ingesting outside that window creates rows no
+  one ever sees.
 
-**`imap_since`** is the coarse filter. The IMAP `SINCE` command
-compares against the message's internal date (date-only, no time),
-so the server discards old emails before sending them over the wire.
-When `null`, the reader computes the fallback using
-`Intl.DateTimeFormat` in `Europe/Lisbon` — this matters because the
-future cycle-aware mode (day 22) must answer "what day is today in
-Lisbon?", not "what day is it in UTC?".
+The user cannot override this date — there is no `imap_since` field
+on the config. The only user control is `sync_cycle_day` (1-28, default
+22), which changes the boundary itself. Changing the cycle day also
+changes which emails the next sync will pull.
 
-**`max_emails_per_run`** is the hard cap. After yielding 500 messages
-the generator stops and sets `reader.capped = true`. The orchestrator
-surfaces `summary.capped = true` and the route appends
-`(limitado a 500 — há mais emails por processar)` to the response
-message. Remaining emails stay UNSEEN for the next run — no data is
-lost, just deferred.
+| Guard | Value | Where enforced |
+|-------|-------|----------------|
+| SINCE = cycle start | derived from `sync_cycle_day` | IMAP server via `SEARCH UNSEEN SINCE <date>` |
+| `max_emails_per_run` | `500` (default) | Client-side in `ImapReader.fetchUnseen()` |
 
-**Future: cycle-aware `imap_since`** — the frontend will expose a
-control tied to the monthly cycle logic (day 22, see CLAUDE.md →
-Custom Monthly Cycle). If today >= 22nd, since = 22nd of this month;
-if today < 22nd, since = 22nd of last month. Timezone: Europe/Lisbon.
-This matches the Embers pay-cycle window and means the sync only
-pulls emails from the current expense period. Until then, the 31-day
-fallback is a safe conservative default.
+**`max_emails_per_run`** is a belt-and-suspenders cap. Even within a
+single cycle, a mailbox could in theory carry more than the budget
+allows (very large family account, many sub-cards). After yielding
+500 messages the generator stops and sets `reader.capped = true`. The
+orchestrator surfaces `summary.capped = true` and the route appends
+`(limitado a 500 — há mais emails por processar)`. Remaining emails
+stay UNSEEN for the next run — no data is lost, just deferred.
+
+**Legacy note.** A `CurveConfig.imap_since` field existed in earlier
+builds to allow a user-supplied override. It was removed in the
+`drop date_at` release: the override was the only way to reach
+outside the current cycle, and every reason to do so traced back to
+the template-drift risk above. Existing rows on disk with a populated
+`imap_since` are ignored by the reader and can be `$unset` at leisure.
 
 ### Related unrelated fixes shipping alongside
 
@@ -1204,9 +1214,9 @@ Tests the full IMAP pipeline (connect → fetch → parse → digest check)
 but without inserting Expenses or marking emails as `\Seen`.
 
 ```bash
-# Verify config: folder, confirmed_at, safety net fields
+# Verify config: folder, confirmed_at, cap, cycle day (drives SINCE)
 curl -s http://localhost:3001/api/curve/config \
-  | jq '{folder: .data.imap_folder, confirmed: .data.imap_folder_confirmed_at, since: .data.imap_since, cap: .data.max_emails_per_run}'
+  | jq '{folder: .data.imap_folder, confirmed: .data.imap_folder_confirmed_at, cycle_day: .data.sync_cycle_day, cap: .data.max_emails_per_run}'
 
 # Test IMAP connection + list available folders
 curl -s http://localhost:3001/api/curve/test-connection -X POST | jq
@@ -1216,8 +1226,8 @@ curl -s 'http://localhost:3001/api/curve/sync?dry_run=1' -X POST | jq '{message,
 ```
 
 Expected: `parseErrors=0`, `errors=0`, `total` = number of UNSEEN
-emails within the `imap_since` window (default 31 days). `capped`
-should be `false` unless there are >500 emails in that window.
+emails within the current cycle window (derived from `sync_cycle_day`).
+`capped` should be `false` unless there are >500 emails in that window.
 
 #### Step 3 — Real sync
 
