@@ -419,6 +419,47 @@ export default function CycleTrendCard({ history }) {
     );
   }, [effectiveSize, toggleOptions]);
 
+  // Single navigation helper — both the bar's own onClick and the
+  // chart-level fallback funnel through here so there's one place that
+  // builds the `/expenses?start=…&end=…` URL.
+  const navigateToCycle = (cycle) => {
+    if (!cycle?.cycle_start || !cycle?.cycle_end) return;
+    const params = new URLSearchParams({
+      start: cycle.cycle_start,
+      end: cycle.cycle_end,
+    });
+    navigate(`/expenses?${params.toString()}`);
+  };
+
+  // Bar.onClick — fires on direct clicks on a bar rect. In recharts
+  // 3.x the payload sometimes arrives flattened (`barData` *is* the
+  // row) and sometimes wrapped (`barData.payload` is the row), so we
+  // probe both. `event.stopPropagation()` prevents the chart-level
+  // fallback below from firing a second navigate for the same click.
+  const handleBarClick = (barData, _index, event) => {
+    event?.stopPropagation?.();
+    navigateToCycle(barData?.payload ?? barData);
+  };
+
+  // ComposedChart.onClick — covers clicks that land on the Tooltip
+  // cursor overlay (the translucent rectangle that highlights the
+  // hovered column) or anywhere else inside the chart frame. Without
+  // this fallback, the user's mental model "I clicked the highlighted
+  // area, something should happen" breaks silently.
+  const handleChartClick = (state) => {
+    const viaPayload = state?.activePayload?.[0]?.payload;
+    if (viaPayload?.cycle_start) {
+      navigateToCycle(viaPayload);
+      return;
+    }
+    // activeLabel is the X-axis value for the clicked column; our
+    // dataKey is `cycle_start`, so we can resolve the row by lookup.
+    if (state?.activeLabel) {
+      const row = visible.find((r) => r.cycle_start === state.activeLabel);
+      if (row) navigateToCycle(row);
+    }
+  };
+
   const budget = history.monthly_budget;
   const average = history.average;
 
@@ -510,17 +551,7 @@ export default function CycleTrendCard({ history }) {
           <ComposedChart
             data={visible}
             margin={{ top: showBarDeltas ? 24 : 12, right: 8, left: 0, bottom: 0 }}
-            onClick={(state) => {
-              // recharts passes `activePayload` on any click inside
-              // the chart; the bar click handler below also fires.
-              // Keeping the navigation in one place avoids double-
-              // navigating when both fire.
-              const p = state?.activePayload?.[0]?.payload;
-              if (!p) return;
-              navigate(
-                `/expenses?start=${encodeURIComponent(p.cycle_start)}&end=${encodeURIComponent(p.cycle_end)}`,
-              );
-            }}
+            onClick={handleChartClick}
           >
             <defs>
               {/* Diagonal hatch pattern for the in-progress bar — a
@@ -593,7 +624,13 @@ export default function CycleTrendCard({ history }) {
               radius={[6, 6, 0, 0]}
               isAnimationActive
               animationDuration={700}
-              cursor="pointer"
+              onClick={handleBarClick}
+              // `style` applies to the <path> of every bar rect in
+              // recharts 3.x — this is what finally gives the user a
+              // pointer cursor on hover. The `cursor` prop of <Bar>
+              // controls the *Tooltip* cursor, not the CSS one, which
+              // is why the previous version's hint never showed up.
+              style={{ cursor: 'pointer' }}
             >
               {visible.map((row, i) => (
                 <Cell
@@ -607,6 +644,7 @@ export default function CycleTrendCard({ history }) {
                   stroke={row.in_progress ? COLORS.sand500 : undefined}
                   strokeDasharray={row.in_progress ? '3 2' : undefined}
                   strokeWidth={row.in_progress ? 1 : 0}
+                  style={{ cursor: 'pointer' }}
                 />
               ))}
             </Bar>
