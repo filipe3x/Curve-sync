@@ -401,6 +401,24 @@ export default function CycleTrendCard({ history }) {
   // stored preference stays 24 if they set it on desktop; viewport
   // clamping handles the render.
   const toggleOptions = isMobile ? [6, 12] : [6, 12, 24];
+
+  // Which toggle button lights up. Previously used `effectiveSize === opt`
+  // which never matched when we rendered fewer bars than any bucket
+  // (e.g. 2 cycles → effectiveSize 2 → 0 active buttons, leaving the
+  // user staring at a chart with no visible "you are here" cue). The
+  // rule now is "smallest bucket ≥ effectiveSize": with 2 bars the 6m
+  // pill activates because 6 is the smallest window that holds them;
+  // with 10 bars and a stored 24m preference the 12m pill activates
+  // because it's the smallest fit, while `size` quietly stays at 24 so
+  // the full 24 resurfaces once the history grows back.
+  const activeBucket = useMemo(() => {
+    if (effectiveSize <= 0) return toggleOptions[0];
+    return (
+      toggleOptions.find((b) => b >= effectiveSize)
+      ?? toggleOptions[toggleOptions.length - 1]
+    );
+  }, [effectiveSize, toggleOptions]);
+
   const budget = history.monthly_budget;
   const average = history.average;
 
@@ -445,9 +463,17 @@ export default function CycleTrendCard({ history }) {
           role="group"
           aria-label="Janela temporal"
         >
-          {toggleOptions.map((opt) => {
-            const disabled = opt > available;
-            const active = effectiveSize === opt;
+          {toggleOptions.map((opt, i) => {
+            // A bucket is disabled when the previous (smaller) bucket
+            // already contains everything the user has — offering 12m
+            // when there are only 4 cycles renders exactly the same
+            // chart as 6m, so the option is meaningless. The floor
+            // bucket (6m / i === 0) is never disabled: it's the only
+            // window that fits a very short history AND lights up as
+            // active via `activeBucket`.
+            const prevOpt = i > 0 ? toggleOptions[i - 1] : 0;
+            const disabled = i > 0 && available <= prevOpt;
+            const active = opt === activeBucket;
             return (
               <button
                 key={opt}
@@ -464,7 +490,7 @@ export default function CycleTrendCard({ history }) {
                 }`}
                 title={
                   disabled
-                    ? `Precisas de ${opt} ciclos de histórico`
+                    ? `Precisas de mais do que ${prevOpt} ciclos de histórico`
                     : `Últimos ${opt} ciclos`
                 }
               >
