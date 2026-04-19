@@ -8,7 +8,7 @@ import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import ExpensesFilterChip from '../components/common/ExpensesFilterChip';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
-import { formatAbsoluteDate } from '../utils/relativeDate';
+import { formatAbsoluteDate, formatExpenseDateFull } from '../utils/relativeDate';
 import * as api from '../services/api';
 
 // Accepts strict YYYY-MM-DD only. Lax `Date.parse` behaviour (e.g.
@@ -1041,7 +1041,7 @@ export default function ExpensesPage() {
                     </td>
                     <td className={`px-5 py-3 text-sand-500 ${dimCell}`}>
                       <div className="flex items-center gap-2">
-                        <span>{exp.date}</span>
+                        <span>{formatExpenseDateFull(exp.date)}</span>
                         {rowExcluded && (
                           <span className="badge bg-sand-200 text-sand-600">
                             excluída
