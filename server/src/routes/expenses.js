@@ -325,23 +325,25 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { entity, amount, date, card } = req.body;
+    // Digest stays hashed from the raw request string — mirrors
+    // curve.py + the sync path's emailParser, preserving dedup against
+    // Embers-era rows for the same (entity, amount, date, card) tuple.
     const digest = computeDigest({ entity, amount, date, card });
     const resolverContext = await loadContext(req.userId);
     const category_id = resolveCategory(entity, resolverContext);
 
+    // `date` on the wire is the human string; schema stores BSON Date.
+    // `parseExpenseDateOrNull` returns null on garbage input, which
+    // Mongoose then rejects via `required: true` — caller gets a 500
+    // and the row never lands. Preferable to silently accepting
+    // unparseable dates given this endpoint has no validator gate.
+    const typedDate = parseExpenseDateOrNull(date);
+
     const expense = await Expense.create({
       entity,
       amount,
-      date,
-      // Typed chronological companion. This handler has no validator
-      // gate today (unlike the sync path via emailParser.validateParsed),
-      // so `date` may be missing or malformed when the caller bypasses
-      // the frontend form. `parseExpenseDateOrNull` returns null for
-      // anything it can't parse — the row still inserts, it just
-      // won't appear in the `-date_at` sort (sparse index). Never a
-      // good outcome but strictly better than the current lex-on-
-      // string behaviour, and the frontend form enforces the shape.
-      date_at: parseExpenseDateOrNull(date),
+      date: typedDate,
+      date_at: typedDate,
       card,
       digest,
       user_id: req.userId,

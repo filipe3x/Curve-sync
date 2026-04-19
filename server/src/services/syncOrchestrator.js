@@ -532,19 +532,22 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       }
 
       // ---- 4. Real insert path ----
+      // `parsed.date` is the raw email string ("06 April 2026 08:53:31").
+      // The digest in `parsed.digest` was hashed from that string for
+      // bit-for-bit parity with curve.py — do NOT re-derive it from
+      // `typedDate` or dedup against Embers-era rows breaks.
+      const typedDate = parseExpenseDateOrNull(parsed.date);
       let expenseDoc = null;
       try {
         expenseDoc = await Expense.create({
           entity: parsed.entity,
           amount: parsed.amount,
-          date: parsed.date,
-          // Typed chronological companion. The `validateParsed` gate
-          // above already rejected emails whose date string doesn't
-          // pass Date.parse, so `parseExpenseDateOrNull` should
-          // return a real Date here; we still tolerate null defensively
-          // (e.g. a future parser change that widens what it accepts)
-          // and let the sparse index on `date_at` drop such rows.
-          date_at: parseExpenseDateOrNull(parsed.date),
+          date: typedDate,
+          // Redundant today (mirrors `date`); kept for one release so the
+          // partial index + any stragglers reading it stay valid. The
+          // next clean-up PR drops this field and flips every reader to
+          // `date`. `typedDate` is reused here — no re-parse.
+          date_at: typedDate,
           card: parsed.card,
           digest: parsed.digest,
           user_id: config.user_id,

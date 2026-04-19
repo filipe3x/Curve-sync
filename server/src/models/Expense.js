@@ -4,24 +4,29 @@ const expenseSchema = new mongoose.Schema(
   {
     entity: { type: String, required: true },
     amount: { type: Number, required: true },
-    // `date` is the free-form human-readable string from the Curve
-    // email ("06 April 2026 08:53:31"). Kept as String for bit-for-bit
-    // compat with curve.py + Embers' historical writes (Embers' Mongoid
-    // model declares `field :date, type: DateTime` and would serialise
-    // it as a BSON Date — so the shared collection holds mixed types
-    // in practice, see scripts/analyze-expense-dates.js for the
-    // survey). Do NOT sort on this field: lexical order on day-first
-    // strings is not chronological, and BSON type ordering puts
-    // String < Date so mixed-type rows cluster nonsensically.
-    date: { type: String, required: true },
-    // Typed chronological companion to `date`, populated at INSERT and
-    // via the one-shot backfill in scripts/analyze-expense-dates.js.
-    // Nullable so rows pre-backfill validate cleanly; queries that
-    // order by it must tolerate null (see ROADMAP Opção C step 5 —
-    // the sort default moves to `-date_at` once the backfill lands).
-    // Embers has no Mongoid field for this and will silently pass it
-    // through on reads — that's the whole point of adding a new
-    // column instead of mutating `date`.
+    // `date` stores the typed chronological timestamp as a BSON `Date`.
+    // Embers' Mongoid declares `field :date, type: DateTime` and all
+    // 1302 prod rows from the legacy pipeline landed here as BSON
+    // `Date` (Mongoid coerces the curve.py string via `DateTime.parse`
+    // before serialising). Curve Sync mirrors that contract: the email
+    // parser returns the free-form string ("06 April 2026 08:53:31"),
+    // callers parse it to a `Date` via `parseExpenseDate` from
+    // services/expenseDate.js immediately before `Expense.create`, and
+    // the raw string stays live only long enough to feed the SHA-256
+    // digest (see emailParser.js:273-284 — the digest MUST stay
+    // bit-for-bit compatible with curve.py, which hashes the original
+    // string form). Keeping `date` uniformly typed avoids the BSON
+    // type-order landmine where `String < Date` makes `$gte` range
+    // queries from Mongoid miss every String row (the dev dump had 76
+    // rows split 63 String / 13 Date — Embers' cycle filter silently
+    // dropped the String half before this change).
+    date: { type: Date, required: true },
+    // Redundant today: equal to `date` on every new insert, and the
+    // one-shot backfill in `scripts/analyze-expense-dates.js` + the
+    // `{ date_at: '$date' }` pipeline update copied `date` into it for
+    // every legacy row. Kept in the schema + partial index for one
+    // release so rollback stays trivial — the next clean-up PR drops
+    // `date_at` and flips every reader to `date`.
     date_at: { type: Date, default: null },
     card: { type: String },
     digest: { type: String, required: true },
