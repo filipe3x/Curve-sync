@@ -14,14 +14,14 @@ export VPS_PATH="/var/www/Curve-sync"
 # ===== Process manager =====
 # Options: pm2 | systemd
 export PROCESS_MANAGER="pm2"
-export PM2_APP_NAME="curve-sync"
-export SYSTEMD_SERVICE="curve-sync"
+export PM2_APP_NAME="curvsync"
+export SYSTEMD_SERVICE="curvsync"
 
 # ===== Backend =====
 # Curve Sync backend port. The Embers/sleep-routine pair on this VPS already
-# uses :3001 — pick a free port (3002 by default) and keep it in sync with
-# server/.env on the VPS.
-export BACKEND_PORT="3002"
+# uses :3001 — 3033 was chosen for Curve Sync; keep it in sync with the PORT
+# line in server/.env on the VPS and with the Apache ProxyPass target.
+export BACKEND_PORT="3033"
 # Health check path served by Express
 export HEALTH_PATH="/api/health"
 

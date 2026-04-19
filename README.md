@@ -214,7 +214,7 @@ $EDITOR scripts/deploy.config.local.sh    # VPS_HOST, VPS_USER, BACKEND_PORT, ..
 
 ⚠️ **Migrações com sequência crítica** (ex. backfill `date_at`) ficam em [`docs/DEPLOY_NOTES.md`](docs/DEPLOY_NOTES.md). O preflight imprime cada bloco `## release:` antes da gate — ler antes de continuar.
 
-⚠️ **Porta**: o VPS partilhado já corre `sleep-routine` em :3001. O default em `deploy.config.sh` é `:3002` para evitar colisão; manter alinhado com `server/.env` no servidor.
+⚠️ **Porta**: o VPS partilhado já corre `sleep-routine` em :3001. O default em `deploy.config.sh` é `:3033` para evitar colisão; manter alinhado com `server/.env` no servidor.
 
 ### Setup inicial no VPS (uma vez)
 
@@ -230,7 +230,7 @@ git clone <repo-url> /var/www/Curve-sync
 # 2. server/.env (CORS_ORIGIN tem de bater com PUBLIC_URL)
 cp /var/www/Curve-sync/server/.env.example /var/www/Curve-sync/server/.env
 $EDITOR /var/www/Curve-sync/server/.env
-#   PORT=3002
+#   PORT=3033
 #   MONGODB_URI=mongodb://localhost:27017/embers_db
 #   NODE_ENV=production
 #   CORS_ORIGIN=https://curvsync.brasume.com
@@ -240,7 +240,7 @@ $EDITOR /var/www/Curve-sync/server/.env
 
 # 3. Build inicial + arrancar PM2
 cd /var/www/Curve-sync && npm run install:all && npm run build
-pm2 start npm --name curve-sync --cwd /var/www/Curve-sync -- run start
+pm2 start npm --name curvsync --cwd /var/www/Curve-sync -- run start
 pm2 save
 
 # 4. Apache2 vhost — usa o template já preparado
@@ -252,7 +252,7 @@ sudo certbot --apache -d curvsync.brasume.com    # emite o cert e ajusta a vhost
 sudo apache2ctl configtest && sudo systemctl reload apache2
 ```
 
-> O template em [`scripts/apache/curvsync.brasume.com.conf.example`](scripts/apache/curvsync.brasume.com.conf.example) tem duas vhosts (porta 80 → redirect HTTPS, porta 443 → SPA + reverse proxy `/api → :3002`), MIME types para módulos ES, e suporte a `.gz` pré-comprimido — o mesmo padrão usado para `words.brasume.com` neste VPS.
+> O template em [`scripts/apache/curvsync.brasume.com.conf.example`](scripts/apache/curvsync.brasume.com.conf.example) tem duas vhosts (porta 80 → redirect HTTPS, porta 443 → SPA + reverse proxy `/api → :3033`), MIME types para módulos ES, e suporte a `.gz` pré-comprimido — o mesmo padrão usado para `words.brasume.com` neste VPS.
 
 A partir daqui o `./scripts/deploy-prod.sh` trata de tudo em cada release.
 

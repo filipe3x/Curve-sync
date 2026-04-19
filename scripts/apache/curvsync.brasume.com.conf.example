@@ -4,7 +4,7 @@
 # Same VPS as words.brasume.com / sleep.brasume.com / embers.brasume.com.
 # Two blocks:
 #   *:80   → permanent redirect to HTTPS
-#   *:443  → SPA (DocumentRoot client/dist) + reverse proxy /api → :3002
+#   *:443  → SPA (DocumentRoot client/dist) + reverse proxy /api → :3033
 #
 # Domain spelled "curvsync" on purpose ("cur · vsync", as in v-sync).
 #
@@ -84,11 +84,11 @@
     RewriteRule ^ index.html [L]
   </Directory>
 
-  # API → Node (pm2 na porta 3002 — :3001 já é do sleep-routine neste VPS)
+  # API → Node (pm2 na porta 3033 — :3001 já é do sleep-routine neste VPS)
   ProxyPreserveHost On
   RequestHeader set X-Forwarded-Proto "https"
-  ProxyPass        /api  http://127.0.0.1:3002/api  retry=0
-  ProxyPassReverse /api  http://127.0.0.1:3002/api
+  ProxyPass        /api  http://127.0.0.1:3033/api  retry=0
+  ProxyPassReverse /api  http://127.0.0.1:3033/api
 
   # Não comprimir ficheiros já comprimidos
   <IfModule mod_deflate.c>
