@@ -224,7 +224,11 @@ URL público: **`https://curvsync.brasume.com`** (sem o «e» de _curve_ — lê
 # DNS: A curvsync.brasume.com → IP do VPS
 
 # 1. Preparar checkout
-sudo mkdir -p /var/www/Curve-sync && sudo chown ember: /var/www/Curve-sync
+#    Grupo http-web + modo 775 seguem o padrão do /var/www/sleep no mesmo VPS:
+#    o Apache passa a ter acesso ao client/dist/ sem world-write.
+sudo mkdir -p /var/www/Curve-sync
+sudo chown ember:http-web /var/www/Curve-sync
+sudo chmod 775 /var/www/Curve-sync
 git clone <repo-url> /var/www/Curve-sync
 
 # 2. server/.env (CORS_ORIGIN tem de bater com PUBLIC_URL)
