@@ -1,4 +1,4 @@
-export default function EmptyState({ title, description }) {
+export default function EmptyState({ title, description, children }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-sand-200 py-16 text-center animate-fade-in">
       <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-sand-100">
@@ -8,6 +8,7 @@ export default function EmptyState({ title, description }) {
       {description && (
         <p className="mt-1 text-xs text-sand-400">{description}</p>
       )}
+      {children && <div className="mt-4">{children}</div>}
     </div>
   );
 }

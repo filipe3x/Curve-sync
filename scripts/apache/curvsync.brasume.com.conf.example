@@ -1,0 +1,101 @@
+# =============================================================================
+# Apache2 vhost — curvsync.brasume.com
+#
+# Same VPS as words.brasume.com / sleep.brasume.com / embers.brasume.com.
+# Two blocks:
+#   *:80   → permanent redirect to HTTPS
+#   *:443  → SPA (DocumentRoot client/dist) + reverse proxy /api → :3033
+#
+# Domain spelled "curvsync" on purpose ("cur · vsync", as in v-sync).
+#
+# Install:
+#   sudo a2enmod proxy proxy_http rewrite headers ssl deflate mime
+#   sudo cp curvsync.brasume.com.conf.example \
+#           /etc/apache2/sites-available/curvsync.brasume.com.conf
+#   sudo a2ensite curvsync.brasume.com.conf
+#   sudo certbot --apache -d curvsync.brasume.com   # populates the SSL block
+#   sudo apache2ctl configtest && sudo systemctl reload apache2
+# =============================================================================
+
+<VirtualHost *:80>
+  ServerName curvsync.brasume.com
+
+  # IMPORTANTE: redirect HTTPS ANTES de qualquer processamento
+  RewriteEngine On
+  RewriteCond %{SERVER_NAME} =curvsync.brasume.com
+  RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]
+
+  # Se ainda não emitiste o cert, comenta as 3 linhas acima até `certbot --apache` correr.
+</VirtualHost>
+
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+  ServerName curvsync.brasume.com
+
+  # SSL (configurado pelo Certbot)
+  SSLCertificateFile    /etc/letsencrypt/live/curvsync.brasume.com/fullchain.pem
+  SSLCertificateKeyFile /etc/letsencrypt/live/curvsync.brasume.com/privkey.pem
+  Include /etc/letsencrypt/options-ssl-apache.conf
+
+  DocumentRoot /var/www/Curve-sync/client/dist
+
+  # MIME Types corretos para módulos ES (Vite output)
+  <IfModule mime_module>
+    AddType application/javascript .js .mjs
+    AddType text/css .css
+    AddType application/json .json
+  </IfModule>
+
+  # ===========================================================================
+  # FICHEIROS PRÉ-COMPRIMIDOS (.gz) — Vite produz hashes estáveis, vale a pena
+  # ===========================================================================
+  <IfModule mod_headers.c>
+    <FilesMatch "\.gz$">
+      Header set Content-Encoding gzip
+      Header append Vary Accept-Encoding
+    </FilesMatch>
+    <FilesMatch "\.js\.gz$">
+      ForceType application/javascript
+    </FilesMatch>
+    <FilesMatch "\.css\.gz$">
+      ForceType text/css
+    </FilesMatch>
+  </IfModule>
+
+  <Directory /var/www/Curve-sync/client/dist>
+    Options -Indexes +FollowSymLinks
+    AllowOverride None
+    Require all granted
+
+    RewriteEngine On
+    RewriteBase /
+
+    # Servir .gz se existir e o cliente aceita gzip
+    RewriteCond %{HTTP:Accept-Encoding} gzip
+    RewriteCond %{REQUEST_FILENAME}\.gz -f
+    RewriteRule ^(.+)\.(js|css|svg|json)$ $1.$2.gz [L]
+
+    # NÃO reescrever arquivos que existem (JS, CSS, etc.)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # SPA fallback — qualquer rota client-side devolve index.html
+    RewriteRule ^ index.html [L]
+  </Directory>
+
+  # API → Node (pm2 na porta 3033 — :3001 já é do sleep-routine neste VPS)
+  ProxyPreserveHost On
+  RequestHeader set X-Forwarded-Proto "https"
+  ProxyPass        /api  http://127.0.0.1:3033/api  retry=0
+  ProxyPassReverse /api  http://127.0.0.1:3033/api
+
+  # Não comprimir ficheiros já comprimidos
+  <IfModule mod_deflate.c>
+    SetEnvIfNoCase Request_URI \.gz$ no-gzip
+  </IfModule>
+
+  ErrorLog  ${APACHE_LOG_DIR}/curvsync_error.log
+  CustomLog ${APACHE_LOG_DIR}/curvsync_access.log combined
+</VirtualHost>
+</IfModule>

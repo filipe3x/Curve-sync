@@ -114,7 +114,56 @@ Este serviço partilha o MongoDB com o Embers. As regras de acesso são rigorosa
 | POST   | `/api/curve/test-connection`| Testar ligação IMAP                |
 | GET    | `/api/curve/logs`           | Histórico de processamento         |
 | GET    | `/api/autocomplete/:field`  | Valores distintos (entity, card)   |
+| GET    | `/api/display/summary`      | Snapshot para ecrãs externos (e-ink) |
 | GET    | `/api/health`               | Health check                       |
+
+### `/api/display/summary` — ecrãs externos (e-ink, smart mirrors)
+
+Endpoint compacto pensado para **dispositivos externos** que mostram um resumo do ciclo actual à distância: um e-ink na secretária, um smart mirror, uma panel de home-automation. Devolve os quatro valores que um ecrã glance-able normalmente quer:
+
+- **Mês e ano do ciclo actual** — em pt-PT, rotulado pelo mês de **fim** do ciclo (22 Mar → 21 Abr = «Abril 2026»)
+- **Gasto no ciclo até agora** (EUR)
+- **Orçamento** — `weekly` e `monthly` (ver `docs/expense-tracking.md` → «Linha de orçamento…» para o cálculo `weekly × 30,4375 / 7`)
+- **Savings score** actual (0–10, 1 casa decimal)
+
+#### Autenticação
+
+Usa o mesmo fluxo de Bearer token que o frontend web — ver [`docs/AUTH.md`](docs/AUTH.md). O dispositivo faz login uma vez, guarda o token, e envia-o como header em cada pedido. A sessão **dura 24 h** — um e-ink a fazer poll de hora a hora deve estar preparado para re-autenticar 1× por dia; a lógica cabe em ~20 linhas na firmware (login → guardar token + `expires_at` → se o próximo pedido devolver 401, repetir login).
+
+#### Exemplo de uso
+
+```bash
+# 1. Login — guarda o token
+curl -s -X POST https://curve.example.com/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"me@example.com","password":"…"}'
+# → { "token": "abc123…", "user": { "id": "…", "email": "me@example.com" } }
+
+# 2. Snapshot — usa o token em cada pedido
+curl -s https://curve.example.com/api/display/summary \
+  -H 'Authorization: Bearer abc123…'
+# → {
+#     "cycle": {
+#       "month_label": "Abril 2026",
+#       "month": "Abril",
+#       "year": 2026,
+#       "start": "2026-03-22",
+#       "end":   "2026-04-21"
+#     },
+#     "spent": 123.45,
+#     "budget": { "weekly": 73.75, "monthly": 321.00 },
+#     "savings_score": 8.1,
+#     "currency": "EUR",
+#     "generated_at": "2026-04-19T14:32:10.123Z"
+#   }
+```
+
+#### Notas para firmware de dispositivos
+
+- **Frequência de poll:** não há rate-limit dedicado — o endpoint cai dentro do limiter global (100 pedidos/min por IP). Para um e-ink, `60 min` entre refreshes é mais que suficiente e mantém folga para os outros clientes que partilhem o IP.
+- **Formato dos valores:** `spent` e os valores de `budget` vêm arredondados a 2 casas decimais; `savings_score` a 1. Zero necessidade de formatação adicional no device.
+- **Fuso horário:** todas as datas são UTC. Converter localmente se o ecrã precisar de mostrar `start`/`end` em fuso local — mas o `month_label` já chega no formato user-facing que a maior parte das firmwares mostra tal e qual.
+- **Erro de autenticação:** se o token expirar, o servidor devolve `401 { "error": "Token inválido ou expirado" }`. Re-login com as credenciais guardadas e retry.
 
 ## Design
 
@@ -122,6 +171,133 @@ Interface inspirada no Curve.com — sóbria, monocromática, com cantos arredon
 
 - **`curve`** — tons de vermelho escuro/castanho (#a03d27 → #3b160f)
 - **`sand`** — cinzentos quentes (#faf9f7 → #2f2a24)
+
+## Migrações one-shot
+
+### Expense `date_at` (ROADMAP §2.x — Opção C)
+
+Desde o PR [`claude/improve-expense-date-display-YFA21`] a listagem de `/expenses`, a dashboard «Despesas recentes» e o painel de detalhe em `/categories` sortam por `-date_at` — um campo `Date` tipado que vive lado-a-lado com o legacy `date: String`. Antes, o default era `-date` e estava quebrado: sort lexical sobre strings day-first («06 April 2026 08:53:31») + BSON type order (`String < Date`) em campos mixed-type colocavam rows antigas no topo e recentes no fundo da lista. Ver `server/scripts/analyze-expense-dates.js` para o diagnóstico completo.
+
+⚠️ **Sequência importante para o deploy:** esta migração tem os steps 1-5 empilhados. **Só se merge o step 5 para prod depois de correr o backfill lá também.** Se o flip aterrar em prod antes do backfill, rows sem `date_at` caem para o fundo da lista (null sort descendente) — visível, não é data loss, mas degradação visível da UX até o backfill correr.
+
+Runbook canónico:
+
+1. **Deploy dos steps 1-4** (schema + INSERT path + script). Novos inserts já gravam `date_at`, nenhum query lê esse campo ainda. Zero impacto para o utilizador.
+2. **Correr o backfill em prod:**
+   ```bash
+   node server/scripts/analyze-expense-dates.js              # audit
+   node server/scripts/analyze-expense-dates.js --write      # plano
+   node server/scripts/analyze-expense-dates.js --write --yes # execução
+   node server/scripts/analyze-expense-dates.js --write      # idempotência
+   ```
+   Antes de avançar, confirmar no último comando: `rows to populate this run: 0` e `rows unparseable: 0`.
+3. **Deploy do step 5** (flip do sort default para `-date_at`). Listagens passam a ficar correctas.
+
+Se o step 5 já aterrou sem o backfill ter corrido, a recuperação é correr o backfill o quanto antes — não há data loss, os rows só ficam temporariamente sortados no fim.
+
+## Deploy para produção (VPS Ubuntu)
+
+Deploy automatizado via `scripts/deploy-prod.sh`. Cobre as seis fases do ROADMAP §3.9 (preflight → gate → pull+build → migrations → restart → rollback) e usa **PM2** (ou systemd, configurável) para gerir o processo no VPS.
+
+```bash
+# 1. Configurar (uma vez)
+cp scripts/deploy.config.sh scripts/deploy.config.local.sh
+$EDITOR scripts/deploy.config.local.sh    # VPS_HOST, VPS_USER, BACKEND_PORT, ...
+
+# 2. Deploy
+./scripts/deploy-prod.sh                  # interactive
+./scripts/deploy-prod.sh --yes            # CI / non-interactive
+./scripts/deploy-prod.sh --ref=<sha>      # specific commit
+./scripts/deploy-prod.sh --dry-run        # preflight only
+./scripts/deploy-prod.sh --rollback       # revert to previous backup
+```
+
+⚠️ **Migrações com sequência crítica** (ex. backfill `date_at`) ficam em [`docs/DEPLOY_NOTES.md`](docs/DEPLOY_NOTES.md). O preflight imprime cada bloco `## release:` antes da gate — ler antes de continuar.
+
+⚠️ **Porta**: o VPS partilhado já corre `sleep-routine` em :3001. O default em `deploy.config.sh` é `:3033` para evitar colisão; manter alinhado com `server/.env` no servidor.
+
+### Setup inicial no VPS (uma vez)
+
+URL público: **`https://curvsync.brasume.com`** (sem o «e» de _curve_ — lê-se «cur · vsync»).
+
+```bash
+# DNS: A curvsync.brasume.com → IP do VPS
+
+# 1. Preparar checkout
+#    Grupo http-web + modo 775 seguem o padrão do /var/www/sleep no mesmo VPS:
+#    o Apache passa a ter acesso ao client/dist/ sem world-write.
+sudo mkdir -p /var/www/Curve-sync
+sudo chown ember:http-web /var/www/Curve-sync
+sudo chmod 775 /var/www/Curve-sync
+git clone <repo-url> /var/www/Curve-sync
+
+# 2. server/.env (CORS_ORIGIN tem de bater com PUBLIC_URL)
+cp /var/www/Curve-sync/server/.env.example /var/www/Curve-sync/server/.env
+$EDITOR /var/www/Curve-sync/server/.env
+#   PORT=3033
+#   MONGODB_URI=mongodb://localhost:27017/embers_db
+#   NODE_ENV=production
+#   CORS_ORIGIN=https://curvsync.brasume.com
+#   IMAP_ENCRYPTION_KEY=<gerar com node -e "import('./src/services/crypto.js').then(m=>console.log(m.generateKey()))">
+#   AZURE_CLIENT_ID=<client id da App Registration>
+#   AZURE_TENANT_ID=common
+
+# 3. Build inicial + arrancar PM2
+cd /var/www/Curve-sync && npm run install:all && npm run build
+pm2 start npm --name curvsync --cwd /var/www/Curve-sync -- run start
+pm2 save
+
+# 4. Apache2 vhost — usa o template já preparado
+sudo a2enmod proxy proxy_http rewrite headers ssl deflate mime
+sudo cp /var/www/Curve-sync/scripts/apache/curvsync.brasume.com.conf.example \
+        /etc/apache2/sites-available/curvsync.brasume.com.conf
+sudo a2ensite curvsync.brasume.com.conf
+sudo certbot --apache -d curvsync.brasume.com    # emite o cert e ajusta a vhost
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+> O template em [`scripts/apache/curvsync.brasume.com.conf.example`](scripts/apache/curvsync.brasume.com.conf.example) tem duas vhosts (porta 80 → redirect HTTPS, porta 443 → SPA + reverse proxy `/api → :3033`), MIME types para módulos ES, e suporte a `.gz` pré-comprimido — o mesmo padrão usado para `words.brasume.com` neste VPS.
+
+A partir daqui o `./scripts/deploy-prod.sh` trata de tudo em cada release.
+
+### Raspberry Pi (dev / staging)
+
+O projecto funciona num Raspberry Pi 5 (ARM64) com Node.js >= 18 e MongoDB >= 5.0. Existem scripts de verificação na pasta `scripts/`:
+
+```bash
+# Verificar se tudo está instalado e que versões correm (não instala nada)
+./scripts/setup-pi.sh
+
+# Verificar se MongoDB (e opcionalmente Embers Rails) estão a correr
+./scripts/check-services.sh
+./scripts/check-services.sh --with-embers
+
+# Verificar serviços + lançar dev (MongoDB tem de estar a correr)
+./scripts/dev.sh
+./scripts/dev.sh --with-embers      # também verifica Embers Rails
+./scripts/dev.sh --server-only      # só backend
+./scripts/dev.sh --client-only      # só frontend
+```
+
+### Pré-requisitos no Pi
+
+1. **Node.js 20 LTS** — `curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs`
+2. **MongoDB 7.0** — [Instruções ARM64](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-on-debian/)
+3. **Ruby + Rails** (opcional) — Só necessário se executares o Embers localmente
+
+### Embers Rails (opcional)
+
+Se quiseres correr o Embers Rails ao lado do Curve Sync:
+
+```bash
+cd /path/to/embers
+cp config/mongoid.yml_example config/mongoid.yml
+cp config/application.yml_example config/application.yml
+bundle install
+bundle exec rails server -p 3000
+```
+
+O `check-services.sh --with-embers` procura o Embers em `../embers`, `../Embers`, `~/embers`, ou `~/Embers`. Para um caminho diferente, usa `EMBERS_PATH=/custom/path ./scripts/check-services.sh --with-embers`.
 
 ## Documentação adicional
 
