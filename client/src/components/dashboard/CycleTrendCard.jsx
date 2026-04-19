@@ -221,7 +221,7 @@ function CycleTooltip({ active, payload }) {
         <div className="mt-2 space-y-0.5 border-t border-sand-100 pt-2 text-sand-600">
           {row.top_entity && (
             <p>
-              <span className="text-sand-400">Top entidade</span>{' '}
+              <span className="text-sand-400">Top Expense</span>{' '}
               <span className="font-medium text-sand-800">
                 {row.top_entity.name}
               </span>{' '}
