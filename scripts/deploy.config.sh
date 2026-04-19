@@ -9,7 +9,7 @@ export VPS_USER="ember"
 export VPS_HOST="embers.brasume.com"
 export VPS_PORT="22"
 # Repo root on the VPS — must already exist with `git clone` done once.
-export VPS_PATH="/var/www/curve-sync"
+export VPS_PATH="/var/www/Curve-sync"
 
 # ===== Process manager =====
 # Options: pm2 | systemd
@@ -34,7 +34,7 @@ export PUBLIC_URL="https://curvsync.brasume.com"
 # ===== Backups =====
 # Tar of the deploy tree before each release; keep last N.
 export ENABLE_BACKUP="true"
-export BACKUP_DIR="/var/backups/curve-sync"
+export BACKUP_DIR="/var/backups/Curve-sync"
 export MAX_BACKUPS="5"
 
 # ===== Deploy target =====

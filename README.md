@@ -224,12 +224,12 @@ URL público: **`https://curvsync.brasume.com`** (sem o «e» de _curve_ — lê
 # DNS: A curvsync.brasume.com → IP do VPS
 
 # 1. Preparar checkout
-sudo mkdir -p /var/www/curve-sync && sudo chown ember: /var/www/curve-sync
-git clone <repo-url> /var/www/curve-sync
+sudo mkdir -p /var/www/Curve-sync && sudo chown ember: /var/www/Curve-sync
+git clone <repo-url> /var/www/Curve-sync
 
 # 2. server/.env (CORS_ORIGIN tem de bater com PUBLIC_URL)
-cp /var/www/curve-sync/server/.env.example /var/www/curve-sync/server/.env
-$EDITOR /var/www/curve-sync/server/.env
+cp /var/www/Curve-sync/server/.env.example /var/www/Curve-sync/server/.env
+$EDITOR /var/www/Curve-sync/server/.env
 #   PORT=3002
 #   MONGODB_URI=mongodb://localhost:27017/embers_db
 #   NODE_ENV=production
@@ -239,13 +239,13 @@ $EDITOR /var/www/curve-sync/server/.env
 #   AZURE_TENANT_ID=common
 
 # 3. Build inicial + arrancar PM2
-cd /var/www/curve-sync && npm run install:all && npm run build
-pm2 start npm --name curve-sync --cwd /var/www/curve-sync -- run start
+cd /var/www/Curve-sync && npm run install:all && npm run build
+pm2 start npm --name curve-sync --cwd /var/www/Curve-sync -- run start
 pm2 save
 
 # 4. Apache2 vhost — usa o template já preparado
 sudo a2enmod proxy proxy_http rewrite headers ssl deflate mime
-sudo cp /var/www/curve-sync/scripts/apache/curvsync.brasume.com.conf.example \
+sudo cp /var/www/Curve-sync/scripts/apache/curvsync.brasume.com.conf.example \
         /etc/apache2/sites-available/curvsync.brasume.com.conf
 sudo a2ensite curvsync.brasume.com.conf
 sudo certbot --apache -d curvsync.brasume.com    # emite o cert e ajusta a vhost
