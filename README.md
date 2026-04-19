@@ -114,7 +114,56 @@ Este serviço partilha o MongoDB com o Embers. As regras de acesso são rigorosa
 | POST   | `/api/curve/test-connection`| Testar ligação IMAP                |
 | GET    | `/api/curve/logs`           | Histórico de processamento         |
 | GET    | `/api/autocomplete/:field`  | Valores distintos (entity, card)   |
+| GET    | `/api/display/summary`      | Snapshot para ecrãs externos (e-ink) |
 | GET    | `/api/health`               | Health check                       |
+
+### `/api/display/summary` — ecrãs externos (e-ink, smart mirrors)
+
+Endpoint compacto pensado para **dispositivos externos** que mostram um resumo do ciclo actual à distância: um e-ink na secretária, um smart mirror, uma panel de home-automation. Devolve os quatro valores que um ecrã glance-able normalmente quer:
+
+- **Mês e ano do ciclo actual** — em pt-PT, rotulado pelo mês de **fim** do ciclo (22 Mar → 21 Abr = «Abril 2026»)
+- **Gasto no ciclo até agora** (EUR)
+- **Orçamento** — `weekly` e `monthly` (ver `docs/expense-tracking.md` → «Linha de orçamento…» para o cálculo `weekly × 30,4375 / 7`)
+- **Savings score** actual (0–10, 1 casa decimal)
+
+#### Autenticação
+
+Usa o mesmo fluxo de Bearer token que o frontend web — ver [`docs/AUTH.md`](docs/AUTH.md). O dispositivo faz login uma vez, guarda o token, e envia-o como header em cada pedido. A sessão **dura 24 h** — um e-ink a fazer poll de hora a hora deve estar preparado para re-autenticar 1× por dia; a lógica cabe em ~20 linhas na firmware (login → guardar token + `expires_at` → se o próximo pedido devolver 401, repetir login).
+
+#### Exemplo de uso
+
+```bash
+# 1. Login — guarda o token
+curl -s -X POST https://curve.example.com/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"me@example.com","password":"…"}'
+# → { "token": "abc123…", "user": { "id": "…", "email": "me@example.com" } }
+
+# 2. Snapshot — usa o token em cada pedido
+curl -s https://curve.example.com/api/display/summary \
+  -H 'Authorization: Bearer abc123…'
+# → {
+#     "cycle": {
+#       "month_label": "Abril 2026",
+#       "month": "Abril",
+#       "year": 2026,
+#       "start": "2026-03-22",
+#       "end":   "2026-04-21"
+#     },
+#     "spent": 123.45,
+#     "budget": { "weekly": 73.75, "monthly": 321.00 },
+#     "savings_score": 8.1,
+#     "currency": "EUR",
+#     "generated_at": "2026-04-19T14:32:10.123Z"
+#   }
+```
+
+#### Notas para firmware de dispositivos
+
+- **Frequência de poll:** não há rate-limit dedicado — o endpoint cai dentro do limiter global (100 pedidos/min por IP). Para um e-ink, `60 min` entre refreshes é mais que suficiente e mantém folga para os outros clientes que partilhem o IP.
+- **Formato dos valores:** `spent` e os valores de `budget` vêm arredondados a 2 casas decimais; `savings_score` a 1. Zero necessidade de formatação adicional no device.
+- **Fuso horário:** todas as datas são UTC. Converter localmente se o ecrã precisar de mostrar `start`/`end` em fuso local — mas o `month_label` já chega no formato user-facing que a maior parte das firmwares mostra tal e qual.
+- **Erro de autenticação:** se o token expirar, o servidor devolve `401 { "error": "Token inválido ou expirado" }`. Re-login com as credenciais guardadas e retry.
 
 ## Design
 
