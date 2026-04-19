@@ -122,6 +122,17 @@ export function XMarkIcon({ className }) {
   );
 }
 
+// Calendar with a horizontal range bar inside — used by the expenses
+// filter chip (ROADMAP §2.6.1) to signal "range de datas activo".
+export function CalendarRangeIcon({ className }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V8.25a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 8.25v10.5A2.25 2.25 0 0 1 18.75 21H5.25A2.25 2.25 0 0 1 3 18.75Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 11.25h18M8.25 15h7.5" />
+    </svg>
+  );
+}
+
 export function CheckCircleIcon({ className }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75}>

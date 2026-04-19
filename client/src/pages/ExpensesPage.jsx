@@ -1,11 +1,59 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
+import ExpensesFilterChip from '../components/common/ExpensesFilterChip';
 import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
+import { useToast } from '../contexts/ToastContext';
+import { formatAbsoluteDate } from '../utils/relativeDate';
 import * as api from '../services/api';
+
+// Accepts strict YYYY-MM-DD only. Lax `Date.parse` behaviour (e.g.
+// "2026-4-1" without zero padding) would let malformed URLs slip
+// through to the server, where the $dateFromString reject path silently
+// zeroes out the row count — hurting debugging more than it helps.
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidIsoDate(s) {
+  if (typeof s !== 'string' || !ISO_DATE_RE.test(s)) return false;
+  const ts = Date.parse(`${s}T00:00:00Z`);
+  return Number.isFinite(ts);
+}
+
+// Parse the `start`/`end` pair from the URL and return the sanitised
+// values plus an explicit `rangeError` tag the page uses to fire a
+// toast and scrub the offending params (see ROADMAP §2.6.1 → "Edge
+// cases"). Order of checks matters:
+//
+//   1. Malformed string → drop that side, keep the other (user may
+//      have hand-edited one param).
+//   2. `start > end` → drop both (the range is logically empty and
+//      we'd rather the listing load than return zero rows for a URL
+//      the user didn't intend to type).
+//
+// Returned `start`/`end` are safe to forward to the server.
+function parseRange(params) {
+  const rawStart = params.get('start');
+  const rawEnd = params.get('end');
+  const startValid = isValidIsoDate(rawStart);
+  const endValid = isValidIsoDate(rawEnd);
+
+  if (rawStart && !startValid) {
+    return { start: null, end: endValid ? rawEnd : null, rangeError: 'malformed' };
+  }
+  if (rawEnd && !endValid) {
+    return { start: startValid ? rawStart : null, end: null, rangeError: 'malformed' };
+  }
+  const start = startValid ? rawStart : null;
+  const end = endValid ? rawEnd : null;
+  if (start && end && start > end) {
+    return { start: null, end: null, rangeError: 'inverted' };
+  }
+  return { start, end, rangeError: null };
+}
 
 // Per-entry auto-dismiss window for the undo banner. Long enough to
 // catch a "wrong row" fat-finger, short enough to not clutter the page
@@ -21,14 +69,32 @@ const PER_PAGE = 20;
 const BULK_MAX = 500;
 
 export default function ExpensesPage() {
+  // Renamed on destructure because `toast` is already the inline
+  // success/error banner's state variable below. `toastApi` is the
+  // global toast hook from the ToastContext.
+  const toastApi = useToast();
+  // URL is the source of truth for everything that should survive a
+  // reload / bookmark / deep-link (search, page, date range). Local
+  // React state only holds ephemeral UI (picker open, selection,
+  // loading flag). ROADMAP §2.6.1.
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const page = Math.max(
+    1,
+    Number.parseInt(searchParams.get('page') ?? '1', 10) || 1,
+  );
+  const appliedSearch = searchParams.get('search') ?? '';
+  const { start, end, rangeError } = useMemo(
+    () => parseRange(searchParams),
+    [searchParams],
+  );
+
   const [expenses, setExpenses] = useState([]);
-  const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [search, setSearch] = useState('');
-  // `appliedSearch` is the query that was last submitted via the
-  // search form — it drives the actual fetch and the "Seleccionar
-  // todas as N" API call. `search` is just the input buffer.
-  const [appliedSearch, setAppliedSearch] = useState('');
+  // `search` is just the input buffer — only lands on the URL when
+  // the user submits the form. Pre-fill with whatever is already on
+  // the URL so a hard refresh keeps the input in sync.
+  const [search, setSearch] = useState(appliedSearch);
   const [loading, setLoading] = useState(true);
   // Category catalogue for the <CategoryPickerPopover>. Loaded once on
   // mount; the list is small (§5.5 assumes ≤ 30 entries) and static
@@ -80,15 +146,83 @@ export default function ExpensesPage() {
   const exclusionUndoTimerRef = useRef(null);
   const [exclusionBusy, setExclusionBusy] = useState(false);
 
-  const fetchExpenses = async (overrideSearch) => {
+  // URL-writing helpers. All callers go through these so there's one
+  // place to decide which params survive a transition (e.g. changing
+  // the search resets `page` to 1, but changing pages preserves
+  // `start/end/search`).
+  const updateParams = (mutator) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        mutator(next);
+        return next;
+      },
+      { replace: false },
+    );
+  };
+  const setPage = (next) => {
+    updateParams((p) => {
+      if (next <= 1) p.delete('page');
+      else p.set('page', String(next));
+    });
+  };
+  const applySearch = (value) => {
+    updateParams((p) => {
+      if (value) p.set('search', value);
+      else p.delete('search');
+      p.delete('page');
+    });
+  };
+  const clearDateRange = () => {
+    updateParams((p) => {
+      p.delete('start');
+      p.delete('end');
+      p.delete('page');
+    });
+  };
+
+  // Invalid-range recovery. Runs once per URL change — if parseRange
+  // flagged a malformed or inverted range, surface a toast and scrub
+  // the offending params via `replace` so back-button doesn't bring
+  // the user back to the broken URL. The toast copy distinguishes
+  // the two classes so the user knows whether they fat-fingered a
+  // date or swapped start/end.
+  useEffect(() => {
+    if (!rangeError) return;
+    const text =
+      rangeError === 'inverted'
+        ? 'Intervalo de datas inválido — a data final é anterior à inicial.'
+        : 'Intervalo de datas em formato inválido.';
+    toastApi.error(text, { id: 'expenses-range-error' });
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('start');
+        next.delete('end');
+        next.delete('page');
+        return next;
+      },
+      { replace: true },
+    );
+    // `rangeError` is derived from searchParams — including the latter
+    // would re-fire this effect on every cleanup pass. React's strict
+    // mode double-invoke is covered by the toast's id-dedupe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeError]);
+
+  const fetchExpenses = async () => {
     setLoading(true);
     try {
-      const effectiveSearch =
-        overrideSearch !== undefined ? overrideSearch : appliedSearch;
       const res = await api.getExpenses({
         page,
         limit: PER_PAGE,
-        search: effectiveSearch,
+        search: appliedSearch,
+        // start/end are omitted from the URLSearchParams serialisation
+        // when null/undefined — `new URLSearchParams({ start: null })`
+        // would render `start=null`, which the server would then
+        // happily refuse to parse. Guard here, not at the API layer.
+        ...(start ? { start } : {}),
+        ...(end ? { end } : {}),
         sort: '-date_at',
       });
       setExpenses(res.data ?? []);
@@ -101,9 +235,20 @@ export default function ExpensesPage() {
   };
 
   useEffect(() => {
+    // Skip the fetch when the URL has a range-error we're about to
+    // scrub — avoids a round-trip to a filter we'll reject.
+    if (rangeError) return;
     fetchExpenses();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, appliedSearch]);
+  }, [page, appliedSearch, start, end, rangeError]);
+
+  // Keep the search input in sync with URL changes — covers the
+  // browser back/forward case where `appliedSearch` flips without the
+  // user typing. `useState(initial)` only runs once on mount, so
+  // without this the input would drift from the URL on navigation.
+  useEffect(() => {
+    setSearch(appliedSearch);
+  }, [appliedSearch]);
 
   useEffect(() => {
     api
@@ -186,6 +331,8 @@ export default function ExpensesPage() {
     try {
       const res = await api.getExpenseIds({
         search: appliedSearch,
+        ...(start ? { start } : {}),
+        ...(end ? { end } : {}),
         sort: '-date_at',
       });
       setSelectedIds(new Set(res.ids ?? []));
@@ -587,8 +734,7 @@ export default function ExpensesPage() {
 
   const handleSearch = (e) => {
     e.preventDefault();
-    setPage(1);
-    setAppliedSearch(search);
+    applySearch(search);
   };
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
@@ -646,6 +792,16 @@ export default function ExpensesPage() {
         entry={exclusionUndo}
         onUndo={handleExclusionUndo}
         busy={exclusionBusy}
+      />
+
+      {/* ROADMAP §2.6.1 — active date-range chip. Feeds on the URL
+          params, not internal state, so a refresh / bookmark / deep-
+          link from the dashboard chart all hydrate the same view. */}
+      <ExpensesFilterChip
+        start={start}
+        end={end}
+        count={total}
+        onClear={clearDateRange}
       />
 
       {/* Search bar */}
@@ -756,7 +912,37 @@ export default function ExpensesPage() {
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-curve-300 border-t-curve-700" />
         </div>
       ) : expenses.length === 0 ? (
-        <EmptyState title="Sem resultados" description="Tenta ajustar a pesquisa." />
+        // Contextual empty state — when a date range is active, the
+        // generic "ajusta a pesquisa" copy misleads (the user's query
+        // string may be empty, the filter is what produced zero rows).
+        // Offer a direct way back to the unfiltered list without
+        // forcing them to hunt for the chip's × button.
+        start || end ? (
+          <div className="rounded-2xl border border-sand-200 bg-white p-10 text-center">
+            <p className="text-base font-medium text-sand-900">
+              Sem despesas{' '}
+              {start && end
+                ? `entre ${formatAbsoluteDate(start)} e ${formatAbsoluteDate(end)}`
+                : start
+                  ? `a partir de ${formatAbsoluteDate(start)}`
+                  : `até ${formatAbsoluteDate(end)}`}
+            </p>
+            <p className="mt-1 text-sm text-sand-500">
+              {appliedSearch
+                ? 'Experimenta alargar a janela ou limpar a pesquisa.'
+                : 'Experimenta alargar a janela.'}
+            </p>
+            <Link
+              to="/expenses"
+              onClick={() => setSearch('')}
+              className="mt-5 inline-flex items-center rounded-full bg-curve-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-curve-700 focus:outline-none focus:ring-2 focus:ring-curve-500/30"
+            >
+              Ver todas as despesas
+            </Link>
+          </div>
+        ) : (
+          <EmptyState title="Sem resultados" description="Tenta ajustar a pesquisa." />
+        )
       ) : (
         <div
           /* `overflow-hidden` clips the CategoryPickerPopover that
@@ -916,7 +1102,7 @@ export default function ExpensesPage() {
             <div className="flex items-center gap-2">
               <button
                 disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
+                onClick={() => setPage(page - 1)}
                 className="rounded-lg p-1.5 text-sand-400 transition-colors hover:bg-sand-100 disabled:opacity-30"
               >
                 <ChevronLeftIcon className="h-4 w-4" />
@@ -926,7 +1112,7 @@ export default function ExpensesPage() {
               </span>
               <button
                 disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
+                onClick={() => setPage(page + 1)}
                 className="rounded-lg p-1.5 text-sand-400 transition-colors hover:bg-sand-100 disabled:opacity-30"
               >
                 <ChevronRightIcon className="h-4 w-4" />

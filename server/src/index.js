@@ -10,6 +10,7 @@ import categoryIconsRouter from './routes/categoryIcons.js';
 import curveRouter from './routes/curve.js';
 import autocompleteRouter from './routes/autocomplete.js';
 import authRouter from './routes/auth.js';
+import displayRouter from './routes/display.js';
 import { authenticate } from './middleware/auth.js';
 import CurveConfig from './models/CurveConfig.js';
 import { startScheduler } from './services/scheduler.js';
@@ -127,6 +128,10 @@ app.use('/api/category-overrides', authenticate, categoryOverridesRouter);
 app.use('/api/category-icons', authenticate, categoryIconsRouter);
 app.use('/api/curve', authenticate, curveRouter);
 app.use('/api/autocomplete', authenticate, autocompleteRouter);
+// Compact snapshot endpoint for external displays (e-ink, smart
+// mirrors, home-automation panels). Same Bearer-token auth as the
+// rest of the API. See server/src/routes/display.js.
+app.use('/api/display', authenticate, displayRouter);
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));

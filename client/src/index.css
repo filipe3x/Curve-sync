@@ -54,37 +54,63 @@
   }
 
   /* Savings Score "perfect 10" — a horizontal shimmer clipped to the
-     number, breathing scale, and a soft warm halo. All three layers
-     are intentionally slow (2.8 s) and low-amplitude so the card
-     celebrates the milestone without shouting. Triggered from the
-     AnimatedKPI via the `perfect` prop; see DashboardPage for the
+     number, breathing scale, and a soft pulsing green halo. All three
+     layers are intentionally slow (2.8 s) and low-amplitude so the
+     card celebrates the milestone without shouting. Triggered from
+     the AnimatedKPI via the `perfect` prop; see DashboardPage for the
      wiring and ROADMAP §2.11 for the design note.
 
-     Animation is declared directly (not via `@apply animate-*`) so
-     PostCSS doesn't need the utility classes to exist in JIT at
-     parse time — those utilities are generated from scanned JSX, and
-     nothing in JSX references them since the effect lives entirely
-     inside this component class. The raw `animation` shorthand also
-     lets us layer shimmer + breathe in one declaration. */
+     Green, not curve-red + amber, because a "perfect" Savings Score
+     carries a semantic of "you saved!" — emerald is the colour the
+     rest of the dashboard uses for "gastaste menos" (see the cycle
+     trend chart), so matching it here keeps the visual language
+     coherent.
+
+     Keyframes are declared inline (not via tailwind.config.js theme
+     extension) because Tailwind's JIT purges keyframes whose matching
+     `animate-*` utility isn't scanned from JSX, and the effect lives
+     entirely inside this component class — nothing in JSX references
+     it. A previous version relied on the JIT emission and silently
+     rendered a static gradient because the @keyframes never made it
+     into the compiled CSS. */
   .kpi-perfect {
     display: inline-block;
     position: relative;
     background-image: linear-gradient(
       100deg,
-      theme('colors.curve.700') 0%,
-      theme('colors.curve.700') 35%,
-      theme('colors.amber.400') 50%,
-      theme('colors.curve.700') 65%,
-      theme('colors.curve.700') 100%
+      theme('colors.emerald.600') 0%,
+      theme('colors.emerald.600') 35%,
+      theme('colors.emerald.300') 50%,
+      theme('colors.emerald.600') 65%,
+      theme('colors.emerald.600') 100%
     );
     background-size: 250% 100%;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
     animation: perfect-shimmer 2.8s linear infinite,
-               perfect-breathe 2.8s ease-in-out infinite;
-    filter: drop-shadow(0 0 6px rgba(252, 211, 77, 0.55));
+               perfect-breathe 2.8s ease-in-out infinite,
+               perfect-glow 2.8s ease-in-out infinite;
   }
+}
+
+@keyframes perfect-shimmer {
+  0% { background-position: -100% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+@keyframes perfect-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+
+/* Pulsing drop-shadow halo in emerald-500 tone (rgb 16 185 129). The
+   amplitude goes from a soft 3 px ambient glow to a crisp 12 px
+   bloom at mid-cycle, matching the 2.8 s breathing rhythm of the
+   scale + shimmer so the three layers feel like one animation. */
+@keyframes perfect-glow {
+  0%, 100% { filter: drop-shadow(0 0 3px rgba(16, 185, 129, 0.35)); }
+  50% { filter: drop-shadow(0 0 12px rgba(16, 185, 129, 0.7)); }
 }
 
 /* Accessibility — kill every animation/transition for users who ask

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import StatCard from '../components/common/StatCard';
@@ -8,6 +8,19 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
+import CycleTrendSkeleton from '../components/dashboard/CycleTrendSkeleton';
+
+// recharts pulls in ~120 kB gzip of d3-* — bigger than the whole rest
+// of the dashboard combined. Splitting it into its own chunk means
+// first paint (stat cards + recent expenses) stays fast; the trend
+// chart streams in on the next tick. See ROADMAP §2.8 build-size note.
+// The skeleton is NOT lazy — it's a few hundred bytes of JSX and it
+// needs to be on the main chunk so the Suspense fallback can render
+// instantly on first paint (lazy-loading the fallback would defeat
+// the purpose).
+const CycleTrendCard = lazy(
+  () => import('../components/dashboard/CycleTrendCard'),
+);
 import { useToast } from '../contexts/ToastContext';
 import { formatExpenseDate, formatAbsoluteDate } from '../utils/relativeDate';
 import * as api from '../services/api';
@@ -786,6 +799,22 @@ export default function DashboardPage() {
           </div>
         )}
       </section>
+
+      {/* ROADMAP §2.8 — trend chart at the bottom of the dashboard.
+          Fed by meta.cycle_history (server/src/services/expenseStats.js
+          → computeCycleHistory) on the same /expenses call that
+          powers the stat cards above. Card handles its own empty and
+          low-data states (≤ 1 cycle → empty illustration, ≤ 6 cycles
+          → toggle locked to 6m). Suspense fallback is a bare skeleton
+          matching the card shell height — avoids CLS while the
+          recharts chunk streams. */}
+      {stats?.cycle_history && (
+        <section className="mt-8">
+          <Suspense fallback={<CycleTrendSkeleton />}>
+            <CycleTrendCard history={stats.cycle_history} />
+          </Suspense>
+        </section>
+      )}
     </>
   );
 }
