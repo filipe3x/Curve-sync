@@ -26,17 +26,10 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Allowlist of sortable fields. Anything else falls back to
-// `-date_at` (default). `date` (the raw string) is kept in the
-// allowlist for retro-compat with any client that hasn't migrated
-// yet; it will be removed one or two sprints from now once the
-// dashboards, the /expenses page, and the /categories detail panel
-// are all confirmed to be sending `-date_at`. Sorting on `date`
-// remains broken (lexical on day-first strings + mixed BSON types,
-// see ROADMAP §2.x investigation + scripts/analyze-expense-dates.js);
-// leaving it is an explicit retro-compat choice, not an endorsement.
+// Allowlist of sortable fields. Anything else falls back to `-date`
+// (default, chronological descending). `date` is a uniformly typed
+// BSON Date — see models/Expense.js.
 const ALLOWED_SORT_FIELDS = new Set([
-  'date_at',
   'date',
   'amount',
   'entity',
@@ -45,10 +38,10 @@ const ALLOWED_SORT_FIELDS = new Set([
 ]);
 
 function sanitiseSort(raw) {
-  if (!raw || typeof raw !== 'string') return '-date_at';
+  if (!raw || typeof raw !== 'string') return '-date';
   const desc = raw.startsWith('-');
   const field = desc ? raw.slice(1) : raw;
-  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date_at';
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
   return desc ? `-${field}` : field;
 }
 
@@ -325,23 +318,24 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { entity, amount, date, card } = req.body;
+    // Digest stays hashed from the raw request string — mirrors
+    // curve.py + the sync path's emailParser, preserving dedup against
+    // Embers-era rows for the same (entity, amount, date, card) tuple.
     const digest = computeDigest({ entity, amount, date, card });
     const resolverContext = await loadContext(req.userId);
     const category_id = resolveCategory(entity, resolverContext);
 
+    // `date` on the wire is the human string; schema stores BSON Date.
+    // `parseExpenseDateOrNull` returns null on garbage input, which
+    // Mongoose then rejects via `required: true` — caller gets a 500
+    // and the row never lands. Preferable to silently accepting
+    // unparseable dates given this endpoint has no validator gate.
+    const typedDate = parseExpenseDateOrNull(date);
+
     const expense = await Expense.create({
       entity,
       amount,
-      date,
-      // Typed chronological companion. This handler has no validator
-      // gate today (unlike the sync path via emailParser.validateParsed),
-      // so `date` may be missing or malformed when the caller bypasses
-      // the frontend form. `parseExpenseDateOrNull` returns null for
-      // anything it can't parse — the row still inserts, it just
-      // won't appear in the `-date_at` sort (sparse index). Never a
-      // good outcome but strictly better than the current lex-on-
-      // string behaviour, and the frontend form enforces the shape.
-      date_at: parseExpenseDateOrNull(date),
+      date: typedDate,
       card,
       digest,
       user_id: req.userId,

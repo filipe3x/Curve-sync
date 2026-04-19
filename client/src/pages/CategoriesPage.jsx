@@ -832,7 +832,7 @@ function RecentExpenses({ categoryId }) {
       .getExpenses({
         page: 1,
         limit: 10,
-        sort: '-date_at',
+        sort: '-date',
         category_id: param,
       })
       .then((res) => {

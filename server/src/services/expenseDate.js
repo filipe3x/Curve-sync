@@ -102,7 +102,8 @@ export function parseExpenseDate(value) {
 
 /**
  * Convenience wrapper: the INSERT paths just want a Date-or-null to
- * stash on `Expense.date_at`, they don't care about the reason.
+ * stash on `Expense.date`, they don't care about the reason. `null`
+ * flows to Mongoose which rejects via `required: true` on the schema.
  */
 export function parseExpenseDateOrNull(value) {
   return parseExpenseDate(value).date;

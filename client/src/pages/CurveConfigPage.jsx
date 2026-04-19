@@ -479,8 +479,10 @@ export default function CurveConfigPage() {
         {/*
           Day-of-month cut-off for the expense cycle. Drives: the
           dashboard "este mês" totals, the /categories/stats windows,
-          the uncategorised count card, and the first-sync imap_since
-          fallback. Clamped to [1, 28] to avoid Feb overflow. See
+          the uncategorised count card, and the IMAP reader's SINCE
+          filter — every sync only looks at the current cycle, so
+          changing this value also changes which emails the next sync
+          pulls. Clamped to [1, 28] to avoid Feb overflow. See
           docs/expense-tracking.md → Custom Monthly Cycle.
         */}
         <label className="mt-5 block">

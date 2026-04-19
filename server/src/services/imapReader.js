@@ -141,21 +141,29 @@ function isLoopbackHost(host) {
 }
 
 /**
- * Fallback SINCE date when `CurveConfig.imap_since` is null (i.e. the
- * user hasn't set an explicit date yet). Returns the start of the
- * user's current custom cycle — `cycleDay` of this month if today is
- * on/after `cycleDay`, otherwise `cycleDay` of the previous month.
+ * SINCE date for every sync run. Returns the start of the user's
+ * current custom cycle — `cycleDay` of this month if today is on/after
+ * `cycleDay`, otherwise `cycleDay` of the previous month.
  *
- * Why cycle-aware: expenses belong to a cycle, not a rolling 31-day
- * window. A fresh user who enables sync on the 25th should ingest
- * receipts from the 22nd onward (current cycle) rather than reaching
- * into the previous cycle's territory. The IMAP SINCE command
- * compares against the message's internal date (day-precision), so
- * any UTC midnight boundary is fine for the filter.
+ * Why cycle-scoped (not rolling 31d and not user-overridable):
+ *   - Expenses belong to a pay cycle; the dashboard, `/categories/stats`
+ *     and `/curve/stats/uncategorised` all scope there. Ingesting
+ *     outside the cycle produces rows that no UI surface ever shows.
+ *   - Embers/curve.py never marked messages SEEN, so every historical
+ *     Curve receipt in the mailbox is still UNSEEN. Letting the sync
+ *     reach back into old months would re-ingest thousands of rows on
+ *     the first run.
+ *   - Older Curve email templates produce digests that today's parser
+ *     can't always reproduce (see scripts/dryrun-date-schema.js Check
+ *     C output: ~6-month cycles of template drift). A mismatch there
+ *     is a DUPLICATE on insert, not a dedup.
  *
- * Fallback to 31d (legacy behaviour) when cycleDay is nullish or the
- * caller forgot to pass a config — preserves the old invariant for
- * any callsite that still uses the no-arg form.
+ * The IMAP SINCE command compares against the message's internal date
+ * (day-precision), so any UTC midnight boundary is fine for the filter.
+ *
+ * Fallback to 31d only when `sync_cycle_day` is nullish — preserves
+ * the old safety net for any misconfigured row (the Mongoose default
+ * of 22 means this almost never triggers).
  *
  * @param {{sync_cycle_day?: number}} [config]
  */
@@ -331,14 +339,19 @@ export class ImapReader {
    * sync against a large mailbox would otherwise hold the entire
    * source payload of every email in a single array.
    *
-   * Two safety nets prevent a first-time sync from pulling thousands
-   * of historical emails:
+   * Two safety nets prevent any sync from pulling historical emails:
    *
-   *   1. **`imap_since`** — IMAP `SEARCH UNSEEN SINCE <date>` filter.
-   *      When set on the config, the server discards messages older
-   *      than that date before sending. When `null`, the reader falls
-   *      back to 31 days ago in Europe/Lisbon time. The frontend will
-   *      eventually expose this as a cycle-aware control (day 22).
+   *   1. **Cycle-start SINCE** — IMAP `SEARCH UNSEEN SINCE <date>`
+   *      always uses the start of the user's current custom cycle
+   *      (cycle day 22 by default, configurable 1-28 per user). Only
+   *      emails from the current pay cycle are eligible; anything
+   *      older is invisible to the sync. This is a deliberate design
+   *      choice: historical emails have already been categorised in
+   *      Embers/curve.py and re-ingesting them risks duplicates with
+   *      drifted digests (old Curve templates hashed differently than
+   *      what today's parser produces). The dashboard + aggregations
+   *      already scope to the current cycle, so there's no UX reason
+   *      to ingest older rows either.
    *
    *   2. **`max_emails_per_run`** — client-side hard cap (default 500).
    *      After yielding this many messages, the generator stops and
@@ -357,9 +370,9 @@ export class ImapReader {
     await this.openFolder();
 
     const maxPerRun = this.config.max_emails_per_run ?? 500;
-    const since = this.config.imap_since
-      ? new Date(this.config.imap_since)
-      : defaultSince(this.config);
+    // Always cycle-start. Historical override via `imap_since` on the
+    // config was dropped deliberately — see the block comment above.
+    const since = defaultSince(this.config);
 
     const criteria = { seen: false };
     if (since) criteria.since = since;

@@ -19,7 +19,6 @@ function escapeRegex(s) {
 }
 
 const ALLOWED_SORT_FIELDS = new Set([
-  'date_at',
   'date',
   'amount',
   'entity',
@@ -28,28 +27,22 @@ const ALLOWED_SORT_FIELDS = new Set([
 ]);
 
 function sanitiseSort(raw) {
-  if (!raw || typeof raw !== 'string') return '-date_at';
+  if (!raw || typeof raw !== 'string') return '-date';
   const desc = raw.startsWith('-');
   const field = desc ? raw.slice(1) : raw;
-  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date_at';
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
   return desc ? `-${field}` : field;
 }
 // ────────── Tests ──────────
 
 test('sanitiseSort: default when omitted', () => {
-  assert.equal(sanitiseSort(undefined), '-date_at');
-  assert.equal(sanitiseSort(null), '-date_at');
-  assert.equal(sanitiseSort(''), '-date_at');
+  assert.equal(sanitiseSort(undefined), '-date');
+  assert.equal(sanitiseSort(null), '-date');
+  assert.equal(sanitiseSort(''), '-date');
 });
 
 test('sanitiseSort: allowlisted fields pass through (both directions)', () => {
-  // date_at — the canonical typed chronological field, default since
-  // Opção C step 5.
-  assert.equal(sanitiseSort('date_at'), 'date_at');
-  assert.equal(sanitiseSort('-date_at'), '-date_at');
-  // `date` (raw string) stays in the allowlist for one or two
-  // sprints of retro-compat with any client still sending it; step 6
-  // drops it.
+  // date — canonical typed chronological field; default sort.
   assert.equal(sanitiseSort('date'), 'date');
   assert.equal(sanitiseSort('-date'), '-date');
   assert.equal(sanitiseSort('amount'), 'amount');
@@ -63,16 +56,16 @@ test('sanitiseSort: allowlisted fields pass through (both directions)', () => {
 });
 
 test('sanitiseSort: non-allowlisted fields fall back to default', () => {
-  assert.equal(sanitiseSort('user_id'), '-date_at');
-  assert.equal(sanitiseSort('-user_id'), '-date_at');
-  assert.equal(sanitiseSort('password'), '-date_at');
-  assert.equal(sanitiseSort('{"$ne":null}'), '-date_at');
+  assert.equal(sanitiseSort('user_id'), '-date');
+  assert.equal(sanitiseSort('-user_id'), '-date');
+  assert.equal(sanitiseSort('password'), '-date');
+  assert.equal(sanitiseSort('{"$ne":null}'), '-date');
 });
 
 test('sanitiseSort: non-string inputs fall back', () => {
-  assert.equal(sanitiseSort(42), '-date_at');
-  assert.equal(sanitiseSort({}), '-date_at');
-  assert.equal(sanitiseSort([]), '-date_at');
+  assert.equal(sanitiseSort(42), '-date');
+  assert.equal(sanitiseSort({}), '-date');
+  assert.equal(sanitiseSort([]), '-date');
 });
 
 test('escapeRegex: passes through plain text unchanged', () => {

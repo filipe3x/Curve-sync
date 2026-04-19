@@ -223,7 +223,7 @@ export default function ExpensesPage() {
         // happily refuse to parse. Guard here, not at the API layer.
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
-        sort: '-date_at',
+        sort: '-date',
       });
       setExpenses(res.data ?? []);
       setTotal(res.meta?.total ?? 0);
@@ -333,7 +333,7 @@ export default function ExpensesPage() {
         search: appliedSearch,
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
-        sort: '-date_at',
+        sort: '-date',
       });
       setSelectedIds(new Set(res.ids ?? []));
       setLastAnchorId(null);

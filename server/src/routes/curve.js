@@ -113,17 +113,22 @@ router.put('/config', async (req, res) => {
     const {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
-      imap_since, max_emails_per_run,
+      max_emails_per_run,
       sync_cycle_day, weekly_budget,
       confirm_folder,
     } = req.body;
+    // `imap_since` is intentionally not accepted here — the SINCE
+    // filter is derived exclusively from `sync_cycle_day` in
+    // imapReader.js :: defaultSince. Any user-facing override would
+    // defeat the "current cycle only" invariant; if you need more
+    // control in the future, extend `sync_cycle_day` semantics rather
+    // than re-introducing a date field.
 
     const update = {
       imap_server, imap_port, imap_username,
       imap_password: imap_password ? encrypt(imap_password) : undefined,
       imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
-      imap_since: imap_since ? new Date(imap_since) : null,
       max_emails_per_run: max_emails_per_run != null ? Number(max_emails_per_run) : undefined,
       // Clamp on write so the DB never holds a value cycleBoundsFor
       // would reject. Omit from the update when the caller didn't

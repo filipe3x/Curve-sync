@@ -195,7 +195,72 @@ Runbook canónico:
 
 Se o step 5 já aterrou sem o backfill ter corrido, a recuperação é correr o backfill o quanto antes — não há data loss, os rows só ficam temporariamente sortados no fim.
 
-## Raspberry Pi / Deployment
+## Deploy para produção (VPS Ubuntu)
+
+Deploy automatizado via `scripts/deploy-prod.sh`. Cobre as seis fases do ROADMAP §3.9 (preflight → gate → pull+build → migrations → restart → rollback) e usa **PM2** (ou systemd, configurável) para gerir o processo no VPS.
+
+```bash
+# 1. Configurar (uma vez)
+cp scripts/deploy.config.sh scripts/deploy.config.local.sh
+$EDITOR scripts/deploy.config.local.sh    # VPS_HOST, VPS_USER, BACKEND_PORT, ...
+
+# 2. Deploy
+./scripts/deploy-prod.sh                  # interactive
+./scripts/deploy-prod.sh --yes            # CI / non-interactive
+./scripts/deploy-prod.sh --ref=<sha>      # specific commit
+./scripts/deploy-prod.sh --dry-run        # preflight only
+./scripts/deploy-prod.sh --rollback       # revert to previous backup
+```
+
+⚠️ **Migrações com sequência crítica** (ex. backfill `date_at`) ficam em [`docs/DEPLOY_NOTES.md`](docs/DEPLOY_NOTES.md). O preflight imprime cada bloco `## release:` antes da gate — ler antes de continuar.
+
+⚠️ **Porta**: o VPS partilhado já corre `sleep-routine` em :3001. O default em `deploy.config.sh` é `:3033` para evitar colisão; manter alinhado com `server/.env` no servidor.
+
+### Setup inicial no VPS (uma vez)
+
+URL público: **`https://curvsync.brasume.com`** (sem o «e» de _curve_ — lê-se «cur · vsync»).
+
+```bash
+# DNS: A curvsync.brasume.com → IP do VPS
+
+# 1. Preparar checkout
+#    Grupo http-web + modo 775 seguem o padrão do /var/www/sleep no mesmo VPS:
+#    o Apache passa a ter acesso ao client/dist/ sem world-write.
+sudo mkdir -p /var/www/Curve-sync
+sudo chown ember:http-web /var/www/Curve-sync
+sudo chmod 775 /var/www/Curve-sync
+git clone <repo-url> /var/www/Curve-sync
+
+# 2. server/.env (CORS_ORIGIN tem de bater com PUBLIC_URL)
+cp /var/www/Curve-sync/server/.env.example /var/www/Curve-sync/server/.env
+$EDITOR /var/www/Curve-sync/server/.env
+#   PORT=3033
+#   MONGODB_URI=mongodb://localhost:27017/embers_db
+#   NODE_ENV=production
+#   CORS_ORIGIN=https://curvsync.brasume.com
+#   IMAP_ENCRYPTION_KEY=<gerar com node -e "import('./src/services/crypto.js').then(m=>console.log(m.generateKey()))">
+#   AZURE_CLIENT_ID=<client id da App Registration>
+#   AZURE_TENANT_ID=common
+
+# 3. Build inicial + arrancar PM2
+cd /var/www/Curve-sync && npm run install:all && npm run build
+pm2 start npm --name curvsync --cwd /var/www/Curve-sync -- run start
+pm2 save
+
+# 4. Apache2 vhost — usa o template já preparado
+sudo a2enmod proxy proxy_http rewrite headers ssl deflate mime
+sudo cp /var/www/Curve-sync/scripts/apache/curvsync.brasume.com.conf.example \
+        /etc/apache2/sites-available/curvsync.brasume.com.conf
+sudo a2ensite curvsync.brasume.com.conf
+sudo certbot --apache -d curvsync.brasume.com    # emite o cert e ajusta a vhost
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+> O template em [`scripts/apache/curvsync.brasume.com.conf.example`](scripts/apache/curvsync.brasume.com.conf.example) tem duas vhosts (porta 80 → redirect HTTPS, porta 443 → SPA + reverse proxy `/api → :3033`), MIME types para módulos ES, e suporte a `.gz` pré-comprimido — o mesmo padrão usado para `words.brasume.com` neste VPS.
+
+A partir daqui o `./scripts/deploy-prod.sh` trata de tudo em cada release.
+
+### Raspberry Pi (dev / staging)
 
 O projecto funciona num Raspberry Pi 5 (ARM64) com Node.js >= 18 e MongoDB >= 5.0. Existem scripts de verificação na pasta `scripts/`:
 
