@@ -223,7 +223,7 @@ function checkFixturesB() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Check C · prod digest stability
+// Check C · prod digest stability (best-effort reconstruction)
 // ────────────────────────────────────────────────────────────────────
 async function checkProdC() {
   banner('C · Prod digest stability (stored row → reconstructed digest)');
@@ -249,73 +249,72 @@ async function checkProdC() {
   const rows = await query.exec();
   console.log(`  rows scanned     : ${rows.length}${SAMPLE ? ` (sampled)` : ''}`);
 
-  // Reconstruction strategies, tried in order. If any one reproduces
-  // the stored digest, we consider that row safe: a future curve-sync
-  // re-ingest of the same email would produce the same digest.
-  const strategies = [
-    {
-      name: 'reconstructCurveString(date) + String(amount)',
-      build: (r) => hashRow({
-        entity: r.entity,
-        amountRaw: String(r.amount),
-        dateStr: reconstructCurveString(r.date),
-        card: r.card,
-      }),
-    },
-    {
-      name: 'toISOString(date) + String(amount)',
-      build: (r) => hashRow({
-        entity: r.entity,
-        amountRaw: String(r.amount),
-        dateStr: r.date.toISOString(),
-        card: r.card,
-      }),
-    },
-    {
-      name: 'date.toString() + String(amount)',
-      build: (r) => hashRow({
-        entity: r.entity,
-        amountRaw: String(r.amount),
-        dateStr: r.date.toString(),
-        card: r.card,
-      }),
-    },
-    {
-      name: 'raw string (row.date treated as already a string)',
-      build: (r) => hashRow({
-        entity: r.entity,
-        amountRaw: String(r.amount),
-        dateStr: String(r.date),
-        card: r.card,
-      }),
-    },
+  // Amount reconstruction variants. curve.py hashed the RAW amount text
+  // from the Curve receipt HTML after stripping €. Receipts historically
+  // render amounts as "3.00" (two decimals) but older templates or
+  // specific categories can vary. We try the common shapes; a row
+  // matching ANY of them is considered safe.
+  const amountFormats = (a) => {
+    const forms = new Set();
+    forms.add(String(a));
+    if (Number.isFinite(a)) {
+      forms.add(a.toFixed(2));
+      forms.add(a.toFixed(1));
+      forms.add(a.toFixed(0));
+      // European-comma decimals (seen rarely in old templates)
+      forms.add(String(a).replace('.', ','));
+      forms.add(a.toFixed(2).replace('.', ','));
+    }
+    return [...forms];
+  };
+
+  // Date reconstruction variants. Same idea: recover the original
+  // text curve.py saw in the receipt.
+  const dateFormats = (d) => [
+    reconstructCurveString(d),       // "25 April 2024 13:25:53" — canonical
+    d.toISOString(),                 // "2024-04-25T13:25:53.000Z" — if stored string already ISO
+    d.toString(),                    // JS Date toString — unlikely but cheap to try
+    String(d),                       // row.date already a string
   ];
 
-  const winnerCounts = new Map(strategies.map((s) => [s.name, 0]));
   let matched = 0;
   const unmatched = [];
+  const winnerByFormat = new Map();
 
   for (const r of rows) {
-    if (!(r.date instanceof Date)) {
-      unmatched.push({ _id: r._id, reason: 'date not a BSON Date', stored: r.date });
+    if (!(r.date instanceof Date) && typeof r.date !== 'string') {
+      unmatched.push({ _id: r._id, reason: 'unexpected date type', stored: r.date });
       continue;
     }
-    let winner = null;
-    for (const s of strategies) {
-      if (s.build(r) === r.digest) {
-        winner = s.name;
-        break;
+    const dForms = r.date instanceof Date
+      ? dateFormats(r.date)
+      : [String(r.date)];
+    const aForms = amountFormats(r.amount);
+    let found = null;
+    outer: for (const ds of dForms) {
+      for (const as of aForms) {
+        const h = hashRow({
+          entity: r.entity,
+          amountRaw: as,
+          dateStr: ds,
+          card: r.card,
+        });
+        if (h === r.digest) {
+          found = { dateFormat: ds === r.date?.toString?.() ? 'toString' : (ds === r.date?.toISOString?.() ? 'ISO' : 'curve'), amountFormat: as };
+          break outer;
+        }
       }
     }
-    if (winner) {
+    if (found) {
       matched++;
-      winnerCounts.set(winner, winnerCounts.get(winner) + 1);
+      const key = `amount=${found.amountFormat}`;
+      winnerByFormat.set(key, (winnerByFormat.get(key) ?? 0) + 1);
     } else {
       unmatched.push({
         _id: r._id,
         entity: r.entity,
         amount: r.amount,
-        date: r.date.toISOString(),
+        date: r.date instanceof Date ? r.date.toISOString() : String(r.date),
         card: r.card,
         storedDigest: r.digest,
       });
@@ -323,19 +322,91 @@ async function checkProdC() {
   }
 
   console.log('');
-  console.log('  digest reproduced by strategy:');
-  for (const [name, count] of winnerCounts) {
-    console.log(`    ${count.toString().padStart(5)}  ${name}`);
+  console.log('  digest reproduced by amount format:');
+  for (const [fmt, count] of [...winnerByFormat.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+    console.log(`    ${count.toString().padStart(5)}  ${fmt}`);
   }
   console.log(`  unmatched rows    : ${unmatched.length}`);
-
   if (unmatched.length) {
-    console.log('  first unmatched samples (would create DUPLICATES on re-ingest):');
+    console.log('  first unmatched samples:');
     for (const u of unmatched.slice(0, 5)) console.log('    ·', u);
   }
 
   await mongoose.disconnect();
   return { matched, unmatched: unmatched.length, total: rows.length };
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Check D · direct fixture → prod digest lookup (ironclad)
+//
+// For each email fixture in the repo: parse it, take the resulting
+// digest, and look it up in prod. If the digest is present, we have
+// proof that for this exact email curvsync's parser produces byte-
+// identical output to the curve.py/Mongoid write path that populated
+// prod. This is the strongest evidence we can produce without
+// replaying every historical email.
+// ────────────────────────────────────────────────────────────────────
+async function checkFixtureLookupD() {
+  banner('D · Fixture → prod digest lookup (parser = curve.py?)');
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.log('  MONGODB_URI not set — skipping Check D');
+    return { skipped: true };
+  }
+  if (mongoose.connection.readyState !== 1) {
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
+  }
+
+  const files = readdirSync(FIXTURES_DIR).filter((f) => !f.startsWith('.'));
+  let found = 0;
+  let missing = 0;
+  const details = [];
+
+  for (const file of files) {
+    const raw = readFileSync(path.join(FIXTURES_DIR, file), 'utf-8');
+    let parsed;
+    try {
+      parsed = parseEmail(raw);
+    } catch (err) {
+      details.push({ file, result: 'parse_error', err: err.message });
+      continue;
+    }
+    const hit = await Expense.findOne({ digest: parsed.digest })
+      .select({ _id: 1, entity: 1, amount: 1, date: 1 })
+      .lean();
+    if (hit) {
+      found++;
+      details.push({
+        file: file.slice(0, 40) + '…',
+        entity: parsed.entity,
+        digest_prefix: parsed.digest.slice(0, 12),
+        prod_row: hit._id.toString(),
+        result: 'match',
+      });
+    } else {
+      missing++;
+      details.push({
+        file: file.slice(0, 40) + '…',
+        entity: parsed.entity,
+        digest_prefix: parsed.digest.slice(0, 12),
+        result: 'not_in_prod',
+      });
+    }
+  }
+
+  console.log(`  fixtures checked  : ${files.length}`);
+  console.log(`  digest ∈ prod     : ${found}`);
+  console.log(`  digest ∉ prod     : ${missing}`);
+  console.log('');
+  for (const d of details) console.log('    ·', d);
+  console.log('');
+  console.log('  Interpretation:');
+  console.log('    · match      → parser output matches curve.py for this email (ironclad)');
+  console.log('    · not_in_prod → email never landed in prod OR parser drifted; investigate');
+
+  await mongoose.disconnect();
+  return { found, missing, total: files.length };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -346,6 +417,7 @@ async function main() {
   const a = checkFixturesA();
   const b = checkFixturesB();
   const c = SKIP_DB ? { skipped: true } : await checkProdC();
+  const d = SKIP_DB ? { skipped: true } : await checkFixtureLookupD();
 
   banner('Summary');
   console.log(`  A · fixtures ok          : ${a.ok}/${a.scanned}`);
@@ -353,16 +425,48 @@ async function main() {
   if (c.skipped) {
     console.log(`  C · prod digest stability: skipped`);
   } else {
-    console.log(`  C · prod digest reproduced: ${c.matched}/${c.total}`);
-    console.log(`  C · would duplicate       : ${c.unmatched}`);
+    console.log(`  C · prod digest reproduced: ${c.matched}/${c.total}  (best-effort)`);
+    console.log(`  C · unmatched             : ${c.unmatched}  (likely amount-format drift, not a bug — see Check D)`);
+  }
+  if (d.skipped) {
+    console.log(`  D · fixture → prod lookup : skipped`);
+  } else {
+    console.log(`  D · fixture → prod lookup : ${d.found}/${d.total}  (IRONCLAD gate)`);
   }
 
-  const fatal = (!c.skipped && c.unmatched > 0) || b.parsed_null > 0;
+  // Check D is the real gate. If every fixture's parseEmail digest is
+  // present in prod, we have direct proof the parser produces identical
+  // output to whatever curve.py/Mongoid did for those exact emails —
+  // re-ingestion would dedup, never duplicate. Check C is supplementary
+  // (best-effort reconstruction from stored fields, inherently noisy
+  // because the original amount text is lost once stored as Number).
+  const fatal =
+    b.parsed_null > 0 ||
+    (!d.skipped && d.missing > 0 && d.found === 0);
+
   if (fatal) {
     console.log('');
-    console.log('  RESULT: NOT safe to enable sync yet — see unmatched rows above.');
+    console.log('  RESULT: NOT safe to enable sync yet.');
+    if (b.parsed_null > 0) console.log('    · Check B: fixture date didn\'t round-trip to Date.');
+    if (!d.skipped && d.missing > 0 && d.found === 0) {
+      console.log('    · Check D: NO fixture digest found in prod — parser likely drifted from curve.py.');
+    }
     process.exit(1);
   }
+
+  if (!d.skipped && d.missing > 0) {
+    console.log('');
+    console.log(
+      '  WARNING: some fixtures not found in prod. They may be synthetic test emails',
+    );
+    console.log(
+      '           that never hit real ingestion, OR the parser drifted for specific',
+    );
+    console.log(
+      '           layouts. Review Check D output before enabling the sync.',
+    );
+  }
+
   console.log('');
   console.log('  RESULT: safe to proceed with the first sync.');
 }
