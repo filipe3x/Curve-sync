@@ -99,14 +99,9 @@
   100% { background-position: 200% 50%; }
 }
 
-/* Breath amplitude nudged up from 1.03 → 1.045 so the pulse is
-   actually felt on a small StatCard number; previous setting was
-   low-key enough that the keyframe landing didn't read as motion.
-   Kept below 1.05 to stay within the "celebratory, not shouting"
-   band the original design aimed for. */
 @keyframes perfect-breathe {
   0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.045); }
+  50% { transform: scale(1.03); }
 }
 
 /* Pulsing drop-shadow halo in emerald-500 tone (rgb 16 185 129). The
