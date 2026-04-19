@@ -69,30 +69,37 @@ const SKIP_DB = args.includes('--skip-db');
 const SAMPLE_ARG = args.find((a) => a.startsWith('--sample='));
 const SAMPLE = SAMPLE_ARG ? Number(SAMPLE_ARG.split('=')[1]) : null;
 
-const MONTHS_EN = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
-
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
-const pad = (n) => String(n).padStart(2, '0');
 
 /**
  * Rebuild the day-first English string curve.py produced from a typed
- * Date. Uses UTC components — Mongoid's write path was UTC-anchored so
- * the stored Date's UTC calendar fields match what curve.py had in its
- * `date` local variable when it hashed. If prod was stored in local
- * time, this reconstruction will fail for some rows — that's exactly
- * what we want to learn before a sync runs.
+ * Date. Uses Europe/Lisbon local time: curve.py hashed the receipt's
+ * text as shown (local hour), Ruby's `DateTime.parse` then coerced
+ * that string through the system timezone (Europe/Lisbon) into UTC
+ * before Mongoid stored it. Reconstructing in UTC instead of Lisbon
+ * would give a 1-hour-off string for every row issued during WEST
+ * (summer, UTC+1) — an earlier version of this script produced a
+ * striking cyclic "0% match for summer, ~100% for winter" pattern for
+ * exactly this reason. `Intl.DateTimeFormat` handles DST transitions
+ * automatically, so no manual WET/WEST rules.
  */
 function reconstructCurveString(d) {
-  const day = pad(d.getUTCDate());
-  const mon = MONTHS_EN[d.getUTCMonth()];
-  const year = d.getUTCFullYear();
-  const hh = pad(d.getUTCHours());
-  const mm = pad(d.getUTCMinutes());
-  const ss = pad(d.getUTCSeconds());
-  return `${day} ${mon} ${year} ${hh}:${mm}:${ss}`;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Lisbon',
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  // Intl can emit "24" as the hour at midnight; normalise to "00" so
+  // it matches curve.py's strftime output.
+  let hh = get('hour');
+  if (hh === '24') hh = '00';
+  return `${get('day')} ${get('month')} ${get('year')} ${hh}:${get('minute')}:${get('second')}`;
 }
 
 function hashRow({ entity, amountRaw, dateStr, card }) {
