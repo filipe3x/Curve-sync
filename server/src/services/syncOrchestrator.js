@@ -543,11 +543,6 @@ export async function syncEmails({ config, reader, dryRun = false }) {
           entity: parsed.entity,
           amount: parsed.amount,
           date: typedDate,
-          // Redundant today (mirrors `date`); kept for one release so the
-          // partial index + any stragglers reading it stay valid. The
-          // next clean-up PR drops this field and flips every reader to
-          // `date`. `typedDate` is reused here — no re-parse.
-          date_at: typedDate,
           card: parsed.card,
           digest: parsed.digest,
           user_id: config.user_id,

@@ -26,17 +26,12 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Allowlist of sortable fields. Anything else falls back to
-// `-date_at` (default). `date` (the raw string) is kept in the
-// allowlist for retro-compat with any client that hasn't migrated
-// yet; it will be removed one or two sprints from now once the
-// dashboards, the /expenses page, and the /categories detail panel
-// are all confirmed to be sending `-date_at`. Sorting on `date`
-// remains broken (lexical on day-first strings + mixed BSON types,
-// see ROADMAP §2.x investigation + scripts/analyze-expense-dates.js);
-// leaving it is an explicit retro-compat choice, not an endorsement.
+// Allowlist of sortable fields. Anything else — including the retired
+// `date_at` alias clients may still send from a cached build — falls
+// back to `-date` (default, chronological descending). `date` is now
+// a uniformly typed BSON Date (see models/Expense.js), so sorting on
+// it is the canonical chronological order.
 const ALLOWED_SORT_FIELDS = new Set([
-  'date_at',
   'date',
   'amount',
   'entity',
@@ -45,10 +40,10 @@ const ALLOWED_SORT_FIELDS = new Set([
 ]);
 
 function sanitiseSort(raw) {
-  if (!raw || typeof raw !== 'string') return '-date_at';
+  if (!raw || typeof raw !== 'string') return '-date';
   const desc = raw.startsWith('-');
   const field = desc ? raw.slice(1) : raw;
-  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date_at';
+  if (!ALLOWED_SORT_FIELDS.has(field)) return '-date';
   return desc ? `-${field}` : field;
 }
 
@@ -343,7 +338,6 @@ router.post('/', async (req, res) => {
       entity,
       amount,
       date: typedDate,
-      date_at: typedDate,
       card,
       digest,
       user_id: req.userId,

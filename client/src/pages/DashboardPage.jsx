@@ -158,7 +158,7 @@ export default function DashboardPage() {
       catsRes,
       iconsRes,
     ] = await Promise.allSettled([
-      api.getExpenses({ limit: 5, sort: '-date_at' }),
+      api.getExpenses({ limit: 5, sort: '-date' }),
       api.getSyncStatus(),
       api.getOAuthStatus(),
       api.getUncategorisedStats(),

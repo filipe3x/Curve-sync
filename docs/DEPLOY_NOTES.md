@@ -11,46 +11,73 @@ sees the full context before the deploy gate.
 
 ---
 
-## release: Opção C — `Expense.date_at` (canonical)
+## release: `Expense.date` typed as BSON `Date` (drop `date_at`)
 
 **What changed**
 
-- `Expense` schema gained a typed `date_at: Date` populated for every new
-  insert (steps 1–4). The old string `date` field is still written.
-- `server/scripts/analyze-expense-dates.js` is the canonical backfill that
-  reads every legacy row, parses the human string, and writes `date_at`.
-- Step 5 flips the default sort on `/expenses`, the dashboard «Despesas
-  recentes» strip, and the `/categories` detail panel from `-date` to
-  `-date_at`.
+- `Expense.date` in the Mongoose schema flipped from `String` to `Date`.
+  Every new insert (sync orchestrator and `POST /api/expenses`) now goes
+  through `parseExpenseDate()` before `Expense.create`, so the collection
+  holds a uniformly typed chronological field — the same contract
+  Embers' Mongoid already enforces via `field :date, type: DateTime`.
+- `Expense.date_at` (the sibling typed column added during the original
+  Opção C migration) is removed from the schema, its partial index
+  retired, and every reader flipped back to `-date`. The column was a
+  workaround for the String-typed `date` — once `date` itself is typed,
+  the companion is redundant.
+- The digest pipeline in `emailParser.js` is unchanged. It still hashes
+  the original raw email string, keeping dedup against Embers-era rows
+  bit-for-bit compatible with `curve.py`.
 
 **Why the order matters**
 
-Sorts on `-date` were lexical over a day-first string («06 April 2026
-08:53:31»). Sorts on `-date_at` are typed Date sorts. Flipping the sort
-before the backfill runs leaves rows with `date_at: null` falling to the
-bottom of every descending list — visible regression, not data loss.
+Inserting Strings alongside Embers' Dates breaks BSON ordering:
+`String < Date`, so Mongoid's `search_query` in `embers/models/expense.rb`
+uses `{ :$gte => Date }` and would silently miss every String row. Users
+would stop seeing Curve Sync expenses on `embers.brasume.com` without any
+error surfaced. The dev dump already exhibited this mix (63 String + 13
+Date); production was clean (1302 Date) only because every historical
+insert flowed through Mongoid.
 
 **Required sequence**
 
-1. Deploy steps 1–4. New inserts already write `date_at`; nothing reads
-   it yet. Zero impact for users.
-2. **Run the backfill on prod** before deploying step 5:
+1. Deploy the code (schema flip + reader flips + insert parsers). No
+   schema migration is needed in prod — the 1302 legacy rows are
+   already typed Date, and `date_at` being removed from the schema
+   just stops new inserts from populating it (existing orphan
+   `date_at` values on disk are harmless, ignored on read).
+2. Before enabling the first sync, run the dry-run guard to confirm
+   every stored digest is reproducible — if any row fails, a future
+   re-ingest of the same email would create a duplicate:
+   ```bash
+   cd /var/www/Curve-sync/server
+   node scripts/dryrun-date-schema.js
+   ```
+   Expected outcome: `RESULT: safe to proceed with the first sync.`
+3. (Dev only) Convert any lingering `date: String` rows to `Date`:
    ```bash
    node server/scripts/analyze-expense-dates.js              # audit
    node server/scripts/analyze-expense-dates.js --write      # plan
    node server/scripts/analyze-expense-dates.js --write --yes # execute
-   node server/scripts/analyze-expense-dates.js --write      # idempotency check
    ```
-   The last invocation must report `rows to populate this run: 0` and
-   `rows unparseable: 0` before continuing.
-3. Deploy step 5 (sort flip). `deploy-prod.sh` detects this script in the
-   diff and prompts before running it automatically — accept the prompt.
+   In prod this is a no-op by design — the audit reports zero String
+   rows and exits without writing.
+4. (Optional cleanup, prod) Drop the orphan `date_at` column + retired
+   index once the release is stable. Pure cosmetic — functional state
+   is already correct:
+   ```js
+   // mongo $MONGO_AUTH embers_db
+   db.expenses.updateMany({}, { $unset: { date_at: '' } });
+   db.expenses.dropIndex('user_id_1_date_at_-1');
+   ```
 
-**Recovery if step 5 lands first**
+**Recovery**
 
-Run the backfill ASAP. No data loss; the misordered rows reorder as soon
-as `date_at` is populated. The auto-rollback in `deploy-prod.sh` catches
-this only if `/api/health` actually fails — UX regressions don't trip it.
+Rollback is reverting the code commit. No data migration to undo: the
+`date` field is already typed Date in every prod row, which is what both
+old and new code expect — the flip is a reader change, not a data
+change. If the dry-run guard from step 2 reports unreproducible digests,
+do NOT enable the sync; investigate the offending rows first.
 
 ---
 
