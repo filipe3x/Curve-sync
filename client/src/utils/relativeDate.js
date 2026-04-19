@@ -43,6 +43,26 @@ export function formatAbsoluteDate(input) {
   return ABSOLUTE_FMT.format(new Date(parsed));
 }
 
+// Composed manually to avoid the verbose "10 de abr. de 2026, 11:58"
+// full-ICU browsers produce for pt-PT — we want "10 Abr 2026, 11:58".
+const MONTHS_PT_SHORT = [
+  'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
+  'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez',
+];
+
+export function formatExpenseDateFull(input) {
+  if (input == null || input === '') return '—';
+  const parsed = Date.parse(input);
+  if (Number.isNaN(parsed)) return String(input);
+  const d = new Date(parsed);
+  const day = String(d.getDate()).padStart(2, '0');
+  const mon = MONTHS_PT_SHORT[d.getMonth()];
+  const year = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${day} ${mon} ${year}, ${hh}:${mm}`;
+}
+
 /**
  * Render an expense date as a pt-PT relative string.
  *
