@@ -5,9 +5,11 @@
  *
  *     reader.fetchUnseen()
  *       → parseEmail(source)
- *         → assignCategoryFromList(entity, cachedCategories)
+ *         → resolveCategoryDetailed(entity, resolverContext)
  *           → Expense.create(...)  (duplicate? → log + markSeen)
- *             → CurveLog.create(...)
+ *             → CurveLog.create(...)  (ok rows carry the resolution
+ *                                      path: `override → <cat>` /
+ *                                      `global → <cat>` / `uncategorised`)
  *               → reader.markSeen(uid)
  *
  * This module is deliberately NOT coupled to the IMAP transport. It
@@ -24,6 +26,21 @@
  * See docs/EMAIL.md → Phase 3 for the full design rationale
  * (multi-user scoping, duplicate-detection trap, circuit breaker,
  * silent-failure canary, recovery invariants).
+ *
+ * Category resolution (docs/Categories.md §5): `loadContext(user_id)`
+ * runs ONCE per sync, producing a `{userRules, globalRules,
+ * categoriesById}` bundle that's reused for every email in the loop.
+ * This keeps the per-email match a pure function with zero DB reads,
+ * so thousands of receipts in one backlog stay cheap. Personal
+ * overrides short-circuit the global catalogue per §3.4 — that
+ * tier-ordering is enforced inside `resolveCategoryDetailed`, not here.
+ *
+ * The detailed variant also surfaces *which* tier won so the `ok`
+ * audit row can record `override → <name>` / `global → <name>` /
+ * `uncategorised` in `error_detail`. That field is repurposed as a
+ * generic "free-text classification trail" on success rows — same
+ * column, different semantic per `status`. See docs/Categories.md
+ * §13 and the renderer in `client/src/utils/curveLogsUtils.js`.
  */
 
 import fs from 'node:fs';
@@ -32,9 +49,9 @@ import path from 'node:path';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import Expense from '../models/Expense.js';
-import Category from '../models/Category.js';
-import { parseEmail, ParseError } from './emailParser.js';
-import { assignCategoryFromList } from './expense.js';
+import { parseEmail, ParseError, validateParsed } from './emailParser.js';
+import { loadContext, resolveCategoryDetailed } from './categoryResolver.js';
+import { parseExpenseDateOrNull } from './expenseDate.js';
 import { ImapReader } from './imapReader.js';
 import { audit } from './audit.js';
 
@@ -96,6 +113,58 @@ function truncateDetail(value) {
   return str.length > MAX_ERROR_DETAIL
     ? `${str.slice(0, MAX_ERROR_DETAIL)}…`
     : str;
+}
+
+// Smaller budget for the raw HTML/MIME sample we attach to validation
+// failure logs (ROADMAP Fase 2.4). We want enough to distinguish "Curve
+// changed their template" from "spam email slipped through the folder
+// filter", but not so much that one bad email fills curve_logs with
+// quoted-printable noise. Strips newlines so the log line stays scannable
+// and collapses the MIME header block (it's noisy and usually uninformative
+// — the HTML body is what we need).
+const MAX_HTML_SNIPPET = 200;
+function truncateHtml(raw) {
+  if (!raw) return '';
+  const str = String(raw);
+  // Jump past the headers if we can see the HTML body marker; otherwise
+  // keep from the top. Replace whitespace runs with single spaces so the
+  // snippet is readable on a single log line.
+  const bodyIdx = str.toLowerCase().search(/<!doctype html|<html/);
+  const slice = (bodyIdx >= 0 ? str.slice(bodyIdx) : str).replace(/\s+/g, ' ');
+  return slice.length > MAX_HTML_SNIPPET
+    ? `${slice.slice(0, MAX_HTML_SNIPPET)}…`
+    : slice;
+}
+
+/**
+ * Format the classification path for the `error_detail` column on
+ * `ok`-status CurveLog rows. The field is repurposed as a free-text
+ * trail on success rows — `/curve/logs` parses the prefix to render
+ * a coloured pill (purple for override, slate for global, amber for
+ * uncategorised) without needing a separate schema field.
+ *
+ *   override → Mercados
+ *   global   → Restaurantes
+ *   uncategorised
+ *
+ * Kept separate from `truncateDetail` because these strings are tiny
+ * (a category name max ~40 chars) and can never approach the 2000-
+ * char cap. Skipping the truncation pass keeps the renderer's prefix
+ * match exact even in the pathological case of an absurdly long
+ * category name (we'd rather log the full name than chop it mid-word).
+ *
+ * @param {'override'|'global'|null} source
+ * @param {string|null} categoryName
+ * @returns {string}
+ */
+function formatResolutionDetail(source, categoryName) {
+  if (!source) return 'uncategorised';
+  // Defensive: if the category was deleted between loadContext and
+  // resolution, `categoryName` comes back null. Fall back to the
+  // bare tier label so the audit row still tells the operator
+  // *something* about how the match happened.
+  const name = categoryName ?? '?';
+  return `${source} → ${name}`;
 }
 
 /**
@@ -249,15 +318,24 @@ export async function syncEmails({ config, reader, dryRun = false }) {
     }
   }
 
-  // Categories are loaded ONCE per run and reused for every email. The
-  // existing `assignCategory` would otherwise do a full Category.find()
-  // per email, which is an N+1 on every sync.
-  let categoriesCache = [];
+  // Resolver context is loaded ONCE per run and reused for every
+  // email. A naive per-email `loadContext` would be an N+1 on every
+  // sync; one upfront read (Category.find + CategoryOverride.find in
+  // parallel, see categoryResolver.js §5.5) covers the whole loop.
+  //
+  // Overrides are scoped to the config owner — the sync pass runs
+  // with that user's personal rules in play and falls back to the
+  // global catalogue when none match (docs/Categories.md §3.4, §5.4).
+  let resolverContext = {
+    userRules: [],
+    globalRules: [],
+    categoriesById: new Map(),
+  };
   try {
-    categoriesCache = await Category.find().lean();
+    resolverContext = await loadContext(config.user_id);
   } catch (e) {
-    console.warn(`syncEmails: could not load categories: ${e.message}`);
-    // We continue with an empty cache — every expense just ends up
+    console.warn(`syncEmails: could not load resolver context: ${e.message}`);
+    // We continue with an empty context — every expense just ends up
     // with category_id = null instead of an auto-assigned category.
   }
 
@@ -330,8 +408,82 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         continue;
       }
 
+      // ---- 1b. Semantic validation (ROADMAP Fase 2.4) ----
+      // The parser succeeded — all required fields are present and
+      // structurally parseable. `validateParsed` is the second gate
+      // that rejects values the parser accepted but are nonsensical:
+      // blank entity, zero/NaN/Infinity amount, date that can't be
+      // reparsed. Same recovery invariant as the ParseError branch:
+      // log + do NOT markSeen so the next sync retries.
+      const validation = validateParsed(parsed);
+      if (!validation.ok) {
+        summary.parseErrors += 1;
+        consecutiveParseErrors += 1;
+        await writeLog({
+          config,
+          status: 'parse_error',
+          dryRun,
+          entity: parsed.entity,
+          amount: parsed.amount,
+          error_detail: truncateDetail(
+            `validation failed [field=${validation.field}] ` +
+              `${validation.reason} | raw=${truncateHtml(source)}`,
+          ),
+        });
+        if (
+          consecutiveParseErrors >= PARSE_ERROR_CIRCUIT_BREAKER &&
+          summary.ok === 0
+        ) {
+          summary.halted = true;
+          await writeLog({
+            config,
+            status: 'error',
+            dryRun,
+            error_detail: truncateDetail(
+              `circuit breaker: ${PARSE_ERROR_CIRCUIT_BREAKER} consecutive ` +
+                'parse/validation errors without a successful parse — ' +
+                'halting to avoid retry storm',
+            ),
+          });
+          break;
+        }
+        continue;
+      }
+
       // ---- 2. Categorise ----
-      const category_id = assignCategoryFromList(parsed.entity, categoriesCache);
+      // Two-tier resolution (personal overrides → global catalogue),
+      // pure and synchronous once `resolverContext` is loaded. See
+      // docs/Categories.md §5 for the pipeline.
+      //
+      // We use the *detailed* variant so the audit row can record the
+      // resolution path (`override → <name>` / `global → <name>` /
+      // `uncategorised`). The id is the only field that flows into
+      // `Expense.create`; the tier + category name only feed the
+      // `error_detail` line on the `ok` log row.
+      //
+      // The tier field is destructured as `resolutionSource` — not
+      // `source` — on purpose: the outer `for await (const { uid,
+      // source } of …)` already binds `source` to the email body.
+      // A same-block `const source` would hoist into TDZ, fire
+      // "Cannot access 'source' before initialization" inside
+      // `parseEmail(source)` above, and land every email in the
+      // parse-error bucket. The rename keeps the two bindings
+      // lexically disjoint.
+      const {
+        category_id,
+        source: resolutionSource,
+        category_name,
+      } = resolveCategoryDetailed(parsed.entity, resolverContext);
+      const resolutionDetail = formatResolutionDetail(
+        resolutionSource,
+        category_name,
+      );
+      // Structured mirror of the "no tier matched" state for the
+      // dashboard stat card + /curve/logs filter (§11.3 Fase 7). The
+      // free-text `resolutionDetail` already carries the same signal
+      // ("uncategorised"), but the boolean is indexable and survives
+      // future renaming of the detail string.
+      const isUncategorised = resolutionSource === null;
 
       // ---- 3. Dry run: check-only path, no writes ----
       if (dryRun) {
@@ -371,6 +523,8 @@ export async function syncEmails({ config, reader, dryRun = false }) {
             entity: parsed.entity,
             amount: parsed.amount,
             digest: parsed.digest,
+            error_detail: resolutionDetail,
+            uncategorised: isUncategorised,
           });
         }
         consecutiveParseErrors = 0;
@@ -378,12 +532,17 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       }
 
       // ---- 4. Real insert path ----
+      // `parsed.date` is the raw email string ("06 April 2026 08:53:31").
+      // The digest in `parsed.digest` was hashed from that string for
+      // bit-for-bit parity with curve.py — do NOT re-derive it from
+      // `typedDate` or dedup against Embers-era rows breaks.
+      const typedDate = parseExpenseDateOrNull(parsed.date);
       let expenseDoc = null;
       try {
         expenseDoc = await Expense.create({
           entity: parsed.entity,
           amount: parsed.amount,
-          date: parsed.date,
+          date: typedDate,
           card: parsed.card,
           digest: parsed.digest,
           user_id: config.user_id,
@@ -441,6 +600,8 @@ export async function syncEmails({ config, reader, dryRun = false }) {
         amount: parsed.amount,
         digest: parsed.digest,
         expense_id: expenseDoc._id,
+        error_detail: resolutionDetail,
+        uncategorised: isUncategorised,
       });
       seenUids.push(uid);
     }
@@ -570,6 +731,7 @@ async function writeLog(entry) {
     digest,
     expense_id,
     error_detail,
+    uncategorised,
   } = entry;
   try {
     await CurveLog.create({
@@ -582,6 +744,7 @@ async function writeLog(entry) {
       expense_id,
       error_detail,
       dry_run: Boolean(dryRun),
+      uncategorised: Boolean(uncategorised),
     });
   } catch (e) {
     // CurveLog write failure is bad but non-fatal — we still want the

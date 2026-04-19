@@ -42,11 +42,13 @@ Server env: copy `server/.env.example` to `server/.env` and set `MONGODB_URI`.
 
 ### MongoDB Collection Access Rules
 
-- **`users`** — READ-ONLY (owned by Embers)
-- **`categories`** — READ-ONLY (owned by Embers)
-- **`expenses`** — READ + INSERT only (never UPDATE/DELETE existing records)
+- **`users`** — READ + INSERT + UPDATE (never DELETE — Embers owns the destroy path, including the "last admin" guard). Curve Sync drives its own registration and profile flows; writes MUST stay schema-compatible with Embers' `User` model: `email` lowercased + format `/.*@.*\..*/`, `salt` = `SHA256("${ISO_timestamp}--${password}")`, `encrypted_password` = `SHA256("${password}--${salt}")`, `role` ∈ `{'user', 'admin'}` defaulting to `'user'` for new rows (admin assignment stays exclusive to Embers — never downgrade an existing admin via UPDATE). New records created by Curve Sync are valid Embers users — they can log into the Embers app unchanged. See `docs/embers-reference/models/user.rb` for the canonical schema and `server/src/services/auth.js` for the hash helpers.
+- **`categories`** — READ + INSERT + UPDATE + DELETE (admin-only CRUD path, exposed through the `/categories` management screen and the `requireAdmin` middleware). The schema (`name`, `entities`, `icon`, timestamps) stays identical to Embers' `Category` Mongoid model — never add, rename, or remove fields, and never write values outside the shape Embers expects to read. Embers keeps its read path unchanged; Curve Sync owns the write path from the category-management screen forward. See `docs/Categories.md` (canonical) for the full design.
+- **`expenses`** — READ + INSERT + UPDATE of **`category_id` only**. All other fields (`entity`, `amount`, `date`, `card`, `digest`, `user_id`, timestamps) remain INSERT-only. DELETE is still forbidden — Embers owns the destroy path. Re-categorization writes go through the single authorized helper `services/expense.js :: reassignCategoryBulk(filter, category_id)`; no other function in the codebase may call `Expense.update*` with a payload that is not `{ $set: { category_id } }`. This relaxation supports both apply-to-all (multi-doc filter) and the single-expense quick-edit popover (`{ _id, user_id }` filter). See `docs/Categories.md` §4.4 and §12 for the full contract.
 - **`curve_configs`** — Full CRUD (owned by this service, per-user IMAP settings)
-- **`curve_logs`** — INSERT + READ (audit trail, TTL 90 days)
+- **`curve_category_overrides`** — Full CRUD (owned by this service, per-user category matching rules: pattern + match_type + target category_id). Embers has no Mongoid model for this collection and never reads or writes it. Access is always scoped by `user_id: req.userId` inside handlers — even admins cannot see or mutate another user's overrides. See `docs/Categories.md` §4.3 for the schema and §7.3 for the permissions matrix.
+- **`curve_expense_exclusions`** — Full CRUD (owned by this service, per-user cycle-exclusion toggle: `{ user_id, expense_id }` with a unique compound index so POST is idempotent). Invisible to Embers. The workaround for the «can't DELETE from `expenses`» constraint — marking an expense as excluded keeps the row intact and simply omits it from `month_total` / `weekly_expenses` / Savings Score aggregates. Always scoped by `user_id: req.userId`. See `docs/MONGODB_SCHEMA.md` for the schema and `docs/Categories.md` §12.2 for the canonical description of the `CategoryPickerPopover`'s symmetric in-cycle/out-of-cycle toggle (`CalendarOff` ↔ `CalendarCheck`) + liquid-glass shell when the row is already excluded. Two UI entry points: action-bar bulk toggle on `/expenses` (ROADMAP §2.10) and the header toggle on `/expenses` + `/` + `/curve/logs` (§2.10.1).
+- **`curve_logs`** — INSERT + READ (audit trail, TTL 90 days). Category-management events (create/update/delete categories, create/update/delete overrides, apply-to-all, single-expense quick-edit, bulk batch-move, admin-denied) add 14 new `action` values to the enum — see `docs/Categories.md` §13.2 for the full catalog and `docs/CURVE_LOGS.md` §4 for the contract that both share.
 
 ### Mongoose Compatibility with Embers (Mongoid)
 
@@ -55,7 +57,7 @@ These rules are critical to avoid breaking the shared database:
 - Use `{ timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } }` (snake_case, not camelCase)
 - Set explicit collection names to prevent Mongoose auto-pluralization
 - Store relationships as `<name>_id` ObjectId fields (e.g., `user_id`, `category_id`, `config_id`)
-- Never modify the schema of existing `users`, `categories`, or `expenses` collections
+- Never modify the **schema** of `users`, `categories`, or `expenses`. Curve Sync may CRUD `users` rows, full CRUD `categories` rows (admin-only), and UPDATE the `category_id` field of `expenses` (see the access rules above), but in every case only with the exact field shape Embers uses — adding new fields, renaming existing ones, or storing values outside Embers' enums (`role`, etc.) is out of scope. New collections owned exclusively by Curve Sync (e.g. `curve_category_overrides`) are free to evolve independently and are invisible to Embers.
 
 ### Expense Deduplication
 
@@ -108,22 +110,30 @@ Non-Microsoft / non-Gmail domains fall through `providerForEmail()` as `null` an
 client/                 # Vite + React + Tailwind frontend
   src/
     components/layout/  # Shell, Sidebar, Icons
-    components/common/  # PageHeader, StatCard, EmptyState
+    components/common/  # PageHeader, StatCard, EmptyState,
+                        #   CategoryPickerPopover, CategoryEditUndoBanner,
+                        #   ExclusionUndoBanner, ConfirmDialog
     components/setup/   # Wizard shell — WizardLayout, Screen, CurveSyncLogo
       steps/            # 6 wizard steps: Hero, Email, Trust, DeviceCode,
                         #   PickFolder, Schedule, Success + folderHeuristic
+    hooks/              # useCountUp (animated number tween for KPI strips)
     pages/              # LoginPage, DashboardPage, ExpensesPage,
                         #   CurveSetupPage (wizard entry), CurveConfigPage,
-                        #   CurveLogsPage
+                        #   CurveLogsPage, CategoriesPage (master-detail
+                        #   + motion & graphics, see docs/Categories.md §9)
     services/api.js     # All API calls (fetch wrapper)
 server/                 # Express backend
   src/
+    middleware/         # authenticate, requireAdmin (admin-only route guard)
     models/             # Mongoose: Expense, Category, User (RO), Session,
-                        #   CurveConfig, CurveLog
-    routes/             # auth, expenses, categories, curve, curveOAuth,
-                        #   autocomplete
+                        #   CurveConfig, CurveLog, CategoryOverride,
+                        #   CurveExpenseExclusion
+    routes/             # auth, expenses, categories, categoryOverrides,
+                        #   curve, curveOAuth, autocomplete
     services/
-      expense.js        # dedup digest, auto-category
+      expense.js        # dedup digest, auto-category, reassignCategoryBulk
+      categoryResolver.js # two-tier match: personal overrides → global
+                          #   catalogue (see docs/Categories.md §5)
       emailParser.js    # cheerio port of curve.py
       imapReader.js     # imapflow XOAUTH2 client
       oauthWizard.js    # MSAL DAG session manager (in-memory pending flows)
@@ -154,6 +164,7 @@ Key documentation:
 - `docs/EMAIL.md` — **Email pipeline implementation guide**: current state, TODOs, dev strategy, reference selectors, architecture diagram
 - `docs/MONGODB_SCHEMA.md` — Complete schema with Mongoose equivalents, relationships, indexes, and consistency rules
 - `docs/CURVE_LOGS.md` — **CurveLog audit & sync trail** (canonical): every write site, the dual sync-vs-audit shape, the canonical user-facing message for each row type, and the `/curve/logs` rendering rules. Read this before touching `audit()`, the orchestrator's `writeLog()`, or the `CurveLogsPage` table layout.
+- `docs/Categories.md` — **Category management, matching, and overrides** (canonical): the two-tier model (global catalogue + personal overrides), the `resolveCategory` algorithm, retroactive apply-to-all, the `/categories` master-detail screen with motion & graphics, the inline quick-edit popover on `/expenses` and the dashboard, and the 13 new `curve_logs` `action` values that audit every category-related write. Read this before touching `Category`/`CategoryOverride` models, `services/expense.js`, the sync orchestrator's category resolution, or any category-adjacent UI.
 - `docs/expense-tracking.md` — Full system documentation including savings score, monthly cycle logic, TODOs, and proposed standalone architecture
 - `docs/CRON.md` — Scheduler design (node-cron, per-user intervals)
 - `docs/AUTH.md` — Session-cookie login flow compatible with Embers' Devise+Mongoid users
@@ -237,11 +248,12 @@ Curve sync:
 - `POST /api/curve/sync` — Trigger manual sync (used by dashboard's "Sincronizar agora")
 - `GET /api/curve/sync/status` — Lightweight `last_sync_*` snapshot consumed by the dashboard re-auth banner
 - `POST /api/curve/test-connection` — Opens IMAP, returns the folder list (used by both the wizard's folder step and the config page)
-- `GET /api/curve/logs` — Audit trail (backed by `curve_logs`)
+- `GET /api/curve/logs` — Audit trail (backed by `curve_logs`). `?type=sync|audit` splits the two streams; `?uncategorised=true` filters to sync `ok` rows where the resolver returned `source: null` (see `docs/Categories.md` §10.5 and §13.5).
+- `GET /api/curve/stats/uncategorised` — `{ count, cycle: { start, end } }` over the current day-22 cycle. Backs the dashboard "Sem categoria" StatCard; uses the partial compound index on `CurveLog.uncategorised` for sub-ms counts.
 
 OAuth wizard (`server/src/routes/curveOAuth.js`):
 - `POST /api/curve/oauth/check-email` — Classifies an email domain → `{ provider: 'microsoft' | 'google' | null }`
 - `POST /api/curve/oauth/start` — Kicks off MSAL `acquireTokenByDeviceCode`, returns `{ userCode, verificationUri, expiresAt }`
-- `GET /api/curve/oauth/poll` — Polled ~every 3 s by the frontend during the DAG; resolves to `pending | completed | failed | cancelled`
+- `POST /api/curve/oauth/poll` — Polled ~every 3 s by the frontend during the DAG; resolves to `pending | completed | failed | cancelled`
 - `POST /api/curve/oauth/cancel` — Aborts the pending DAG session (user backed out)
 - `GET /api/curve/oauth/status` — Returns `{ connected, provider, email }` for the current user (feeds the dashboard banner gate and the config page's Ligação card)

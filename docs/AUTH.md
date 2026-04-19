@@ -41,11 +41,19 @@ end
 
 ```
 _id                 ObjectId
-email               String (unique, lowercase)
+email               String (lowercase — ver nota sobre unicidade)
 encrypted_password  String (SHA-256 hex)
 salt                String (SHA-256 hex)
 role                String ("admin" | "user")
 ```
+
+> **Nota sobre unicidade do `email`:** apesar do Mongoid declarar
+> `validates :email, uniqueness: { case_sensitive: false }` no Embers,
+> **não existe um índice único em `users.email` ao nível da base de dados**
+> (confirmado inspeccionando o `users.metadata.json` no dump em
+> `dev/db/embers-dump.tar.gz` — só o `_id_` está presente). Tanto o Embers
+> como o Curve Sync dependem de validação ao nível da aplicação. Ver a
+> secção "Race-condition" no `POST /api/auth/register` em baixo.
 
 ### Sessões
 
@@ -185,6 +193,129 @@ router.post('/login', async (req, res) => {
   res.json({ token, user: { id: user._id, email: user.email } });
 });
 ```
+
+---
+
+### Self-service registration — `POST /api/auth/register`
+
+O Curve Sync expõe um endpoint próprio para criar contas Embers-compatíveis,
+sem ter de passar pela UI do Embers. As contas criadas aqui podem fazer login
+no Embers (e vice-versa) — usam exactamente o mesmo schema, o mesmo algoritmo
+de hash, e a mesma collection `users`.
+
+A regra de acesso a `users` no `CLAUDE.md` foi flexibilizada
+(READ + INSERT + UPDATE — sem DELETE) precisamente para permitir este fluxo;
+ver a secção "MongoDB Collection Access Rules" desse ficheiro para o contrato
+completo.
+
+**Contrato HTTP:**
+
+```
+POST /api/auth/register
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "correcthorsebatterystaple",
+  "password_confirmation": "correcthorsebatterystaple"
+}
+
+→ 201 Created
+{
+  "token": "<64 hex chars>",
+  "user": { "id": "<ObjectId>", "email": "alice@example.com", "role": "user" }
+}
+```
+
+| Status | Quando |
+|--------|--------|
+| `201`  | Conta criada; sessão aberta; `token` pronto para `Authorization: Bearer …` |
+| `400`  | Falta email/password, password com menos de 8 caracteres, ou `password_confirmation` não coincide |
+| `409`  | Já existe um row em `users` com este email (lowercase) |
+| `429`  | Excedeu o limite de 5 registos/hora por IP (ver `index.js:registerLimiter`) |
+| `500`  | Erro inesperado (Mongo, etc.) |
+
+A resposta é deliberadamente **idêntica em forma à de `POST /api/auth/login`**
+(`{ token, user }`) para que o frontend (`AuthContext.login(token, user)`)
+consiga consumir o resultado sem ramificação extra. O fluxo no frontend é
+auto-login + redirect para `/curve/setup` (o passo seguinte natural para um
+utilizador novo é ligar a mailbox).
+
+**Derivação Embers-compatível do hash** (`server/src/services/auth.js`):
+
+```javascript
+export function hashPassword(password) {
+  // Embers: make_salt        = SHA256("#{Time.now.utc}--#{password}")
+  // Embers: encrypt_password = SHA256("#{password}--#{salt}")
+  const salt = sha256(`${new Date().toISOString()}--${password}`);
+  const encrypted_password = sha256(`${password}--${salt}`);
+  return { salt, encrypted_password };
+}
+```
+
+O `salt` é opaco — o Embers nunca o re-deriva a partir do timestamp, apenas o
+re-aplica em `encrypt(password)` no login seguinte. A diferença de formato
+entre `Date#toISOString()` (`2026-04-13T12:34:56.789Z`) e `Time.now.utc` em
+Ruby (`2026-04-13 12:34:56 UTC`) é cosmética: o resultado SHA-256 é igualmente
+imprevisível e a verificação cross-app continua a funcionar.
+
+**Auto-login partilha o mesmo helper de tokens.** O `register` invoca o
+mesmo `generateToken()` (32 bytes crypto-random → 64 hex chars) e o mesmo
+`SESSION_TTL_MS` que o `POST /login`, e escreve na mesma collection `sessions`.
+Reutilizar o helper significa que a story de entropia do token é a story do
+login — não há um segundo sítio onde tenhamos de manter o algoritmo em sync.
+
+**Role lock — `'user'` apenas.** O handler força `role: 'user'` no `User.create()`.
+A atribuição de admin continua a ser exclusiva do Embers (incluindo o "last admin
+guard"). UPDATEs futuros nesta tabela **nunca devem** fazer downgrade de um
+admin existente; o caveat fica registado no `CLAUDE.md`.
+
+**Race-condition (email uniqueness).** Não há índice único em `users.email`
+ao nível da base de dados — o Embers depende exclusivamente da validação
+Mongoid `validates :email, uniqueness:`, que tem a sua própria janela
+de race entre o `findOne` e o `insert`. O nosso handler tem exactamente a
+mesma janela: faz um `findOne` antes do `User.create` e devolve `409` se já
+existir.
+
+Razões para não fechar a janela com um índice único em DB:
+
+1. Adicionar um índice único é uma alteração de schema **partilhada com o Embers**
+   — fora do âmbito desta feature, requer alinhamento com a equipa que mantém
+   o Embers.
+2. O caso de uso é uma app de finanças pessoais com cadência de registo
+   baixíssima (não é um signup viral).
+3. O `registerLimiter` (5 registos/hora por IP) torna a janela de race
+   praticamente inalcançável sem um atacante coordenado, e mesmo nesse cenário
+   o pior resultado é ter dois rows com o mesmo email — o `findOne` no `login`
+   apanha sempre o primeiro `_id` por ordem natural e os dois rows ficam
+   detectáveis num índice único futuro.
+
+A rota está coberta por dois rate limiters em `server/src/index.js`:
+
+- `registerLimiter` — 5/hora por IP (mounted em `/api/auth/register`)
+- `apiLimiter` — 100/min por IP (catch-all `/api`)
+
+A ordem dos `app.use` é importante: o `registerLimiter` está mais específico
+e é montado **antes** do `apiLimiter`, por isso o pedido conta para os dois
+buckets e o que dispara primeiro vence — comportamento documentado em
+`server/src/index.js:110-120`.
+
+**Audit trail.** O handler escreve duas variantes em `curve_logs` via
+`services/audit.js`:
+
+| Action            | Quando                                          | `userId`                          | `error_detail`                |
+|-------------------|-------------------------------------------------|-----------------------------------|-------------------------------|
+| `register`        | Conta criada com sucesso                        | id do row recém-criado            | `email=<lowercased>`          |
+| `register_failed` | Email já existe (única branch que loga falha)   | id do row existente em colisão    | `email_taken=<lowercased>`    |
+
+Validações 400 (email/password ausentes, password curta, confirmação inválida)
+não são auditadas — não carregam sinal interessante para o trail e seriam
+ruído numa página de logs já apertada.
+
+Ambos os enums (`register`, `register_failed`) estão declarados em
+`server/src/models/CurveLog.js`. Como o `audit()` é fire-and-forget, falhas
+de validação no schema seriam silenciosas — adicionar o enum é obrigatório
+quando se introduz um novo `action`.
 
 #### Prós e contras
 

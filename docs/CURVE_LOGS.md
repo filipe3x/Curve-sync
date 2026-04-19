@@ -44,7 +44,8 @@ and the same TTL (90 days, auto-purged via `expireAfterSeconds` on
   entity:       String,                            // sync events with parsed body
   amount:       Number,                            // sync events with parsed body
   digest:       String,                            // sync events with parsed body
-  expense_id:   ObjectId,                          // sync events that inserted
+  expense_id:   ObjectId,                          // sync events that inserted; single-row audits
+  affected_expense_ids: [ObjectId],                // bulk audit events only (§4 #36/#37) — capped at 100
   error_detail: String,                            // any failure / audit context
   dry_run:      Boolean,                           // sync events from dry runs
   action:       String | null,                     // audit events only — see §4
@@ -127,6 +128,54 @@ status: action.includes('failed') || action === 'session_expired' ? 'error' : 'o
 | 20 | `oauth_cancelled` | `routes/curveOAuth.js:151` | `ok` | yes | — | `"Autorização cancelada"` |
 | 21 | `oauth_token_refreshed` | `services/oauthManager.js:191` | `ok` | **no** | `"provider=… accountId=… email=…"` | `"Token Microsoft renovado automaticamente"` |
 | 22 | `first_sync_completed` | `services/syncOrchestrator.js:542` | `ok` | **no** | counts | `"Primeira sincronização concluída"` |
+| 36 | `expense_excluded_from_cycle` | `routes/expenses.js` (POST `/exclusions`) — fired by the `/expenses` action-bar bulk toggle (§2.10) AND by the mini-button in the `CategoryPickerPopover` header on `/expenses`, `/`, `/curve/logs` (§2.10.1) | `ok` | yes | `"count=<N>"` (bulk) · single-row populates `expense_id + entity` and omits the `count` key | `"Despesa <entity> excluída do ciclo"` (single) · `"<N> despesas excluídas do ciclo"` (bulk) |
+| 37 | `expense_included_in_cycle` | `routes/expenses.js` (DELETE `/exclusions`) — inverse of #36, fired by Anular on `<ExclusionUndoBanner>` or by the action-bar toggle when the selection is fully excluded | `ok` | yes | same shape as #36 | `"Despesa <entity> reincluída no ciclo"` (single) · `"<N> despesas reincluídas no ciclo"` (bulk) |
+
+> **Events #36-37** are the cycle-exclusion toggle (ROADMAP §2.10 + §2.10.1).
+> They live on `curve_expense_exclusions` (see `docs/MONGODB_SCHEMA.md`) —
+> a Curve-Sync-owned collection, so no schema change on `expenses`. The
+> single-row-vs-bulk distinction exists because the POST/DELETE endpoints
+> accept `{ expense_ids: [...] }` of arbitrary cardinality and the audit
+> row is written **once per call** (not once per id):
+>
+> - **single** — `expense_id + entity` set at the top level, no `count`
+>   key, `affected_expense_ids` empty. Title: "Despesa X excluída do ciclo".
+> - **bulk** — `expense_id + entity` null, `error_detail = "count=<N>"`,
+>   `affected_expense_ids` holds the list of ids actually toggled (capped
+>   at 100 server-side). Title: "N despesas excluídas do ciclo"; the row
+>   renders with a chevron that expands to a drill-down of the affected
+>   receipts, resolved lazily via `GET /api/expenses?ids=id1,id2,...`.
+>   Pre-§2.10.1 rows (no `affected_expense_ids`) still show the title
+>   from the count alone but cannot expand — the client falls back to a
+>   collapsed-only row.
+>
+> The renderer in `curveLogsUtils.js` discriminates on whether
+> `expense_id` is set to pick the right canonical message and returns
+> an `exclusionBatch` payload (`{ ids, count, direction }`) for bulk
+> rows so `CurveLogsPage.jsx` can route them to `<ExclusionBatchRow>`.
+
+> **Category management events (#23-35) live in [`docs/Categories.md §13.2`](./Categories.md#132-audit-trail-catálogo--regras--despesas).** That document is
+> the single source of truth for every catalogue / overrides / quick-edit
+> / bulk-move / admin-gate audit row — including source files, canonical
+> pt-PT messages, and the k=v shape of `error_detail` for each action.
+> The actions covered there extend the `CurveLog.action` enum in
+> `server/src/models/CurveLog.js` (see §4.3 below) and are rendered by
+> the same `describeLog` switch in
+> `client/src/pages/curveLogsUtils.js`:
+>
+> - `expense_category_changed` (§13.2 #34) — single quick-edit on `/expenses`
+> - `expense_category_changed_bulk` — multi-select batch move
+> - `override_created` / `override_updated` / `override_deleted` (§13.2 #29-31)
+> - `apply_to_all` / `apply_to_all_failed` (§13.2 #32-33) — covers both
+>   the personal `target=override` variant and the admin `target=category`
+>   cross-user variant
+> - `category_created` / `category_updated` / `category_deleted` (§13.2 #23-25)
+> - `category_entity_added` / `category_entity_removed` / `category_entity_moved` (§13.2 #26-28)
+> - `admin_access_failed` (§13.2 #35) — `requireAdmin` middleware gate
+>
+> Duplicating the table here would rot the moment §13.2 grows — keep
+> Categories.md authoritative and come back to this file only for the
+> shape contract (§2, §4.2, §4.3) that all audit actions share.
 
 ### 4.1 Why two events have no `ip`
 

@@ -315,6 +315,78 @@ GET /admin/expenses/get_user_savings_score
 
 ---
 
+## Linha de orçamento no gráfico «Evolução por ciclo»
+
+O `CycleTrendCard` do dashboard (ROADMAP §2.8) desenha uma linha
+horizontal tracejada sobre as barras com o **equivalente mensal** do
+`weekly_budget` configurado pelo utilizador. Com o default
+`weekly_budget = €73,75` a linha aterra em **€321**, e um reader que
+abra o DevTools a primeira vez vai perguntar-se de onde sai esse valor
+— daí esta nota.
+
+### Fórmula
+
+```
+monthly_budget = weekly_budget × (30.4375 / 7)
+               ≈ weekly_budget × 4.348
+```
+
+Fonte canónica: `server/src/services/expenseStats.js` → constante
+`WEEKS_PER_MONTH`, consumida em `computeCycleHistory`.
+
+### Exemplos práticos
+
+| `weekly_budget` | `monthly_budget` mostrado na linha |
+|-----------------|------------------------------------|
+| €73,75 (default, = €295 / 4)  | **€321** |
+| €50,00          | €217 |
+| €100,00         | €435 |
+| €200,00         | €870 |
+
+### Porque **não** é `× 4`
+
+O valor €295 do Embers está descrito como «4 semanas = 1 mês», mas um
+mês calendário **médio** tem 30,4375 dias (`365,25 / 12`), ou seja
+≈ 4,348 semanas — não 4. Um ciclo real tem 28 (Fevereiro) a 31 dias e a
+linha precisa de ser comparável ao gasto desses 28-31 dias. Se
+multiplicássemos por 4 a linha aterrava em €295, **abaixo** do gasto
+típico de um ciclo de 30-31 dias, e leria-se como overspend crónico
+quando na verdade é apenas o denominador errado.
+
+### Porque a linha é **horizontal** (e não por ciclo)
+
+A alternativa seria multiplicar `weekly_budget × cycle_days / 7` para
+cada ciclo individual, dando uma linha em «escada» (mais alta nos
+meses de 31 dias, mais baixa em Fevereiro). Descartado para a v1
+porque:
+
+1. O user pensa no orçamento como «quanto posso gastar por mês», um
+   número único — não uma função do calendário.
+2. Uma linha horizontal é mais fácil de ler como referência visual; a
+   escada adicionaria ruído para um ganho de fidelidade marginal (± 3 %).
+3. Manter a linha horizontal preserva a propriedade «barra cima da
+   linha = gastou mais do que o orçamento prometia», que se lê em
+   meio-segundo.
+
+Se este trade-off mudar (por exemplo, utilizadores com orçamentos
+semanais muito apertados onde ± 3 % importa), a mudança é trivial:
+expor `cycle_days` em cada row do `cycle_history` payload e trocar
+`ReferenceLine` por uma linha `Line` com dados por barra.
+
+### Onde aparece na UI
+
+| Elemento | Conteúdo |
+|----------|----------|
+| Linha horizontal tracejada no chart | `€{monthly_budget}` |
+| Label inline (topo-direita do chart) | `Orçamento €{monthly_budget}` |
+| Input em `/curve/config` | `weekly_budget` (editável, save-on-blur) |
+
+O valor é recalculado a cada `GET /api/expenses` — mudar o input da
+configuração faz a linha mover-se no próximo refresh da dashboard sem
+reload.
+
+---
+
 ## Relatorios Mensais
 
 ### Endpoint: `GET /admin/expenses/monthly_expenses`

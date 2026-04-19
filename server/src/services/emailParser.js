@@ -285,3 +285,83 @@ export function parseEmail(input) {
 
   return { entity, amount, date, card, digest, warnings };
 }
+
+/**
+ * Semantic validation of a parsed expense (ROADMAP Fase 2.4).
+ *
+ * The parser itself throws `ParseError` when a REQUIRED field is
+ * missing or structurally unparseable (e.g. no `<!doctype html>` marker,
+ * no numeric amount). This check is a second gate that catches values
+ * the parser accepted but are nonsensical — e.g. an entity string that
+ * collapses to whitespace, an amount that's NaN/Infinity/0, or a date
+ * string `Date.parse` can't reconstruct.
+ *
+ * Pure. No side effects. Callers (sync orchestrator) turn a `false`
+ * result into a `parse_error` CurveLog row so the email stays UNSEEN
+ * for a retry after the parser is fixed.
+ *
+ * Deviation from the ROADMAP wording ("amount numérico e positivo"):
+ * we allow **negative** amounts because Curve emits refund receipts as
+ * negative values (see `parseAmount` docstring: "-5.00 → -5"). Rejecting
+ * negatives here would drop legitimate refund rows. We reject 0,
+ * NaN and Infinity instead — values that cannot represent a real
+ * transaction.
+ *
+ * @param {{entity?: string, amount?: number, date?: string}} parsed
+ * @returns {{ ok: true } | { ok: false, field: string, reason: string }}
+ */
+export function validateParsed(parsed) {
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, field: 'parsed', reason: 'parsed is not an object' };
+  }
+
+  // Entity: non-empty after trim. The parser takes `text().trim()` so
+  // the canonical fail mode here is an entity that was present but
+  // made entirely of control characters that trim() doesn't strip.
+  if (typeof parsed.entity !== 'string' || parsed.entity.trim() === '') {
+    return {
+      ok: false,
+      field: 'entity',
+      reason: `empty after trim (got ${JSON.stringify(parsed.entity)})`,
+    };
+  }
+
+  // Amount: must be a finite non-zero number. We accept negatives
+  // (refunds) but reject NaN / ±Infinity / 0 as non-transactions.
+  if (typeof parsed.amount !== 'number' || !Number.isFinite(parsed.amount)) {
+    return {
+      ok: false,
+      field: 'amount',
+      reason: `not a finite number (got ${String(parsed.amount)})`,
+    };
+  }
+  if (parsed.amount === 0) {
+    return {
+      ok: false,
+      field: 'amount',
+      reason: 'zero amount — not a real transaction',
+    };
+  }
+
+  // Date: must be reparseable so downstream cycle aggregations (see
+  // services/expenseStats.js → parseExpenseDate) don't silently drop
+  // it later with zero trace. We only check that Date.parse succeeds;
+  // the exact format is already vetted by the parser.
+  if (typeof parsed.date !== 'string' || parsed.date.trim() === '') {
+    return {
+      ok: false,
+      field: 'date',
+      reason: `empty (got ${JSON.stringify(parsed.date)})`,
+    };
+  }
+  const ts = Date.parse(parsed.date);
+  if (Number.isNaN(ts)) {
+    return {
+      ok: false,
+      field: 'date',
+      reason: `Date.parse failed (got ${JSON.stringify(parsed.date)})`,
+    };
+  }
+
+  return { ok: true };
+}

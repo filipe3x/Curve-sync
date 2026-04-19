@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import PageHeader from '../components/common/PageHeader';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import * as api from '../services/api';
 
 // Debounce window for the folder dropdown auto-save. Short enough to
@@ -56,6 +57,7 @@ function formatDateTime(value) {
 
 export default function CurveConfigPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [config, setConfig] = useState({});
   const [oauthStatus, setOauthStatus] = useState(null);
   const [folderOptions, setFolderOptions] = useState([]);
@@ -92,9 +94,14 @@ export default function CurveConfigPage() {
     try {
       const res = await api.testConnection();
       setFolderOptions(Array.isArray(res.folders) ? res.folders : []);
-      setMessage({ type: 'ok', text: res.message ?? 'Ligação bem-sucedida.' });
+      const text = res.message ?? 'Ligação bem-sucedida.';
+      setMessage({ type: 'ok', text });
+      toast.success(text, { id: 'config-test' });
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      toast.error(err.message ?? 'Teste de ligação falhou.', {
+        id: 'config-test',
+      });
     } finally {
       setTesting(false);
     }
@@ -116,12 +123,14 @@ export default function CurveConfigPage() {
           imap_folder: nextFolder,
           imap_folder_confirmed_at: new Date().toISOString(),
         }));
-        setMessage({
-          type: 'ok',
-          text: `Pasta "${nextFolder}" confirmada.`,
-        });
+        const text = `Pasta "${nextFolder}" confirmada.`;
+        setMessage({ type: 'ok', text });
+        toast.success(text, { id: 'config-folder' });
       } catch (err) {
         setMessage({ type: 'error', text: err.message });
+        toast.error(err.message ?? 'Não foi possível guardar a pasta.', {
+          id: 'config-folder',
+        });
       } finally {
         setFolderSaving(false);
       }
@@ -144,8 +153,12 @@ export default function CurveConfigPage() {
         imap_folder_confirmed_at: new Date().toISOString(),
       }));
       setMessage({ type: 'ok', text: 'Pasta confirmada.' });
+      toast.success('Pasta confirmada.', { id: 'config-folder' });
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      toast.error(err.message ?? 'Não foi possível confirmar a pasta.', {
+        id: 'config-folder',
+      });
     } finally {
       setFolderSaving(false);
     }
@@ -159,8 +172,12 @@ export default function CurveConfigPage() {
       await api.updateCurveConfig(patch);
       setConfig((prev) => ({ ...prev, ...patch }));
       setMessage({ type: 'ok', text: 'Agenda actualizada.' });
+      toast.success('Configuração guardada.', { id: 'config-schedule' });
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      toast.error(err.message ?? 'Não foi possível guardar.', {
+        id: 'config-schedule',
+      });
     } finally {
       setSchedSaving(false);
     }
@@ -457,6 +474,72 @@ export default function CurveConfigPage() {
               </option>
             ))}
           </select>
+        </label>
+
+        {/*
+          Day-of-month cut-off for the expense cycle. Drives: the
+          dashboard "este mês" totals, the /categories/stats windows,
+          the uncategorised count card, and the IMAP reader's SINCE
+          filter — every sync only looks at the current cycle, so
+          changing this value also changes which emails the next sync
+          pulls. Clamped to [1, 28] to avoid Feb overflow. See
+          docs/expense-tracking.md → Custom Monthly Cycle.
+        */}
+        <label className="mt-5 block">
+          <span className="mb-1.5 block text-xs font-medium text-sand-500">
+            Dia de início do ciclo
+          </span>
+          <select
+            value={config.sync_cycle_day ?? 22}
+            onChange={(e) =>
+              saveSchedule({ sync_cycle_day: Number(e.target.value) })
+            }
+            disabled={schedSaving || authBroken || authFresh}
+            className="input disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1.5 block text-xs text-sand-500">
+            Dia do mês em que arranca o ciclo de despesas — por defeito
+            22, alinhado com o ciclo salarial. Aplica-se ao dashboard,
+            categorias e à primeira sincronização.
+          </span>
+        </label>
+
+        {/*
+          Weekly budget drives the dashboard savings-score KPI. Edited
+          in EUR; the backend clamps to [0, ∞) and parses "73,75" /
+          "73.75" alike. Blurring triggers the save — we don't debounce
+          while typing to keep parity with the rest of the schedule
+          card (checkbox + dropdowns are all save-on-change).
+        */}
+        <label className="mt-5 block">
+          <span className="mb-1.5 block text-xs font-medium text-sand-500">
+            Orçamento semanal (€)
+          </span>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            defaultValue={config.weekly_budget ?? 73.75}
+            onBlur={(e) => {
+              const parsed = Number(e.target.value.replace(',', '.'));
+              if (!Number.isFinite(parsed) || parsed < 0) return;
+              if (parsed === (config.weekly_budget ?? 73.75)) return;
+              saveSchedule({ weekly_budget: parsed });
+            }}
+            disabled={schedSaving || authBroken || authFresh}
+            className="input disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          <span className="mt-1.5 block text-xs text-sand-500">
+            Limite de despesas a atingir cada semana. Alimenta a «Savings
+            Score» do dashboard (score alto = poupaste mais). Por defeito
+            €73,75 (€295 / 4 semanas).
+          </span>
         </label>
       </section>
 
