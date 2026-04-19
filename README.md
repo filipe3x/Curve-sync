@@ -195,7 +195,28 @@ Runbook canónico:
 
 Se o step 5 já aterrou sem o backfill ter corrido, a recuperação é correr o backfill o quanto antes — não há data loss, os rows só ficam temporariamente sortados no fim.
 
-## Raspberry Pi / Deployment
+## Deploy para produção (VPS Ubuntu)
+
+Deploy automatizado via `scripts/deploy-prod.sh`. Cobre as seis fases do ROADMAP §3.9 (preflight → gate → pull+build → migrations → restart → rollback) e usa **PM2** (ou systemd, configurável) para gerir o processo no VPS.
+
+```bash
+# 1. Configurar (uma vez)
+cp scripts/deploy.config.sh scripts/deploy.config.local.sh
+$EDITOR scripts/deploy.config.local.sh    # VPS_HOST, VPS_USER, BACKEND_PORT, ...
+
+# 2. Deploy
+./scripts/deploy-prod.sh                  # interactive
+./scripts/deploy-prod.sh --yes            # CI / non-interactive
+./scripts/deploy-prod.sh --ref=<sha>      # specific commit
+./scripts/deploy-prod.sh --dry-run        # preflight only
+./scripts/deploy-prod.sh --rollback       # revert to previous backup
+```
+
+⚠️ **Migrações com sequência crítica** (ex. backfill `date_at`) ficam em [`docs/DEPLOY_NOTES.md`](docs/DEPLOY_NOTES.md). O preflight imprime cada bloco `## release:` antes da gate — ler antes de continuar.
+
+⚠️ **Porta**: o VPS partilhado já corre `sleep-routine` em :3001. O default em `deploy.config.sh` é `:3002` para evitar colisão; manter alinhado com `server/.env` no servidor.
+
+### Raspberry Pi (dev / staging)
 
 O projecto funciona num Raspberry Pi 5 (ARM64) com Node.js >= 18 e MongoDB >= 5.0. Existem scripts de verificação na pasta `scripts/`:
 
