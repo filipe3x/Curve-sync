@@ -216,6 +216,81 @@ $EDITOR scripts/deploy.config.local.sh    # VPS_HOST, VPS_USER, BACKEND_PORT, ..
 
 ⚠️ **Porta**: o VPS partilhado já corre `sleep-routine` em :3001. O default em `deploy.config.sh` é `:3002` para evitar colisão; manter alinhado com `server/.env` no servidor.
 
+### Setup inicial no VPS (uma vez)
+
+URL público: **`https://curvsync.brasume.com`** (sem o «e» de _curve_ — lê-se «cur · vsync»).
+
+```bash
+# DNS: A curvsync.brasume.com → IP do VPS
+
+# 1. Preparar checkout
+sudo mkdir -p /var/www/curve-sync && sudo chown ember: /var/www/curve-sync
+git clone <repo-url> /var/www/curve-sync
+
+# 2. server/.env (CORS_ORIGIN tem de bater com PUBLIC_URL)
+cp /var/www/curve-sync/server/.env.example /var/www/curve-sync/server/.env
+$EDITOR /var/www/curve-sync/server/.env
+#   PORT=3002
+#   MONGODB_URI=mongodb://localhost:27017/embers_db
+#   NODE_ENV=production
+#   CORS_ORIGIN=https://curvsync.brasume.com
+#   IMAP_ENCRYPTION_KEY=<gerar com node -e "import('./src/services/crypto.js').then(m=>console.log(m.generateKey()))">
+#   AZURE_CLIENT_ID=<client id da App Registration>
+#   AZURE_TENANT_ID=common
+
+# 3. Build inicial + arrancar PM2
+cd /var/www/curve-sync && npm run install:all && npm run build
+pm2 start npm --name curve-sync --cwd /var/www/curve-sync -- run start
+pm2 save
+
+# 4. Apache2 vhost (mods necessários: proxy, proxy_http, rewrite, headers, ssl)
+sudo a2enmod proxy proxy_http rewrite headers ssl
+
+sudo tee /etc/apache2/sites-available/curvsync.brasume.com.conf >/dev/null <<'APACHE'
+<VirtualHost *:80>
+  ServerName curvsync.brasume.com
+  Redirect permanent / https://curvsync.brasume.com/
+</VirtualHost>
+
+<VirtualHost *:443>
+  ServerName curvsync.brasume.com
+
+  DocumentRoot /var/www/curve-sync/client/dist
+
+  <Directory /var/www/curve-sync/client/dist>
+    Options -Indexes +FollowSymLinks
+    AllowOverride None
+    Require all granted
+
+    # SPA fallback — qualquer rota client-side devolve index.html
+    RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/api/
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ /index.html [L]
+  </Directory>
+
+  # API → Express :3002 (loopback)
+  ProxyPreserveHost On
+  ProxyPass        /api/  http://127.0.0.1:3002/api/
+  ProxyPassReverse /api/  http://127.0.0.1:3002/api/
+  RequestHeader set X-Forwarded-Proto "https"
+
+  # SSL (preenchido pelo certbot --apache, manter os paths reais)
+  SSLEngine on
+  SSLCertificateFile    /etc/letsencrypt/live/curvsync.brasume.com/fullchain.pem
+  SSLCertificateKeyFile /etc/letsencrypt/live/curvsync.brasume.com/privkey.pem
+  Include /etc/letsencrypt/options-ssl-apache.conf
+</VirtualHost>
+APACHE
+
+sudo a2ensite curvsync.brasume.com.conf
+sudo certbot --apache -d curvsync.brasume.com    # emite o cert e re-escreve a vhost
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+A partir daqui o `./scripts/deploy-prod.sh` trata de tudo em cada release.
+
 ### Raspberry Pi (dev / staging)
 
 O projecto funciona num Raspberry Pi 5 (ARM64) com Node.js >= 18 e MongoDB >= 5.0. Existem scripts de verificação na pasta `scripts/`:

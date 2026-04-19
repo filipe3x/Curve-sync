@@ -25,6 +25,12 @@ export BACKEND_PORT="3002"
 # Health check path served by Express
 export HEALTH_PATH="/api/health"
 
+# ===== Public URL =====
+# The HTTPS origin nginx serves the SPA from. Must match CORS_ORIGIN in
+# server/.env on the VPS — Express only honours one origin (or comma-list).
+# Domain spelled "curvsync" (read as "cur · vsync", the IT term) — not a typo.
+export PUBLIC_URL="https://curvsync.brasume.com"
+
 # ===== Backups =====
 # Tar of the deploy tree before each release; keep last N.
 export ENABLE_BACKUP="true"
