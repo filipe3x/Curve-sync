@@ -151,6 +151,174 @@ Query params novos em `GET /api/expenses` — **todos opcionais, todos aditivos*
 - **Testes:** `server/test/expenseFilters.test.js` (8 casos: `sanitiseSort` defaults + allowlist + injection attempt, `escapeRegex` metachars + catastrophic-backtracking probe)
 - **Impacto no build:** frontend unchanged (`vite build` = 471 kB unchanged). Backend: 7 novos testes, 0 regressão
 
+### 2.6.1 Ligar o range de datas do chart `/` ao `/expenses` 🔗
+
+Follow-up da §2.6. O backend aceita `?start=YYYY-MM-DD&end=YYYY-MM-DD` desde o dia em que essa fase aterrou, e o `CycleTrendCard` (§2.8) já navega para `/expenses?start=…&end=…` ao clicar numa barra. **Mas o `ExpensesPage` ignora os query params ao aterrar** — a página vê o URL, fetch em branco, mostra toda a listagem. O click da barra fica mudo.
+
+Esta secção documenta o PR que fecha a ligação. Scope maior do que a §2.10.1 porque toca em estado, URL, autocomplete, empty-state e copy.
+
+#### Contrato de URL
+
+```
+/expenses?start=YYYY-MM-DD&end=YYYY-MM-DD&search=…&page=…
+```
+
+Regras:
+
+| Regra | Comportamento |
+|-------|---------------|
+| `start` e `end` opcionais e independentes | Só `start` = «desde X em diante»; só `end` = «até X inclusive»; ambos = range fechado; nenhum = sem filtro |
+| Formato | `YYYY-MM-DD` estrito; outros formatos caem silenciosamente (backend via `$dateFromString onError: null`, frontend limpa o query param) |
+| Intervalo inválido | `start > end` → o frontend **ignora** os dois params e mostra toast informativo em vez de fazer o round-trip |
+| Timezone | UTC em ambos os lados — `start` = `00:00:00.000Z`, `end` = `23:59:59.999Z` (já implementado no backend) |
+| Interacção com `search` | Aditivo — um range + um search combinam-se via `AND` |
+| Interacção com `page` | Preservado — mudar de página mantém o filtro no URL |
+| Preservação em acções | Toggle de exclusão, alterar categoria, batch-move **mantêm** o URL intacto (são writes, não substituem filtros) |
+
+#### Fluxo de dados
+
+```
+CycleTrendCard (click numa barra)
+    │
+    ├─ useNavigate(`/expenses?start=…&end=…`)
+    │
+    ▼
+ExpensesPage (mount / route change)
+    │
+    ├─ useSearchParams() → { start, end, search, page }
+    ├─ validate(start, end) → { clean, errors }
+    │      └─ se errors: toast + history.replace sem os params inválidos
+    │
+    ▼
+api.getExpenses({ page, limit, search, start, end, sort: '-date_at' })
+    │
+    ▼
+server/src/routes/expenses.js  [✅ já aceita + filtra]
+    │
+    ▼
+UI renderiza listagem + chip de filtro activo (ver abaixo)
+```
+
+#### UI — o que é novo
+
+**A) Chip de filtro activo** — um pill acima da tabela, abaixo do `PageHeader`, quando `start || end` estão presentes:
+
+```
+┌──────────────────────────────────────────────────────┐
+│  📅  22 Mar → 21 Abr 2026     [N despesas]    [×]    │
+└──────────────────────────────────────────────────────┘
+```
+
+- Ícone lucide `CalendarRange`
+- Texto: `{formatAbsoluteDate(start)} → {formatAbsoluteDate(end)}` (reutilizar `client/src/utils/relativeDate.js`). Se só `start`, `A partir de 22 Mar 2026`. Se só `end`, `Até 21 Abr 2026`.
+- Contador `[N despesas]` — o mesmo `total` que vem no `meta`, pt-PT pluralizado
+- Botão `×` de limpar — `history.push('/expenses')` sem params (preserva `search` se houver)
+- Classe: reutilizar o visual dos banners de undo (`bg-sand-50 border border-sand-200`)
+
+**B) Empty state contextual** — quando o range devolve zero linhas:
+
+```
+┌─────────────────────────────────────┐
+│                                      │
+│        📭                            │
+│  Sem despesas entre                  │
+│   22 Mar e 21 Abr 2026               │
+│                                      │
+│  [Ver todas as despesas]             │
+└─────────────────────────────────────┘
+```
+
+- Reutilizar o `EmptyState` existente com copy específico
+- CTA «Ver todas as despesas» limpa o range e recarrega
+
+**C) Integração com o campo de `search`** — mantém-se tal e qual, mas:
+- `onSubmit` do search **não** limpa os params `start/end` (os dois coexistem)
+- Clicar no `×` do chip de range **não** limpa o `search` (são independentes)
+
+**D) Estado de loading com filtro** — nada muda além do skeleton actual; o `getExpenses` traz `meta.total`, o chip já sabe o número.
+
+#### Edge cases
+
+1. **`start > end`** (user-crafted URL, bug do chart): frontend detecta no parse, mostra toast «Intervalo de datas inválido», chama `setSearchParams` removendo ambos. Listagem carrega sem filtro.
+2. **Só uma data**: perfeitamente válido — backend aceita `start` ou `end` isoladamente. Chip rende «A partir de …» ou «Até …».
+3. **Datas no futuro**: válidas — devolve listagem vazia se não houver despesas. Sem aviso especial (a natureza do futuro é que está vazio).
+4. **Datas no passado distante**: idem.
+5. **Refresh da página com filtro activo**: URL é source of truth → re-hydrata o filtro no mount. Zero estado persistido em React state; tudo vem do `useSearchParams`.
+6. **Paginação dentro do filtro**: `setSearchParams({ ...current, page: 2 })` preserva `start/end`.
+7. **Mudar a `search` com filtro activo**: a submit do search apenas updata `search` no URL; `start/end` sobrevivem.
+8. **Deep-link de fora (bookmark, Slack)**: funciona igual ao click da barra — é o mesmo URL.
+9. **User sem data alguma no range**: chip mostra `0 despesas`, empty state contextual aparece.
+10. **Sync dispara enquanto o filtro está activo**: re-fetch mantém filtro (o orchestrator só escreve, não navega).
+
+#### Accessibility
+
+- Chip tem `role="status"` + `aria-live="polite"` — quando o user muda o range, screen readers anunciam o novo intervalo
+- Botão `×` tem `aria-label="Limpar filtro de datas"`
+- Empty-state CTA é focável por teclado
+- Contraste WCAG AA: `sand-700` sobre `sand-50` → OK
+
+#### Impacto no `ExpensesPage.jsx` (scope real)
+
+Ficheiros tocados:
+
+| Ficheiro | O quê |
+|----------|-------|
+| `client/src/pages/ExpensesPage.jsx` | `useSearchParams`, validação, forward de `start/end` para `api.getExpenses`, chip de filtro, empty state contextual, eliminação do `useState` para `page/search` (derivar do URL) |
+| `client/src/components/common/ExpensesFilterChip.jsx` | **Novo** — componente isolado para o chip, reusável se aparecer outro filtro (card/entity) |
+| `client/src/utils/relativeDate.js` | Zero mudanças — `formatAbsoluteDate` já cobre |
+| `server/src/routes/expenses.js` | **Zero mudanças** — já validado e já filtra |
+| `server/test/expenseFilters.test.js` | Eventualmente, +1 teste end-to-end que exercite o deep-link (manual, por agora) |
+
+**Refactor esperado**: migrar `page`, `search`, `start`, `end` de `useState` para `useSearchParams`. Isto é o core do PR — evitar que o user navegue com back/forward e perca contexto.
+
+#### Follow-ups explicitamente fora de scope
+
+- **Datepicker UI** para seleccionar datas manualmente (`<input type="date">` básico ou lib). Só se houver demand real — a entrada principal é via chart.
+- **Presets** («Este ciclo», «Últimos 30 dias», «Este ano»). Útil mas adiciona copy + lógica; separar em follow-up.
+- **Filtro por entity / card com URL** — análogo mas independente; a infra que construímos aqui serve de template.
+- **Analytics dos cliques** do chart para a listagem. Útil para saber se a feature é usada; requer infra de telemetria.
+- **Undo do `×` do chip** (6 s para restaurar o filtro) — provavelmente over-engineering.
+
+#### Implementação por fases
+
+| Fase | Scope | Entrega |
+|------|-------|---------|
+| **1 — URL-driven state** | Migrar `page/search` para `useSearchParams`; adicionar parsing de `start/end`; forward para a API | Click na barra passa a filtrar, mas sem chip visível |
+| **2 — Chip + empty state** | `ExpensesFilterChip.jsx` novo, wire do botão `×`, empty state contextual | UI completa |
+| **3 — Validação + toasts** | `start > end`, formatos inválidos → toast informativo, limpar URL | Edge cases cobertos |
+| **4 — Polish** | Copy fina, micro-animação de entrada do chip, testes manuais pelos edge cases acima | Done |
+
+Cada fase pode aterrar em commits separados dentro do mesmo PR, ou ser PR por fase se a review quiser dividir.
+
+#### Testes (manual pela feature)
+
+Golden path:
+- [ ] Clicar numa barra do chart → `/expenses` aterra já filtrado, chip visível com o range correcto
+- [ ] Contador do chip bate com o `total` da meta
+- [ ] `×` do chip volta para `/expenses` sem params
+- [ ] Paginar dentro do filtro preserva o range
+- [ ] Search + range combinam
+- [ ] Refresh da página preserva o filtro
+
+Edge cases:
+- [ ] `?start=invalid` → filtro é ignorado, URL limpa, listagem normal
+- [ ] `?start=2026-04-21&end=2026-03-22` → toast de erro, URL limpa
+- [ ] Deep-link de um período vazio → empty state contextual com CTA
+- [ ] Toggle de exclusão dentro do filtro → filtro sobrevive
+- [ ] Alterar categoria dentro do filtro → filtro sobrevive
+- [ ] Mobile: chip não quebra a tabela, continua legível
+
+#### Referências
+
+- ROADMAP §2.6 — contrato backend (já implementado)
+- ROADMAP §2.8 — `CycleTrendCard`, onde nasce o click (`client/src/components/dashboard/CycleTrendCard.jsx:350-360`)
+- `server/src/routes/expenses.js:170-200` — parsing de `start/end` Mongo-side
+- `client/src/utils/relativeDate.js` — `formatAbsoluteDate` para o chip
+- `client/src/components/common/EmptyState.jsx` — template do empty state
+- `client/src/contexts/ToastContext.jsx` — infra de toasts para validação
+
+---
+
 ### ~~2.7 Encriptação de credenciais IMAP~~ ✅
 Movido para MU-5 e implementado: AES-256-GCM at rest, decrypt on-the-fly, backwards-compat com plaintext. Ver `server/src/services/crypto.js`.
 
