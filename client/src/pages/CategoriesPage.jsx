@@ -335,12 +335,12 @@ function OverridesList({
   const [open, setOpen] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
   // Admin kind toggle — only meaningful when `onAddGlobal` is wired in
-  // (admin mode). The non-admin branch defaults to `'personal'` and
-  // never reads this value. `'personal'` is the default because
-  // personal rules are the more common per-session action; the admin
-  // flips to `'global'` when seeding the catalogue.
-  const [kind, setKind] = useState('personal');
+  // (admin mode). Admins default to `'global'` because the more common
+  // per-session action for them is seeding the catalogue; personal
+  // rules remain reachable via the toggle. Non-admins never get the
+  // choice and stay on `'personal'` via `effectiveKind` below.
   const adminMode = typeof onAddGlobal === 'function';
+  const [kind, setKind] = useState(adminMode ? 'global' : 'personal');
   const effectiveKind = adminMode ? kind : 'personal';
   const mine = overrides.filter((o) => o.category_id === categoryId);
 
