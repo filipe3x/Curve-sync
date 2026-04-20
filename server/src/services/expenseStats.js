@@ -30,6 +30,7 @@ import Category from '../models/Category.js';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveExpenseExclusion from '../models/CurveExpenseExclusion.js';
 import { cycleBoundsFor, formatISODate, normaliseCycleDay } from './cycle.js';
+import { parseExpenseDateOrNull } from './expenseDate.js';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -59,17 +60,40 @@ const MAX_CYCLE_HISTORY_COUNT = 36;
 const WEEKS_PER_MONTH = 30.4375 / 7;
 
 /**
- * Parse the free-form `Expense.date` string into a Date, or null if it
- * doesn't look like a recognisable timestamp. Mirrors the helper in
- * `routes/categories.js` — re-exported here so anyone computing totals
- * from `Expense.date` can share one parser.
+ * Parse `Expense.date` into a JS Date, or null if unrecognisable.
+ *
+ * ⚠️  History — why this used to silently zero every dashboard in prod
+ * ────────────────────────────────────────────────────────────────────
+ * The original implementation here was string-only:
+ *
+ *     if (!str || typeof str !== 'string') return null;
+ *
+ * That matched the legacy contract (pre-schema-migration `Expense.date`
+ * was a free-form string like "06 April 2026 08:53:31"). Once the
+ * schema flipped to `type: Date` (see models/Expense.js) every new row
+ * — and every backfilled prod row written by Embers' Mongoid DateTime
+ * path — lands as a BSON `Date`, not a string. The string-only guard
+ * dropped **100 %** of prod rows on the floor: `month_total`,
+ * `weekly_expenses`, `weekly_savings`, and every bucket in
+ * `computeCycleHistory` collapsed to 0, rendering the dashboard KPIs
+ * as zeros and the trend chart as a flat line. Dev happened to keep
+ * working because its dump still carried 63/76 legacy string rows
+ * (see `dev/db/embers-dump.tar.gz`).
+ *
+ * Fix: delegate to the canonical `parseExpenseDateOrNull` in
+ * `expenseDate.js`, which is the same helper every INSERT path uses
+ * (syncOrchestrator + POST /api/expenses). It accepts all three shapes
+ * observed in the wild:
+ *
+ *   1. BSON Date → passed through untouched
+ *   2. canonical Curve string ("06 April 2026 08:53:31") → Date.parse
+ *   3. fallback regex for minimal-ICU Node builds
+ *
+ * Kept as a named export (`parseExpenseDate`) to preserve the existing
+ * unit-test import surface and the route-level consumers that still
+ * reference it.
  */
-export function parseExpenseDate(str) {
-  if (!str || typeof str !== 'string') return null;
-  const t = Date.parse(str);
-  if (Number.isNaN(t)) return null;
-  return new Date(t);
-}
+export const parseExpenseDate = parseExpenseDateOrNull;
 
 /**
  * Compute the Embers Savings Score from a `weekly_savings` value and a

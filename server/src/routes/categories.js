@@ -17,6 +17,7 @@ import {
   formatISODate,
   getUserCycleDay,
 } from '../services/cycle.js';
+import { parseExpenseDateOrNull } from '../services/expenseDate.js';
 
 const router = Router();
 
@@ -157,17 +158,16 @@ async function countGlobalEntityMatches(userId, categories) {
 //   is used by routes/categoryOverrides apply-to-all.
 // ─────────────────────────────────────────────────────────────────────
 
-// Parse "06 April 2026 08:53:31" (the format emitted by the Curve
-// email parser) into a JS Date. Node's Date constructor handles this
-// format natively in V8 — tested end-to-end before wiring this in.
-// Returns `null` on any failure so the caller can skip bad rows
-// without poisoning the aggregate.
-function parseExpenseDate(str) {
-  if (!str || typeof str !== 'string') return null;
-  const t = Date.parse(str);
-  if (Number.isNaN(t)) return null;
-  return new Date(t);
-}
+// `parseExpenseDate` lived here as a string-only helper identical to
+// the copy in `services/expenseStats.js`. Both were dropping **every**
+// BSON `Date` row (i.e. the entire prod collection after the
+// `Expense.date` schema migration — see models/Expense.js), which
+// zeroed `/api/categories/stats` the same way it zeroed the dashboard
+// KPIs. Now delegated to the canonical `parseExpenseDateOrNull` from
+// `services/expenseDate.js`, which accepts Date / canonical Curve
+// string / Date.parse-friendly variants. See the long comment on
+// `expenseStats.js::parseExpenseDate` for the full post-mortem.
+const parseExpenseDate = parseExpenseDateOrNull;
 
 // Resolve the requested cycle into `{ start, end }` Dates + labels.
 // Returns `null` + an error code when the caller supplied a bad range.

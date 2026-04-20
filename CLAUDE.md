@@ -69,7 +69,7 @@ The expense system uses day 22 as the month start (aligned with bank pay cycles)
 
 ### Savings Score
 
-Weekly budget = EUR 295/4. Score formula: `score = (log(weekly_savings + 1) / log(budget + 1)) * 10`, returning a 0-10 scale.
+Weekly budget = EUR 295/4. Score formula: `score = (log(weekly_savings + 1) / log(budget + 1)) * 10`, returning a 0-10 scale. **Window: rolling 168 hours (`now − 7 × 24 h`), not ISO-week** — deliberate divergence from Embers' `beginning_of_week .. end_of_week`. See `docs/expense-tracking.md` → *Savings Score* for the rationale (no Monday reset, timezone-agnostic, coherent with the custom monthly cycle).
 
 ### Email Parsing Pipeline
 
