@@ -87,6 +87,27 @@ function formatLastSyncSub(emailsProcessed, lastEmailAt, lastSyncStatus) {
   return `${count} ${noun} a ${dd}/${mon}/${when.getFullYear()}`;
 }
 
+// Wall-clock aligned polling. The server scheduler gate
+// (server/src/services/scheduler.js :: shouldRunAtTick) only lets a
+// config run when the current minute is divisible by its interval —
+// :00/:15/:30/:45 for a 15-min config, :00/:30 for 30, :00 for 60.
+// A sync takes a few seconds to complete end-to-end, so we land one
+// minute past that boundary (:16/:31/:46/:01 for the 15-min example)
+// to catch the fresh `last_sync_at` without racing the insert.
+//
+// Returns ms until the next aligned poll tick, strictly in the future.
+function msUntilAlignedPoll(intervalMinutes, now = new Date()) {
+  const minute = now.getMinutes();
+  let targetMinute = Math.floor(minute / intervalMinutes) * intervalMinutes + 1;
+  if (targetMinute <= minute) targetMinute += intervalMinutes;
+  const target = new Date(now);
+  // setMinutes normalises rollovers (>59 → next hour) — intervalMinutes
+  // of 60 pushes targetMinute to 61, which becomes h+1:01 correctly.
+  target.setMinutes(targetMinute, 0, 0);
+  const delta = target.getTime() - now.getTime();
+  return delta > 0 ? delta : intervalMinutes * 60_000;
+}
+
 // EUR formatter for month totals — parity with the currency style used
 // across /expenses so €€€ never rendered with mixed separators.
 const EUR = new Intl.NumberFormat('pt-PT', {
@@ -253,6 +274,75 @@ export default function DashboardPage() {
     const id = setInterval(() => setNowTick((n) => n + 1), 60_000);
     return () => clearInterval(id);
   }, []);
+
+  // Aligned refresh — fire a poll at (cron boundary + 1 min) in
+  // wall-clock time, matching the server scheduler's own cadence
+  // (shouldRunAtTick). On each tick hit the cheap `/sync/status`
+  // first and only fan out to `loadDashboard()` if `last_sync_at`
+  // actually advanced; idle ticks cost one request. This keeps the
+  // KPI cards (and recent-expenses table) in sync with background
+  // scheduler runs without brute-force 60-s polling. `lastSyncAtRef`
+  // shadows the state so the setTimeout callback compares against
+  // a fresh value without re-registering on every fetch.
+  const lastSyncAtRef = useRef(null);
+  useEffect(() => {
+    lastSyncAtRef.current = syncStatus?.last_sync_at ?? null;
+  }, [syncStatus?.last_sync_at]);
+
+  const interval = syncStatus?.sync_interval_minutes;
+  const enabled = syncStatus?.sync_enabled;
+  useEffect(() => {
+    if (!enabled) return undefined;
+    if (!Number.isFinite(interval) || interval <= 0) return undefined;
+
+    let cancelled = false;
+    let timer = null;
+
+    const schedule = () => {
+      const delay = msUntilAlignedPoll(interval);
+      timer = setTimeout(async () => {
+        if (cancelled) return;
+        try {
+          const status = await api.getSyncStatus();
+          const next = status?.last_sync_at ?? null;
+          if (next && next !== lastSyncAtRef.current) {
+            // Full refresh so AnimatedKPI tweens and the recent
+            // expenses table picks up the new rows.
+            await loadDashboard();
+          } else {
+            setSyncStatus(status);
+          }
+        } catch {
+          /* best-effort — retry on the next aligned tick */
+        }
+        if (!cancelled) schedule();
+      }, delay);
+    };
+    schedule();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [enabled, interval]);
+
+  // Track which recent-expense IDs are new since the last commit so
+  // the table can animate *only the new rows* on a post-sync refresh.
+  // Without this, re-using the page-wide `animate-fade-in-up` would
+  // flash every row on every update (including unrelated re-renders
+  // from hover / popover state).
+  const knownExpenseIdsRef = useRef(new Set());
+  const newExpenseIds = new Set();
+  for (const exp of recentExpenses) {
+    if (exp?._id && !knownExpenseIdsRef.current.has(exp._id)) {
+      newExpenseIds.add(exp._id);
+    }
+  }
+  useEffect(() => {
+    knownExpenseIdsRef.current = new Set(
+      recentExpenses.map((e) => e?._id).filter(Boolean),
+    );
+  }, [recentExpenses]);
 
   // ─── Undo-banner plumbing ───────────────────────────────────────
   // Mirrors ExpensesPage: per-entry timer map kept outside state, push
@@ -803,6 +893,12 @@ export default function DashboardPage() {
                   // The category cell keeps full opacity so the chip
                   // and its popover stay fully interactive.
                   const dimCell = rowExcluded ? 'opacity-60' : '';
+                  // Only rows whose `_id` wasn't in the previous commit
+                  // get the fade-up. On first paint that's every row
+                  // (the pre-mount set is empty), so the initial
+                  // stagger still plays; after an aligned-poll refresh
+                  // only the genuinely new receipts animate.
+                  const isNew = exp._id && newExpenseIds.has(exp._id);
                   return (
                     <tr
                       key={exp._id ?? i}
@@ -812,11 +908,13 @@ export default function DashboardPage() {
                           : undefined
                       }
                       className={`border-b border-sand-50 transition-colors duration-150 ${
+                        isNew ? 'animate-fade-in-up' : ''
+                      } ${
                         rowExcluded
                           ? 'bg-sand-50 hover:bg-sand-100'
                           : 'hover:bg-sand-50'
                       }`}
-                      style={{ animationDelay: `${i * 60}ms` }}
+                      style={isNew ? { animationDelay: `${i * 60}ms` } : undefined}
                     >
                       <td className={`px-5 py-3 font-medium text-sand-900 ${dimCell}`}>
                         {exp.entity}
