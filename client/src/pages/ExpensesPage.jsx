@@ -6,7 +6,7 @@ import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import ExpensesFilterChip from '../components/common/ExpensesFilterChip';
-import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
+import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, FolderIcon, XMarkIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
 import { formatAbsoluteDate, formatExpenseDateFull } from '../utils/relativeDate';
 import * as api from '../services/api';
@@ -88,6 +88,18 @@ export default function ExpensesPage() {
     () => parseRange(searchParams),
     [searchParams],
   );
+  // Deep-link from /categories → /expenses ("Ver todas →"). Mirrors the
+  // server's contract on GET /api/expenses: an ObjectId narrows to that
+  // category; the synthetic strings `null` / `uncategorised` both map
+  // to the "Sem categoria" bucket. Anything else (malformed id) falls
+  // through as no-filter — the URL gets scrubbed on the next navigation.
+  const rawCategoryId = searchParams.get('category_id');
+  const categoryFilter =
+    rawCategoryId === 'null' || rawCategoryId === 'uncategorised'
+      ? 'null'
+      : /^[a-f0-9]{24}$/i.test(rawCategoryId ?? '')
+        ? rawCategoryId
+        : null;
 
   const [expenses, setExpenses] = useState([]);
   const [total, setTotal] = useState(0);
@@ -180,6 +192,12 @@ export default function ExpensesPage() {
       p.delete('page');
     });
   };
+  const clearCategoryFilter = () => {
+    updateParams((p) => {
+      p.delete('category_id');
+      p.delete('page');
+    });
+  };
 
   // Invalid-range recovery. Runs once per URL change — if parseRange
   // flagged a malformed or inverted range, surface a toast and scrub
@@ -223,6 +241,7 @@ export default function ExpensesPage() {
         // happily refuse to parse. Guard here, not at the API layer.
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
+        ...(categoryFilter ? { category_id: categoryFilter } : {}),
         sort: '-date',
       });
       setExpenses(res.data ?? []);
@@ -240,7 +259,7 @@ export default function ExpensesPage() {
     if (rangeError) return;
     fetchExpenses();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, appliedSearch, start, end, rangeError]);
+  }, [page, appliedSearch, start, end, categoryFilter, rangeError]);
 
   // Keep the search input in sync with URL changes — covers the
   // browser back/forward case where `appliedSearch` flips without the
@@ -333,6 +352,7 @@ export default function ExpensesPage() {
         search: appliedSearch,
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
+        ...(categoryFilter ? { category_id: categoryFilter } : {}),
         sort: '-date',
       });
       setSelectedIds(new Set(res.ids ?? []));
@@ -803,6 +823,43 @@ export default function ExpensesPage() {
         count={total}
         onClear={clearDateRange}
       />
+
+      {/* Active category-filter chip. Hydrates from the `category_id`
+          URL param so the deep-link from /categories → /expenses
+          "Ver todas →" renders as a visible, dismissable filter rather
+          than a silent server-side narrowing. Matches the date chip's
+          look + clear affordance for consistency. */}
+      {categoryFilter && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-4 flex animate-slide-in-right items-center gap-3 rounded-2xl border border-sand-200 bg-sand-50 px-4 py-2.5 text-sm text-sand-700"
+        >
+          <FolderIcon className="h-4 w-4 shrink-0 text-sand-500" />
+          <span className="min-w-0 flex-1 truncate">
+            <span className="font-medium text-sand-900">
+              {categoryFilter === 'null'
+                ? 'Sem categoria'
+                : categories.find(
+                    (c) => String(c._id) === String(categoryFilter),
+                  )?.name ?? 'Categoria'}
+            </span>
+            <span className="ml-2 text-xs text-sand-500">
+              · {total.toLocaleString('pt-PT')}{' '}
+              {total === 1 ? 'despesa' : 'despesas'}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={clearCategoryFilter}
+            aria-label="Limpar filtro de categoria"
+            title="Limpar filtro de categoria"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sand-500 transition-colors hover:bg-sand-200 hover:text-sand-700 focus:outline-none focus:ring-2 focus:ring-curve-500/30"
+          >
+            <XMarkIcon className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">

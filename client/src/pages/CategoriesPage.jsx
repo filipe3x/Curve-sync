@@ -822,13 +822,15 @@ function RecentExpenses({ categoryId }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // `'__null__'` is the local sentinel for the uncategorised bucket
+  // (see the master list selection state). The server / /expenses URL
+  // expect the literal string `null` for that bucket instead.
+  const param =
+    categoryId === '__null__' || categoryId === null ? 'null' : categoryId;
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const param =
-      categoryId === '__null__' || categoryId === null
-        ? 'null'
-        : categoryId;
     api
       .getExpenses({
         page: 1,
@@ -891,7 +893,7 @@ function RecentExpenses({ categoryId }) {
       </table>
       <div className="border-t border-sand-100 px-4 py-3 text-right">
         <Link
-          to="/expenses"
+          to={`/expenses?category_id=${encodeURIComponent(param)}`}
           className="text-xs font-medium text-curve-700 hover:underline"
         >
           Ver todas →
