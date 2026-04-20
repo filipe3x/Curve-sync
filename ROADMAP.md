@@ -1040,6 +1040,7 @@ Tornar o sync concorrente entre utilizadores e implementar o cron scheduler.
 - [x] **Scheduler** — `server/src/services/scheduler.js`: `node-cron` 5min; itera configs com `sync_enabled: true`; skip se lock activo
 - [x] **Routes scheduler** — `POST start`, `POST stop`, `GET status`
 - [x] **Arranque automático** — scheduler inicia no boot se existirem configs com `sync_enabled: true`
+- [x] **Per-user cadence** — `shouldRunAtTick(config, tickMinute)` em `scheduler.js` honra `sync_interval_minutes` via módulo do minuto wall-clock (15 → :00/:15/:30/:45, 30 → :00/:30, 60 → :00). Antes todos os users corriam de 5 em 5 min independentemente do setting
 
 **Dependências:** MU-2 (routes scoped); MU-1 (auth para rotas admin).
 

@@ -279,6 +279,9 @@ router.post('/sync', perUserSyncLimiter, async (req, res) => {
 // GET /api/curve/sync/status — lightweight poll endpoint for the
 // "a sincronizar agora" badge in the UI. Returns the in-memory lock state
 // (authoritative) AND the config's `is_syncing` field (UI hint).
+// `sync_interval_minutes` + `sync_enabled` are included so the dashboard
+// can align its own refresh ticks to the user's scheduler cadence
+// instead of polling blindly every minute.
 router.get('/sync/status', async (req, res) => {
   try {
     const config = await CurveConfig.findOne({ user_id: req.userId }).lean();
@@ -288,6 +291,8 @@ router.get('/sync/status', async (req, res) => {
       last_sync_at: config?.last_sync_at ?? null,
       last_sync_status: config?.last_sync_status ?? null,
       last_email_at: config?.last_email_at ?? null,
+      sync_enabled: Boolean(config?.sync_enabled),
+      sync_interval_minutes: config?.sync_interval_minutes ?? null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

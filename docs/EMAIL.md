@@ -622,12 +622,15 @@ if present, builds a reader via `createImapReader()`, and calls
 `syncEmails()` sequentially for each remaining config. It auto-starts
 on boot from `index.js` when any config has `sync_enabled: true`.
 Re-reading the config set every tick means `sync_enabled` toggles
-made via `PUT /api/curve/config` take effect without a restart. Note:
-`sync_interval_minutes` on individual configs is not currently honoured
-by the scheduler — every enabled config runs at the same cadence. The
-scheduler's own lifecycle events (`started`, `stopped`, per-config
-failures) go to `stdout` / `stderr`; per-sync `ok` / `error` rows in
-`/curve/logs` come from `syncEmails()` inside the orchestrator.
+made via `PUT /api/curve/config` take effect without a restart.
+`sync_interval_minutes` is honoured per-config via a wall-clock-minute
+gate: the cron fires every 5 min, and each config runs only when the
+current minute is divisible by its interval — 15 → :00/:15/:30/:45,
+30 → :00/:30, 60 → :00. All UI options are multiples of 5 so they
+align cleanly with the tick. The scheduler's own lifecycle events
+(`started`, `stopped`, per-config failures) go to `stdout` / `stderr`;
+per-sync `ok` / `error` rows in `/curve/logs` come from `syncEmails()`
+inside the orchestrator.
 
 ### Phase 6 — Environment & Security — DONE
 
