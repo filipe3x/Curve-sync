@@ -29,12 +29,19 @@ function escapeRegex(s) {
 // Allowlist of sortable fields. Anything else falls back to `-date`
 // (default, chronological descending). `date` is a uniformly typed
 // BSON Date — see models/Expense.js.
+//
+// `category_name` is a virtual sort key: the field doesn't live on
+// `Expense` itself (the row stores `category_id`), so when the client
+// asks for it we switch the read path to an aggregation with a
+// `$lookup` on `categories`. The rest of the allowlist stays on the
+// fast `find()` path.
 const ALLOWED_SORT_FIELDS = new Set([
   'date',
   'amount',
   'entity',
   'card',
   'created_at',
+  'category_name',
 ]);
 
 function sanitiseSort(raw) {
@@ -65,7 +72,8 @@ function sanitiseSort(raw) {
 //   entity       — exact match on Expense.entity
 //   start        — YYYY-MM-DD lower bound (inclusive) on Expense.date
 //   end          — YYYY-MM-DD upper bound (inclusive) on Expense.date
-//   sort         — one of date/amount/entity/card/created_at ±. Default -date.
+//   sort         — one of date/amount/entity/card/created_at/category_name
+//                   with optional `-` prefix for descending. Default -date.
 // The legacy frontend (`ExpensesPage.jsx`) still only sends
 // page/limit/search/sort; new params are driven by UI that lands later.
 router.get('/', async (req, res) => {
@@ -234,14 +242,56 @@ router.get('/', async (req, res) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [data, total] = await Promise.all([
-      Expense.find(filter)
-        .sort(safeSort)
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      Expense.countDocuments(filter),
-    ]);
+    const sortField = safeSort.startsWith('-') ? safeSort.slice(1) : safeSort;
+    const sortDesc = safeSort.startsWith('-');
+
+    let data;
+    let total;
+    if (sortField === 'category_name') {
+      // Virtual-field path: pull the category name via `$lookup` so
+      // the $sort stage can order on it. `_id` is used as a tiebreaker
+      // so paginated reads stay stable when many rows share a
+      // category. Uncategorised rows get an empty string so they
+      // cluster together at one end of the range (asc → top; desc →
+      // bottom) rather than scattering at random.
+      const sortDir = sortDesc ? -1 : 1;
+      const [aggData, aggTotal] = await Promise.all([
+        Expense.aggregate([
+          { $match: filter },
+          {
+            $lookup: {
+              from: 'categories',
+              localField: 'category_id',
+              foreignField: '_id',
+              as: '_cat',
+            },
+          },
+          {
+            $addFields: {
+              _category_name: {
+                $ifNull: [{ $arrayElemAt: ['$_cat.name', 0] }, ''],
+              },
+            },
+          },
+          { $sort: { _category_name: sortDir, _id: 1 } },
+          { $skip: skip },
+          { $limit: Number(limit) },
+          { $project: { _cat: 0, _category_name: 0 } },
+        ]),
+        Expense.countDocuments(filter),
+      ]);
+      data = aggData;
+      total = aggTotal;
+    } else {
+      [data, total] = await Promise.all([
+        Expense.find(filter)
+          .sort(safeSort)
+          .skip(skip)
+          .limit(Number(limit))
+          .lean(),
+        Expense.countDocuments(filter),
+      ]);
+    }
 
     // Attach category names
     const catIds = [...new Set(data.filter((e) => e.category_id).map((e) => e.category_id.toString()))];

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { ChevronsUpDown, ChevronUp, ChevronDown } from 'lucide-react';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
@@ -10,6 +11,69 @@ import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, FolderIcon, XMa
 import { useToast } from '../contexts/ToastContext';
 import { formatAbsoluteDate, formatExpenseDateFull } from '../utils/relativeDate';
 import * as api from '../services/api';
+
+// Sort-key allowlist mirrors `ALLOWED_SORT_FIELDS` on the server
+// (routes/expenses.js). Unknown values fall back to the default
+// `-date` rather than poking an unknown field into the URL — cheap
+// defence-in-depth for hand-typed URLs.
+const SORTABLE_FIELDS = new Set([
+  'date',
+  'amount',
+  'entity',
+  'card',
+  'category_name',
+]);
+// Per-field "first click" direction. Columns where the interesting
+// extreme is "most recent / biggest" (date, amount) default to
+// descending so the first click reveals the top of the stack; text
+// columns default to ascending (A→Z) which matches every table-sort
+// UX convention.
+const DEFAULT_DESC_FIELDS = new Set(['date', 'amount']);
+const DEFAULT_SORT = '-date';
+
+function parseSort(raw) {
+  if (typeof raw !== 'string' || raw === '') return DEFAULT_SORT;
+  const desc = raw.startsWith('-');
+  const field = desc ? raw.slice(1) : raw;
+  if (!SORTABLE_FIELDS.has(field)) return DEFAULT_SORT;
+  return desc ? `-${field}` : field;
+}
+
+// Column header rendered as a button. Renders a subtle double-chevron
+// as a "sortable" affordance when inactive and a single chevron that
+// flips direction when active. Keeping the indicator small and sand-
+// toned so the header doesn't compete with the data below it.
+function SortableHeader({ field, label, active, direction, onSort, className = '' }) {
+  const Icon = !active ? ChevronsUpDown : direction === 'asc' ? ChevronUp : ChevronDown;
+  const nextDirLabel = active
+    ? direction === 'asc'
+      ? 'descendente'
+      : 'ascendente'
+    : DEFAULT_DESC_FIELDS.has(field)
+      ? 'descendente'
+      : 'ascendente';
+  return (
+    <th scope="col" className={`px-5 py-3 ${className}`}>
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+        title={`Ordenar por ${label.toLowerCase()} (${nextDirLabel})`}
+        className={`-mx-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-curve-500/30 ${
+          active ? 'text-curve-700' : 'text-sand-400 hover:text-sand-600'
+        }`}
+      >
+        <span>{label}</span>
+        <Icon
+          className={`h-3 w-3 shrink-0 transition-opacity ${
+            active ? 'opacity-100' : 'opacity-40'
+          }`}
+          aria-hidden
+        />
+      </button>
+    </th>
+  );
+}
 
 // Accepts strict YYYY-MM-DD only. Lax `Date.parse` behaviour (e.g.
 // "2026-4-1" without zero padding) would let malformed URLs slip
@@ -88,6 +152,12 @@ export default function ExpensesPage() {
     () => parseRange(searchParams),
     [searchParams],
   );
+  // Parsed sort keeps the single-string form the server expects
+  // (`date` / `-date`). We also split it for the header renderers
+  // which only care about the field + direction separately.
+  const sort = parseSort(searchParams.get('sort'));
+  const sortField = sort.startsWith('-') ? sort.slice(1) : sort;
+  const sortDirection = sort.startsWith('-') ? 'desc' : 'asc';
   // Deep-link from /categories → /expenses ("Ver todas →"). Mirrors the
   // server's contract on GET /api/expenses: an ObjectId narrows to that
   // category; the synthetic strings `null` / `uncategorised` both map
@@ -198,6 +268,28 @@ export default function ExpensesPage() {
       p.delete('page');
     });
   };
+  // Header click — toggles direction on the active column, or swaps
+  // to the clicked column at that column's "natural" default direction
+  // (desc for numeric / chronological; asc for alphabetical text).
+  // The default sort (`-date`) is represented by dropping the param so
+  // the URL stays clean for the common case.
+  const applySort = (field) => {
+    if (!SORTABLE_FIELDS.has(field)) return;
+    updateParams((p) => {
+      const current = parseSort(p.get('sort'));
+      const currentField = current.startsWith('-') ? current.slice(1) : current;
+      const currentDesc = current.startsWith('-');
+      let next;
+      if (currentField === field) {
+        next = currentDesc ? field : `-${field}`;
+      } else {
+        next = DEFAULT_DESC_FIELDS.has(field) ? `-${field}` : field;
+      }
+      if (next === DEFAULT_SORT) p.delete('sort');
+      else p.set('sort', next);
+      p.delete('page');
+    });
+  };
 
   // Invalid-range recovery. Runs once per URL change — if parseRange
   // flagged a malformed or inverted range, surface a toast and scrub
@@ -242,7 +334,7 @@ export default function ExpensesPage() {
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
         ...(categoryFilter ? { category_id: categoryFilter } : {}),
-        sort: '-date',
+        sort,
       });
       setExpenses(res.data ?? []);
       setTotal(res.meta?.total ?? 0);
@@ -259,7 +351,7 @@ export default function ExpensesPage() {
     if (rangeError) return;
     fetchExpenses();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, appliedSearch, start, end, categoryFilter, rangeError]);
+  }, [page, appliedSearch, start, end, categoryFilter, sort, rangeError]);
 
   // Keep the search input in sync with URL changes — covers the
   // browser back/forward case where `appliedSearch` flips without the
@@ -353,7 +445,7 @@ export default function ExpensesPage() {
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
         ...(categoryFilter ? { category_id: categoryFilter } : {}),
-        sort: '-date',
+        sort,
       });
       setSelectedIds(new Set(res.ids ?? []));
       setLastAnchorId(null);
@@ -1029,11 +1121,41 @@ export default function ExpensesPage() {
                     className="h-4 w-4 cursor-pointer rounded border-sand-300 text-curve-600 focus:ring-curve-500"
                   />
                 </th>
-                <th className="px-5 py-3">Entidade</th>
-                <th className="px-5 py-3">Montante</th>
-                <th className="px-5 py-3">Data</th>
-                <th className="px-5 py-3">Cartão</th>
-                <th className="px-5 py-3">Categoria</th>
+                <SortableHeader
+                  field="entity"
+                  label="Entidade"
+                  active={sortField === 'entity'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="amount"
+                  label="Montante"
+                  active={sortField === 'amount'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="date"
+                  label="Data"
+                  active={sortField === 'date'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="card"
+                  label="Cartão"
+                  active={sortField === 'card'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="category_name"
+                  label="Categoria"
+                  active={sortField === 'category_name'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
               </tr>
             </thead>
             <tbody>
