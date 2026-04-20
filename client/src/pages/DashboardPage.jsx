@@ -66,10 +66,12 @@ function formatLastSyncSub(emailsProcessed, lastEmailAt, lastSyncStatus) {
     // card still has something meaningful instead of "0 emails novos".
     return lastSyncStatus ?? null;
   }
-  const count = Number(emailsProcessed).toLocaleString('pt-PT');
-  if (!lastEmailAt) return `${count} emails novos`;
+  const n = Number(emailsProcessed);
+  const count = n.toLocaleString('pt-PT');
+  const noun = n === 1 ? 'email novo' : 'emails novos';
+  if (!lastEmailAt) return `${count} ${noun}`;
   const when = new Date(lastEmailAt);
-  if (Number.isNaN(when.getTime())) return `${count} emails novos`;
+  if (Number.isNaN(when.getTime())) return `${count} ${noun}`;
   const now = new Date();
   const sameDay =
     when.getFullYear() === now.getFullYear() &&
@@ -78,11 +80,11 @@ function formatLastSyncSub(emailsProcessed, lastEmailAt, lastSyncStatus) {
   if (sameDay) {
     const hh = String(when.getHours()).padStart(2, '0');
     const mm = String(when.getMinutes()).padStart(2, '0');
-    return `${count} emails novos às ${hh}:${mm}`;
+    return `${count} ${noun} às ${hh}:${mm}`;
   }
   const dd = String(when.getDate()).padStart(2, '0');
   const mon = String(when.getMonth() + 1).padStart(2, '0');
-  return `${count} emails novos a ${dd}/${mon}/${when.getFullYear()}`;
+  return `${count} ${noun} a ${dd}/${mon}/${when.getFullYear()}`;
 }
 
 // EUR formatter for month totals — parity with the currency style used
