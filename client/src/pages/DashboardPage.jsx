@@ -9,6 +9,8 @@ import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner'
 import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import { ArrowPathIcon } from '../components/layout/Icons';
 import CycleTrendSkeleton from '../components/dashboard/CycleTrendSkeleton';
+import StatCardSkeleton from '../components/dashboard/StatCardSkeleton';
+import RecentExpensesSkeleton from '../components/dashboard/RecentExpensesSkeleton';
 
 // recharts pulls in ~120 kB gzip of d3-* — bigger than the whole rest
 // of the dashboard combined. Splitting it into its own chunk means
@@ -92,6 +94,15 @@ function needsReauth({ syncStatus, oauthStatus }) {
 export default function DashboardPage() {
   const toast = useToast();
   const [syncing, setSyncing] = useState(false);
+  // First-paint flag — flips to false after the initial `loadDashboard`
+  // resolves (success or failure). Gates the KPI + recent-expenses
+  // skeletons so the dashboard never renders the "Sem despesas" empty
+  // state or "—" placeholder cards while data is still in flight.
+  // Deliberately NOT re-armed by `handleSync`: a manual sync already
+  // has data on screen, so swapping it out for skeletons would feel
+  // like a regression. Subsequent refreshes stay silent and the tween
+  // in AnimatedKPI handles the update.
+  const [loading, setLoading] = useState(true);
   const [recentExpenses, setRecentExpenses] = useState([]);
   const [stats, setStats] = useState(null);
   const [error, setError] = useState(null);
@@ -191,7 +202,7 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    loadDashboard();
+    loadDashboard().finally(() => setLoading(false));
   }, []);
 
   // ─── Undo-banner plumbing ───────────────────────────────────────
@@ -575,8 +586,20 @@ export default function DashboardPage() {
       {/* Stat cards — three numeric KPIs share AnimatedKPI so the
           numbers tween on every refresh (mount OR post-sync), not
           just first paint. Último sync stays on StatCard because its
-          value is relative-time text, not a number. */}
+          value is relative-time text, not a number. While `loading`
+          is true we render four StatCardSkeletons instead — same
+          shell, same footprint, so the grid doesn't shift when the
+          real values land. */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {loading ? (
+          <>
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+          </>
+        ) : (
+          <>
         <AnimatedKPI
           label="Despesas este mês"
           value={stats?.month_total}
@@ -639,6 +662,8 @@ export default function DashboardPage() {
               : (syncStatus?.last_sync_status ?? stats?.last_sync_status)
           }
         />
+          </>
+        )}
       </div>
 
       {/* Recent expenses */}
@@ -684,7 +709,13 @@ export default function DashboardPage() {
           <p className="mb-4 text-sm text-curve-600">{error}</p>
         )}
 
-        {recentExpenses.length === 0 ? (
+        {loading ? (
+          // While the initial fetch is in flight `recentExpenses` is
+          // still `[]`, which would otherwise trip the EmptyState below
+          // and falsely tell the user they have no expenses. Showing
+          // the skeleton here is the honest UX.
+          <RecentExpensesSkeleton />
+        ) : recentExpenses.length === 0 ? (
           <EmptyState
             title="Sem despesas"
             description="As despesas aparecerão aqui após a primeira sincronização."
