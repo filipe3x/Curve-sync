@@ -7,6 +7,7 @@ import AnimatedKPI from '../components/common/AnimatedKPI';
 import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 import { CategoryIcon } from '../components/common/CategoryIcon';
+import { formatExpenseDate } from '../utils/relativeDate';
 import {
   IconPickerGrid,
   IconPickerDialog,
@@ -879,7 +880,7 @@ function RecentExpenses({ categoryId }) {
         <tbody className="divide-y divide-sand-100">
           {rows.map((r) => (
             <tr key={r._id}>
-              <td className="px-4 py-2 text-sand-500">{r.date}</td>
+              <td className="px-4 py-2 text-sand-500">{formatExpenseDate(r.date)}</td>
               <td className="px-4 py-2 text-sand-900">{r.entity}</td>
               <td className="px-4 py-2 text-right font-medium text-curve-700">
                 {formatEUR(r.amount)}
