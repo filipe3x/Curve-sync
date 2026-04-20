@@ -158,41 +158,33 @@ router.get('/', async (req, res) => {
     if (typeof entity === 'string' && entity.trim() !== '') {
       filter.entity = entity;
     }
-    // Date range. `Expense.date` is a free-form string ("06 April 2026
-    // 08:53:31") so we can't compare it lexicographically — parse it
-    // Mongo-side via $dateFromString. Rows that fail to parse (onError:
-    // null) are excluded, which matches the graceful-skip contract of
-    // /categories/stats.
+    // Date range. `Expense.date` is a BSON `Date` (see models/Expense.js
+    // — the schema migrated off the legacy free-form string), so we
+    // compare against it natively via `$gte` / `$lte`. This also lets
+    // the query use the `{ user_id: 1, date: -1 }` compound index
+    // instead of scanning every row through an `$expr` pipeline.
+    //
+    // ⚠️  History: the previous implementation here wrapped the field
+    // in `$dateFromString: { dateString: '$date', onError: null }`,
+    // which was right for the old string schema but silently collapsed
+    // every BSON Date to `null` after the migration — the filter then
+    // matched 0 rows and the /expenses page rendered "Sem despesas
+    // entre …" for every valid range. Same class of bug as the
+    // dashboard-KPI regression documented in expenseStats.js §63-95.
     if (
       (typeof start === 'string' && start.trim() !== '') ||
       (typeof end === 'string' && end.trim() !== '')
     ) {
-      const conds = [];
+      const range = {};
       if (typeof start === 'string' && start.trim() !== '') {
         const s = new Date(`${start}T00:00:00.000Z`);
-        if (!Number.isNaN(s.getTime())) {
-          conds.push({
-            $gte: [
-              { $dateFromString: { dateString: '$date', onError: null } },
-              s,
-            ],
-          });
-        }
+        if (!Number.isNaN(s.getTime())) range.$gte = s;
       }
       if (typeof end === 'string' && end.trim() !== '') {
         const e = new Date(`${end}T23:59:59.999Z`);
-        if (!Number.isNaN(e.getTime())) {
-          conds.push({
-            $lte: [
-              { $dateFromString: { dateString: '$date', onError: null } },
-              e,
-            ],
-          });
-        }
+        if (!Number.isNaN(e.getTime())) range.$lte = e;
       }
-      if (conds.length) {
-        filter.$expr = conds.length === 1 ? conds[0] : { $and: conds };
-      }
+      if (Object.keys(range).length) filter.date = range;
     }
 
     // Pre-compute the user's exclusion set once — used both to filter

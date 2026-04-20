@@ -1,9 +1,9 @@
 /**
  * Unit tests for the non-disruptive filter helpers added to
  * `routes/expenses.js` in ROADMAP Fase 2.6. These cover the pure bits
- * (sort allowlist, regex escape) — the Mongo-side `$expr` date range
- * is exercised via integration by the frontend when it ships UI for
- * start/end.
+ * (sort allowlist, regex escape) — the Mongo-side date range is
+ * exercised via integration by the frontend through the `start`/`end`
+ * URL params on /expenses.
  *
  * The helpers are not exported from expenses.js (they're internals),
  * so we re-implement them here as test fixtures matching the canonical
