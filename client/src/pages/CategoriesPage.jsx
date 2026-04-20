@@ -20,6 +20,7 @@ import {
   IconPickerGrid,
   IconPickerDialog,
 } from '../components/common/IconPickerPopover';
+import CategoriesPageSkeleton from '../components/categories/CategoriesPageSkeleton';
 
 /**
  * /categories — master-detail category management screen.
@@ -2449,9 +2450,14 @@ export default function CategoriesPage() {
   // ── render ──────────────────────────────────────────────────────────
 
   if (loading && !statsCurrent) {
+    // Full-page skeleton — distribution bar + master-detail grid
+    // shaped like the loaded version, so the page doesn't shift when
+    // the data lands. PageHeader stays outside; the skeleton supplies
+    // its own cycle-label placeholder directly beneath it.
     return (
       <div className="mx-auto max-w-6xl">
-        <PageHeader title="Categorias" description="A carregar…" />
+        <PageHeader title="Categorias" />
+        <CategoriesPageSkeleton />
       </div>
     );
   }
