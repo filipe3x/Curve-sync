@@ -283,35 +283,64 @@ Este endpoint nao requer autenticacao (`skip_before_action`) para permitir a int
 
 ## Savings Score (Score de Poupanca)
 
-O sistema calcula um score semanal (0-10) baseado no orcamento mensal.
+O sistema calcula um score (0-10) baseado no orçamento semanal.
 
-### Logica
+### Janela temporal — **rolling 7 dias** no Curve Sync
 
-```ruby
-monthly_budget = 295.0  # EUR (hardcoded)
-weekly_budget  = 295.0 / 4.0  # ~73.75 EUR
+> ⚠️ **Divergência consciente face ao Embers.** No Embers a janela é
+> semana ISO (`Date.today.beginning_of_week .. end_of_week`, ou seja
+> Segunda 00:00 → Domingo 23:59). No Curve Sync a janela é **rolante
+> de 168 horas** — `weekStart = now − 7 × 24 h`, ver
+> `server/src/services/expenseStats.js:34,210`.
 
-# Se a pessoa gastou menos que o budget semanal:
-score = (log(weekly_savings + 1) / log(weekly_budget + 1)) * 10
+Motivo da mudança (ver também o JSDoc em `computeDashboardStats`):
 
-# Se gastou mais que o budget: score = 0
-# Se gastou exatamente o budget: score = 5
+1. **Sem reset artificial à Segunda.** Em ISO-week, €50 gastos
+   Domingo à noite desaparecem do score às 00:01 de Segunda mesmo sem
+   mudança de comportamento. Rolante mantém o gasto a pesar 7 dias.
+2. **Continuidade.** A janela desliza 1 s a cada segundo — sem saltos
+   discretos que tornem o score "cheio" aos Domingos e "vazio" às
+   Segundas.
+3. **Coerência com o ciclo mensal.** O mês do Curve Sync é ciclo
+   custom (dia 22, não calendar month — ver
+   [`CLAUDE.md` → Custom Monthly Cycle](../CLAUDE.md)). Combinar
+   semana ISO com mês custom seria incongruente.
+4. **Timezone-agnóstico.** `beginning_of_week` depende da locale do
+   server (Segunda em PT, Domingo em en-US). `now − 168 h` é
+   determinístico.
+5. **Sinal constante.** Cobre sempre exactamente 168 h — mesma
+   quantidade de dados independentemente da hora do pedido.
+
+### Lógica
+
+Fórmula herdada tal-e-qual do Embers:
+
+```js
+// server/src/services/expenseStats.js::computeSavingsScore
+weekly_budget  = config.weekly_budget  // default 73.75 (= 295/4)
+weekly_savings = weekly_budget − weekly_expenses
+
+if (weekly_savings <= 0) score = 0               // overspend
+else score = (log(weekly_savings + 1)
+            / log(weekly_budget + 1)) * 10
+score = clamp(score, 0, 10)                      // 1dp
 ```
 
-### Endpoint
+Pequenas divergências de arredondamento/edge-case face ao Embers
+(conscientes, não são bugs):
 
-```
-GET /admin/expenses/get_user_savings_score
-```
+| Situação | Embers | Curve Sync |
+|----------|--------|------------|
+| Gastou exactamente o budget (`weekly_savings == 0`) | score = 5 | score = 0 |
+| Arredondamento final | `score.round` (inteiro) | 1 decimal |
 
-**Resposta:**
-```json
-{
-  "savings_score": 7,
-  "week_expenses": 45.30,
-  "remaining_this_week": 28.45
-}
-```
+### Endpoints
+
+- **Curve Sync**: alimentado dentro do `meta` de `GET /api/expenses`
+  (campos `savings_score`, `weekly_expenses`, `weekly_savings`,
+  `weekly_budget`) — não há endpoint dedicado.
+- **Embers (legacy)**: `GET /admin/expenses/get_user_savings_score` —
+  resposta `{ savings_score, week_expenses, remaining_this_week }`.
 
 ---
 
