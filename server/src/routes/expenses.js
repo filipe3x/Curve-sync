@@ -29,12 +29,19 @@ function escapeRegex(s) {
 // Allowlist of sortable fields. Anything else falls back to `-date`
 // (default, chronological descending). `date` is a uniformly typed
 // BSON Date — see models/Expense.js.
+//
+// `category_name` is a virtual sort key: the field doesn't live on
+// `Expense` itself (the row stores `category_id`), so when the client
+// asks for it we switch the read path to an aggregation with a
+// `$lookup` on `categories`. The rest of the allowlist stays on the
+// fast `find()` path.
 const ALLOWED_SORT_FIELDS = new Set([
   'date',
   'amount',
   'entity',
   'card',
   'created_at',
+  'category_name',
 ]);
 
 function sanitiseSort(raw) {
@@ -65,7 +72,8 @@ function sanitiseSort(raw) {
 //   entity       — exact match on Expense.entity
 //   start        — YYYY-MM-DD lower bound (inclusive) on Expense.date
 //   end          — YYYY-MM-DD upper bound (inclusive) on Expense.date
-//   sort         — one of date/amount/entity/card/created_at ±. Default -date.
+//   sort         — one of date/amount/entity/card/created_at/category_name
+//                   with optional `-` prefix for descending. Default -date.
 // The legacy frontend (`ExpensesPage.jsx`) still only sends
 // page/limit/search/sort; new params are driven by UI that lands later.
 router.get('/', async (req, res) => {
@@ -158,41 +166,33 @@ router.get('/', async (req, res) => {
     if (typeof entity === 'string' && entity.trim() !== '') {
       filter.entity = entity;
     }
-    // Date range. `Expense.date` is a free-form string ("06 April 2026
-    // 08:53:31") so we can't compare it lexicographically — parse it
-    // Mongo-side via $dateFromString. Rows that fail to parse (onError:
-    // null) are excluded, which matches the graceful-skip contract of
-    // /categories/stats.
+    // Date range. `Expense.date` is a BSON `Date` (see models/Expense.js
+    // — the schema migrated off the legacy free-form string), so we
+    // compare against it natively via `$gte` / `$lte`. This also lets
+    // the query use the `{ user_id: 1, date: -1 }` compound index
+    // instead of scanning every row through an `$expr` pipeline.
+    //
+    // ⚠️  History: the previous implementation here wrapped the field
+    // in `$dateFromString: { dateString: '$date', onError: null }`,
+    // which was right for the old string schema but silently collapsed
+    // every BSON Date to `null` after the migration — the filter then
+    // matched 0 rows and the /expenses page rendered "Sem despesas
+    // entre …" for every valid range. Same class of bug as the
+    // dashboard-KPI regression documented in expenseStats.js §63-95.
     if (
       (typeof start === 'string' && start.trim() !== '') ||
       (typeof end === 'string' && end.trim() !== '')
     ) {
-      const conds = [];
+      const range = {};
       if (typeof start === 'string' && start.trim() !== '') {
         const s = new Date(`${start}T00:00:00.000Z`);
-        if (!Number.isNaN(s.getTime())) {
-          conds.push({
-            $gte: [
-              { $dateFromString: { dateString: '$date', onError: null } },
-              s,
-            ],
-          });
-        }
+        if (!Number.isNaN(s.getTime())) range.$gte = s;
       }
       if (typeof end === 'string' && end.trim() !== '') {
         const e = new Date(`${end}T23:59:59.999Z`);
-        if (!Number.isNaN(e.getTime())) {
-          conds.push({
-            $lte: [
-              { $dateFromString: { dateString: '$date', onError: null } },
-              e,
-            ],
-          });
-        }
+        if (!Number.isNaN(e.getTime())) range.$lte = e;
       }
-      if (conds.length) {
-        filter.$expr = conds.length === 1 ? conds[0] : { $and: conds };
-      }
+      if (Object.keys(range).length) filter.date = range;
     }
 
     // Pre-compute the user's exclusion set once — used both to filter
@@ -242,14 +242,56 @@ router.get('/', async (req, res) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    const [data, total] = await Promise.all([
-      Expense.find(filter)
-        .sort(safeSort)
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      Expense.countDocuments(filter),
-    ]);
+    const sortField = safeSort.startsWith('-') ? safeSort.slice(1) : safeSort;
+    const sortDesc = safeSort.startsWith('-');
+
+    let data;
+    let total;
+    if (sortField === 'category_name') {
+      // Virtual-field path: pull the category name via `$lookup` so
+      // the $sort stage can order on it. `_id` is used as a tiebreaker
+      // so paginated reads stay stable when many rows share a
+      // category. Uncategorised rows get an empty string so they
+      // cluster together at one end of the range (asc → top; desc →
+      // bottom) rather than scattering at random.
+      const sortDir = sortDesc ? -1 : 1;
+      const [aggData, aggTotal] = await Promise.all([
+        Expense.aggregate([
+          { $match: filter },
+          {
+            $lookup: {
+              from: 'categories',
+              localField: 'category_id',
+              foreignField: '_id',
+              as: '_cat',
+            },
+          },
+          {
+            $addFields: {
+              _category_name: {
+                $ifNull: [{ $arrayElemAt: ['$_cat.name', 0] }, ''],
+              },
+            },
+          },
+          { $sort: { _category_name: sortDir, _id: 1 } },
+          { $skip: skip },
+          { $limit: Number(limit) },
+          { $project: { _cat: 0, _category_name: 0 } },
+        ]),
+        Expense.countDocuments(filter),
+      ]);
+      data = aggData;
+      total = aggTotal;
+    } else {
+      [data, total] = await Promise.all([
+        Expense.find(filter)
+          .sort(safeSort)
+          .skip(skip)
+          .limit(Number(limit))
+          .lean(),
+        Expense.countDocuments(filter),
+      ]);
+    }
 
     // Attach category names
     const catIds = [...new Set(data.filter((e) => e.category_id).map((e) => e.category_id.toString()))];

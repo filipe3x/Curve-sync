@@ -1,15 +1,79 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { ChevronsUpDown, ChevronUp, ChevronDown } from 'lucide-react';
 import PageHeader from '../components/common/PageHeader';
 import EmptyState from '../components/common/EmptyState';
 import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
 import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
 import ExclusionUndoBanner from '../components/common/ExclusionUndoBanner';
 import ExpensesFilterChip from '../components/common/ExpensesFilterChip';
-import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '../components/layout/Icons';
+import { MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, FolderIcon, XMarkIcon } from '../components/layout/Icons';
 import { useToast } from '../contexts/ToastContext';
 import { formatAbsoluteDate, formatExpenseDateFull } from '../utils/relativeDate';
 import * as api from '../services/api';
+
+// Sort-key allowlist mirrors `ALLOWED_SORT_FIELDS` on the server
+// (routes/expenses.js). Unknown values fall back to the default
+// `-date` rather than poking an unknown field into the URL — cheap
+// defence-in-depth for hand-typed URLs.
+const SORTABLE_FIELDS = new Set([
+  'date',
+  'amount',
+  'entity',
+  'card',
+  'category_name',
+]);
+// Per-field "first click" direction. Columns where the interesting
+// extreme is "most recent / biggest" (date, amount) default to
+// descending so the first click reveals the top of the stack; text
+// columns default to ascending (A→Z) which matches every table-sort
+// UX convention.
+const DEFAULT_DESC_FIELDS = new Set(['date', 'amount']);
+const DEFAULT_SORT = '-date';
+
+function parseSort(raw) {
+  if (typeof raw !== 'string' || raw === '') return DEFAULT_SORT;
+  const desc = raw.startsWith('-');
+  const field = desc ? raw.slice(1) : raw;
+  if (!SORTABLE_FIELDS.has(field)) return DEFAULT_SORT;
+  return desc ? `-${field}` : field;
+}
+
+// Column header rendered as a button. Renders a subtle double-chevron
+// as a "sortable" affordance when inactive and a single chevron that
+// flips direction when active. Keeping the indicator small and sand-
+// toned so the header doesn't compete with the data below it.
+function SortableHeader({ field, label, active, direction, onSort, className = '' }) {
+  const Icon = !active ? ChevronsUpDown : direction === 'asc' ? ChevronUp : ChevronDown;
+  const nextDirLabel = active
+    ? direction === 'asc'
+      ? 'descendente'
+      : 'ascendente'
+    : DEFAULT_DESC_FIELDS.has(field)
+      ? 'descendente'
+      : 'ascendente';
+  return (
+    <th scope="col" className={`px-5 py-3 ${className}`}>
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+        title={`Ordenar por ${label.toLowerCase()} (${nextDirLabel})`}
+        className={`-mx-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-curve-500/30 ${
+          active ? 'text-curve-700' : 'text-sand-400 hover:text-sand-600'
+        }`}
+      >
+        <span>{label}</span>
+        <Icon
+          className={`h-3 w-3 shrink-0 transition-opacity ${
+            active ? 'opacity-100' : 'opacity-40'
+          }`}
+          aria-hidden
+        />
+      </button>
+    </th>
+  );
+}
 
 // Accepts strict YYYY-MM-DD only. Lax `Date.parse` behaviour (e.g.
 // "2026-4-1" without zero padding) would let malformed URLs slip
@@ -88,6 +152,24 @@ export default function ExpensesPage() {
     () => parseRange(searchParams),
     [searchParams],
   );
+  // Parsed sort keeps the single-string form the server expects
+  // (`date` / `-date`). We also split it for the header renderers
+  // which only care about the field + direction separately.
+  const sort = parseSort(searchParams.get('sort'));
+  const sortField = sort.startsWith('-') ? sort.slice(1) : sort;
+  const sortDirection = sort.startsWith('-') ? 'desc' : 'asc';
+  // Deep-link from /categories → /expenses ("Ver todas →"). Mirrors the
+  // server's contract on GET /api/expenses: an ObjectId narrows to that
+  // category; the synthetic strings `null` / `uncategorised` both map
+  // to the "Sem categoria" bucket. Anything else (malformed id) falls
+  // through as no-filter — the URL gets scrubbed on the next navigation.
+  const rawCategoryId = searchParams.get('category_id');
+  const categoryFilter =
+    rawCategoryId === 'null' || rawCategoryId === 'uncategorised'
+      ? 'null'
+      : /^[a-f0-9]{24}$/i.test(rawCategoryId ?? '')
+        ? rawCategoryId
+        : null;
 
   const [expenses, setExpenses] = useState([]);
   const [total, setTotal] = useState(0);
@@ -180,6 +262,34 @@ export default function ExpensesPage() {
       p.delete('page');
     });
   };
+  const clearCategoryFilter = () => {
+    updateParams((p) => {
+      p.delete('category_id');
+      p.delete('page');
+    });
+  };
+  // Header click — toggles direction on the active column, or swaps
+  // to the clicked column at that column's "natural" default direction
+  // (desc for numeric / chronological; asc for alphabetical text).
+  // The default sort (`-date`) is represented by dropping the param so
+  // the URL stays clean for the common case.
+  const applySort = (field) => {
+    if (!SORTABLE_FIELDS.has(field)) return;
+    updateParams((p) => {
+      const current = parseSort(p.get('sort'));
+      const currentField = current.startsWith('-') ? current.slice(1) : current;
+      const currentDesc = current.startsWith('-');
+      let next;
+      if (currentField === field) {
+        next = currentDesc ? field : `-${field}`;
+      } else {
+        next = DEFAULT_DESC_FIELDS.has(field) ? `-${field}` : field;
+      }
+      if (next === DEFAULT_SORT) p.delete('sort');
+      else p.set('sort', next);
+      p.delete('page');
+    });
+  };
 
   // Invalid-range recovery. Runs once per URL change — if parseRange
   // flagged a malformed or inverted range, surface a toast and scrub
@@ -223,7 +333,8 @@ export default function ExpensesPage() {
         // happily refuse to parse. Guard here, not at the API layer.
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
-        sort: '-date',
+        ...(categoryFilter ? { category_id: categoryFilter } : {}),
+        sort,
       });
       setExpenses(res.data ?? []);
       setTotal(res.meta?.total ?? 0);
@@ -240,7 +351,7 @@ export default function ExpensesPage() {
     if (rangeError) return;
     fetchExpenses();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, appliedSearch, start, end, rangeError]);
+  }, [page, appliedSearch, start, end, categoryFilter, sort, rangeError]);
 
   // Keep the search input in sync with URL changes — covers the
   // browser back/forward case where `appliedSearch` flips without the
@@ -333,7 +444,8 @@ export default function ExpensesPage() {
         search: appliedSearch,
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
-        sort: '-date',
+        ...(categoryFilter ? { category_id: categoryFilter } : {}),
+        sort,
       });
       setSelectedIds(new Set(res.ids ?? []));
       setLastAnchorId(null);
@@ -804,6 +916,43 @@ export default function ExpensesPage() {
         onClear={clearDateRange}
       />
 
+      {/* Active category-filter chip. Hydrates from the `category_id`
+          URL param so the deep-link from /categories → /expenses
+          "Ver todas →" renders as a visible, dismissable filter rather
+          than a silent server-side narrowing. Matches the date chip's
+          look + clear affordance for consistency. */}
+      {categoryFilter && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-4 flex animate-slide-in-right items-center gap-3 rounded-2xl border border-sand-200 bg-sand-50 px-4 py-2.5 text-sm text-sand-700"
+        >
+          <FolderIcon className="h-4 w-4 shrink-0 text-sand-500" />
+          <span className="min-w-0 flex-1 truncate">
+            <span className="font-medium text-sand-900">
+              {categoryFilter === 'null'
+                ? 'Sem categoria'
+                : categories.find(
+                    (c) => String(c._id) === String(categoryFilter),
+                  )?.name ?? 'Categoria'}
+            </span>
+            <span className="ml-2 text-xs text-sand-500">
+              · {total.toLocaleString('pt-PT')}{' '}
+              {total === 1 ? 'despesa' : 'despesas'}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={clearCategoryFilter}
+            aria-label="Limpar filtro de categoria"
+            title="Limpar filtro de categoria"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sand-500 transition-colors hover:bg-sand-200 hover:text-sand-700 focus:outline-none focus:ring-2 focus:ring-curve-500/30"
+          >
+            <XMarkIcon className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Search bar */}
       <form onSubmit={handleSearch} className="mb-6 flex gap-3">
         <div className="relative flex-1">
@@ -972,11 +1121,41 @@ export default function ExpensesPage() {
                     className="h-4 w-4 cursor-pointer rounded border-sand-300 text-curve-600 focus:ring-curve-500"
                   />
                 </th>
-                <th className="px-5 py-3">Entidade</th>
-                <th className="px-5 py-3">Montante</th>
-                <th className="px-5 py-3">Data</th>
-                <th className="px-5 py-3">Cartão</th>
-                <th className="px-5 py-3">Categoria</th>
+                <SortableHeader
+                  field="entity"
+                  label="Entidade"
+                  active={sortField === 'entity'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="amount"
+                  label="Montante"
+                  active={sortField === 'amount'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="date"
+                  label="Data"
+                  active={sortField === 'date'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="card"
+                  label="Cartão"
+                  active={sortField === 'card'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
+                <SortableHeader
+                  field="category_name"
+                  label="Categoria"
+                  active={sortField === 'category_name'}
+                  direction={sortDirection}
+                  onSort={applySort}
+                />
               </tr>
             </thead>
             <tbody>

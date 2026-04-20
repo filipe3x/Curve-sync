@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CalendarOff, CalendarCheck } from 'lucide-react';
 import { MagnifyingGlassIcon } from '../layout/Icons';
 import { CategoryIcon } from './CategoryIcon';
@@ -110,6 +110,23 @@ export default function CategoryPickerPopover({
   const panelRef = useRef(null);
   const searchRef = useRef(null);
   const [query, setQuery] = useState('');
+  // Vertical flip state. Defaults to false (open downward, original
+  // behaviour). The useLayoutEffect below measures the viewport
+  // against the panel's actual height and flips to open upward when
+  // the anchor is near the bottom of the viewport AND there's more
+  // room above than below. Bullet-proofed for:
+  //   - Late measurement (useLayoutEffect runs before first paint,
+  //     so the flipped state lands on the first visible frame — no
+  //     flicker).
+  //   - Window resize / orientation change while the popover is
+  //     open (listener re-runs the decision).
+  //   - Extreme viewport with neither side fitting: falls back to
+  //     a minimal scrollIntoView nudge on the final layout.
+  // Works uniformly across every call-site because every caller
+  // already wraps the popover in a `position: relative` parent
+  // (the table `<td>`, the bulk action-bar `<div>`), which is
+  // the anchor we measure against.
+  const [openUpward, setOpenUpward] = useState(false);
 
   const isBulk = context?.kind === 'bulk';
   // Bulk selection spans multiple expenses, typically with mixed
@@ -132,6 +149,60 @@ export default function CategoryPickerPopover({
   useEffect(() => {
     searchRef.current?.focus();
   }, []);
+
+  // Flip-direction decision. Runs BEFORE paint (useLayoutEffect) so
+  // a popover that needs to open upward never flashes at the bottom
+  // first. The logic is intentionally pure geometry:
+  //
+  //   space_below = viewport_height - anchor_bottom - margin
+  //   space_above = anchor_top - margin
+  //   flip_upward = height > space_below AND space_above > space_below
+  //
+  // i.e. flip only when (a) there isn't enough room below AND
+  // (b) above has more room. If both sides are cramped we still
+  // pick the roomier side, and the second effect below nudges into
+  // view if even that isn't enough.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const anchor = panel.parentElement;
+    if (!anchor) return;
+
+    const MARGIN = 8;
+    const decide = () => {
+      const anchorRect = anchor.getBoundingClientRect();
+      const height = panel.offsetHeight;
+      const vh = window.innerHeight;
+      const spaceBelow = vh - anchorRect.bottom - MARGIN;
+      const spaceAbove = anchorRect.top - MARGIN;
+      const shouldFlip = height > spaceBelow && spaceAbove > spaceBelow;
+      setOpenUpward(shouldFlip);
+    };
+    decide();
+
+    // Re-measure on resize / orientation change. Deliberately NOT
+    // listening to scroll — re-flipping mid-interaction is more
+    // disruptive than the popover staying put, and the common scroll
+    // sources (wheel, touch) don't close the popover so the user can
+    // just keep their scroll going.
+    window.addEventListener('resize', decide);
+    return () => window.removeEventListener('resize', decide);
+  }, []);
+
+  // Safety-net scroll. Runs AFTER paint (useEffect, not layout) so
+  // we measure the popover in its final flipped position. If either
+  // edge still overflows — true only for extreme viewports or very
+  // tall custom category lists — nudge it into view with the
+  // minimum amount the browser will accept (`block: 'nearest'`).
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const vh = window.innerHeight;
+    if (rect.top < 0 || rect.bottom > vh) {
+      panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [openUpward]);
 
   // Dismiss on Escape + click outside. Both paths call onCancel so the
   // parent can close the popover uniformly.
@@ -205,7 +276,9 @@ export default function CategoryPickerPopover({
       ref={panelRef}
       role="dialog"
       aria-label="Alterar categoria"
-      className={`absolute right-0 top-full z-30 mt-2 w-80 rounded-2xl border p-4 animate-fade-in ${glassClass}`}
+      className={`absolute right-0 z-30 w-80 rounded-2xl border p-4 animate-fade-in ${
+        openUpward ? 'bottom-full mb-2' : 'top-full mt-2'
+      } ${glassClass}`}
       // Keep clicks inside the popover from bubbling up to the table
       // row — the row's hover state should not flicker while the user
       // navigates inside the picker.

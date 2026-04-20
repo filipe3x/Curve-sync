@@ -7,6 +7,15 @@ import AnimatedKPI from '../components/common/AnimatedKPI';
 import { useAuth } from '../contexts/AuthContext';
 import * as api from '../services/api';
 import { CategoryIcon } from '../components/common/CategoryIcon';
+import CategoryPickerPopover from '../components/common/CategoryPickerPopover';
+import CategoryEditUndoBanner from '../components/common/CategoryEditUndoBanner';
+import { ArrowRightLeft } from 'lucide-react';
+import { formatExpenseDate } from '../utils/relativeDate';
+
+// Grace window for the quick-edit undo banner. Matches
+// /expenses and / (dashboard) so the mental model stays identical
+// across every surface that hosts the popover.
+const RECENT_EDIT_UNDO_WINDOW_MS = 6000;
 import {
   IconPickerGrid,
   IconPickerDialog,
@@ -817,17 +826,30 @@ function GlobalEntitiesList({
 }
 
 
-function RecentExpenses({ categoryId }) {
+function RecentExpenses({ categoryId, categories, iconByCategory }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Single-open popover — same constraint as the /expenses and
+  // / (dashboard) implementations.
+  const [pickerExpenseId, setPickerExpenseId] = useState(null);
+  const [pickerSaving, setPickerSaving] = useState(false);
+  // Undo state. One entry at a time keeps this auxiliary view simple;
+  // if the user triggers a second quick-edit before the timer expires
+  // we overwrite (same row) or replace (different row) — the rapid-fire
+  // case isn't the common path here.
+  const [undoEntry, setUndoEntry] = useState(null);
+  const [errorToast, setErrorToast] = useState(null);
+  const undoTimerRef = useRef(null);
+
+  // `'__null__'` is the local sentinel for the uncategorised bucket
+  // (see the master list selection state). The server / /expenses URL
+  // expect the literal string `null` for that bucket instead.
+  const param =
+    categoryId === '__null__' || categoryId === null ? 'null' : categoryId;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const param =
-      categoryId === '__null__' || categoryId === null
-        ? 'null'
-        : categoryId;
     api
       .getExpenses({
         page: 1,
@@ -847,7 +869,115 @@ function RecentExpenses({ categoryId }) {
     return () => {
       cancelled = true;
     };
+  }, [categoryId, param]);
+
+  // Clear picker/undo state when the selected category changes — the
+  // rows list about to refetch belongs to a different slice, and a
+  // stale undo entry could overwrite a row the user didn't edit here.
+  useEffect(() => {
+    setPickerExpenseId(null);
+    setUndoEntry(null);
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
   }, [categoryId]);
+
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!errorToast) return;
+    const t = setTimeout(() => setErrorToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [errorToast]);
+
+  const scheduleUndoDismiss = () => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => {
+      setUndoEntry(null);
+      undoTimerRef.current = null;
+    }, RECENT_EDIT_UNDO_WINDOW_MS);
+  };
+
+  // Quick-edit save mirrors the canonical flow (docs/Categories.md
+  // §12.4): optimistic chip swap, PUT, rollback on failure, undo
+  // banner on success.
+  const handleCategorySave = async (expenseId, newCategoryId) => {
+    const prev = rows;
+    const prevRow = prev.find((e) => e._id === expenseId);
+    if (!prevRow) return;
+    const entity = prevRow.entity ?? '';
+    const prevCategoryId = prevRow.category_id ?? null;
+    const prevCategoryName = prevRow.category_name ?? null;
+    const newCategoryName = newCategoryId
+      ? (categories ?? []).find((c) => String(c._id) === String(newCategoryId))?.name ?? null
+      : null;
+    setRows((r) =>
+      r.map((e) =>
+        e._id === expenseId
+          ? { ...e, category_id: newCategoryId, category_name: newCategoryName }
+          : e,
+      ),
+    );
+    setPickerSaving(true);
+    try {
+      const res = await api.updateExpenseCategory(expenseId, newCategoryId);
+      setRows((r) =>
+        r.map((e) => (e._id === expenseId ? { ...e, ...res.data } : e)),
+      );
+      setUndoEntry({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        expenseId,
+        entity,
+        prevCategoryId,
+        prevCategoryName,
+        nextCategoryName: res.data?.category_name ?? newCategoryName,
+      });
+      scheduleUndoDismiss();
+      setPickerExpenseId(null);
+    } catch (err) {
+      setRows(prev);
+      setErrorToast(err?.message ?? 'Não foi possível actualizar a categoria.');
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  const handleUndoCategoryEdit = async (entry) => {
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    setUndoEntry((e) => (e && e.id === entry.id ? { ...e, undoing: true } : e));
+    const prevRows = rows;
+    setRows((r) =>
+      r.map((e) =>
+        e._id === entry.expenseId
+          ? {
+              ...e,
+              category_id: entry.prevCategoryId,
+              category_name: entry.prevCategoryName,
+            }
+          : e,
+      ),
+    );
+    try {
+      const res = await api.updateExpenseCategory(entry.expenseId, entry.prevCategoryId);
+      setRows((r) =>
+        r.map((e) => (e._id === entry.expenseId ? { ...e, ...res.data } : e)),
+      );
+      setUndoEntry(null);
+    } catch (err) {
+      setRows(prevRows);
+      setUndoEntry((e) => (e && e.id === entry.id ? { ...e, undoing: false } : e));
+      setErrorToast(err?.message ?? 'Não foi possível anular a alteração.');
+      scheduleUndoDismiss();
+    }
+  };
 
   if (loading) {
     return (
@@ -867,34 +997,83 @@ function RecentExpenses({ categoryId }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-sand-200 bg-white">
-      <table className="w-full text-sm">
-        <thead className="bg-sand-50 text-xs uppercase tracking-wide text-sand-400">
-          <tr>
-            <th className="px-4 py-2 text-left">Data</th>
-            <th className="px-4 py-2 text-left">Entidade</th>
-            <th className="px-4 py-2 text-right">Montante</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-sand-100">
-          {rows.map((r) => (
-            <tr key={r._id}>
-              <td className="px-4 py-2 text-sand-500">{r.date}</td>
-              <td className="px-4 py-2 text-sand-900">{r.entity}</td>
-              <td className="px-4 py-2 text-right font-medium text-curve-700">
-                {formatEUR(r.amount)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="border-t border-sand-100 px-4 py-3 text-right">
-        <Link
-          to="/expenses"
-          className="text-xs font-medium text-curve-700 hover:underline"
+    <div className="space-y-3">
+      {errorToast && (
+        <div
+          role="alert"
+          className="rounded-2xl bg-red-50 px-4 py-3 text-sm text-curve-700 animate-slide-in-right"
         >
-          Ver todas →
-        </Link>
+          {errorToast}
+        </div>
+      )}
+      <CategoryEditUndoBanner
+        edits={undoEntry ? [undoEntry] : []}
+        onUndo={handleUndoCategoryEdit}
+      />
+      <div
+        /* `overflow-hidden` would clip the picker popover that escapes
+           the action column. Toggle it off while a picker is open,
+           same trick used on /expenses and the dashboard. */
+        className={`rounded-2xl border border-sand-200 bg-white ${
+          pickerExpenseId ? '' : 'overflow-hidden'
+        }`}
+      >
+        <table className="w-full text-sm">
+          <thead className="bg-sand-50 text-xs uppercase tracking-wide text-sand-400">
+            <tr>
+              <th className="px-4 py-2 text-left">Data</th>
+              <th className="px-4 py-2 text-left">Entidade</th>
+              <th className="px-4 py-2 text-right">Montante</th>
+              <th className="w-10 px-2 py-2" aria-label="Alterar categoria" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-sand-100">
+            {rows.map((r) => {
+              const pickerOpen = pickerExpenseId === r._id;
+              return (
+                <tr key={r._id}>
+                  <td className="px-4 py-2 text-sand-500">{formatExpenseDate(r.date)}</td>
+                  <td className="px-4 py-2 text-sand-900">{r.entity}</td>
+                  <td className="px-4 py-2 text-right font-medium text-curve-700">
+                    {formatEUR(r.amount)}
+                  </td>
+                  <td className="relative w-10 px-2 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => setPickerExpenseId(r._id)}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-sand-500 transition-colors hover:bg-sand-100 hover:text-curve-700 focus:outline-none focus:ring-2 focus:ring-curve-500/30"
+                      aria-label={`Alterar categoria de ${r.entity}`}
+                      title="Alterar categoria"
+                    >
+                      <ArrowRightLeft className="h-4 w-4" />
+                    </button>
+                    {pickerOpen && (
+                      <CategoryPickerPopover
+                        expense={r}
+                        categories={categories ?? []}
+                        iconByCategory={iconByCategory ?? new Map()}
+                        saving={pickerSaving}
+                        onSelect={(newId) => handleCategorySave(r._id, newId)}
+                        onCancel={() => {
+                          if (pickerSaving) return;
+                          setPickerExpenseId(null);
+                        }}
+                      />
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="border-t border-sand-100 px-4 py-3 text-right">
+          <Link
+            to={`/expenses?category_id=${encodeURIComponent(param)}`}
+            className="text-xs font-medium text-curve-700 hover:underline"
+          >
+            Ver todas →
+          </Link>
+        </div>
       </div>
     </div>
   );
@@ -2687,7 +2866,11 @@ export default function CategoriesPage() {
                   )}
                 </div>
               ) : (
-                <RecentExpenses categoryId={selectedRow.category_id} />
+                <RecentExpenses
+                  categoryId={selectedRow.category_id}
+                  categories={categories}
+                  iconByCategory={iconByCategory}
+                />
               )}
             </>
           ) : (
