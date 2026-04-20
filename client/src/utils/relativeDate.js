@@ -8,7 +8,7 @@
 //   --------------------      ----------------------
 //   < 60 s                    "há segundos"
 //   < 60 min (same day)       "há N min"
-//   < 24 h   (same day)       "há 1 hora" / "há N horas"
+//   < 24 h   (same day)       "há N h"
 //   1 civil day               "ontem"
 //   2 civil days              "anteontem"
 //   3–5 civil days            "há N dias"
@@ -98,7 +98,7 @@ export function formatExpenseDate(input, now) {
       return `há ${min} min`;
     }
     const hr = Math.floor(diffMs / 3_600_000);
-    return `há ${hr} ${hr === 1 ? 'hora' : 'horas'}`;
+    return `há ${hr} h`;
   }
   if (dayDiff === 1) return 'ontem';
   if (dayDiff === 2) return 'anteontem';
