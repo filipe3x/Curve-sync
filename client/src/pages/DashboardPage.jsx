@@ -51,6 +51,40 @@ function formatRelativePt(iso) {
   return `há ${days} d`;
 }
 
+// Subtitle for the "Último sync" card. The card's main value is anchored
+// to `last_sync_at` — the timestamp of the *most recent* sync run —
+// while `emails_processed_total` is cumulative and only bumped on real
+// inserts (see syncOrchestrator.js:671). Pairing the two directly reads
+// as "N emails processed 9 min ago", which is wrong when the last run
+// brought zero new receipts: the 12 in the total came in at some
+// earlier moment. To stop that mismatch we anchor the count to
+// `last_email_at` instead — the stamp of the last real insert — and
+// label accordingly: today → "às HH:MM", otherwise "a DD/MM/YYYY".
+function formatLastSyncSub(emailsProcessed, lastEmailAt, lastSyncStatus) {
+  if (!emailsProcessed) {
+    // No inserts yet: fall back to the sync status (ok / error) so the
+    // card still has something meaningful instead of "0 emails novos".
+    return lastSyncStatus ?? null;
+  }
+  const count = Number(emailsProcessed).toLocaleString('pt-PT');
+  if (!lastEmailAt) return `${count} emails novos`;
+  const when = new Date(lastEmailAt);
+  if (Number.isNaN(when.getTime())) return `${count} emails novos`;
+  const now = new Date();
+  const sameDay =
+    when.getFullYear() === now.getFullYear() &&
+    when.getMonth() === now.getMonth() &&
+    when.getDate() === now.getDate();
+  if (sameDay) {
+    const hh = String(when.getHours()).padStart(2, '0');
+    const mm = String(when.getMinutes()).padStart(2, '0');
+    return `${count} emails novos às ${hh}:${mm}`;
+  }
+  const dd = String(when.getDate()).padStart(2, '0');
+  const mon = String(when.getMonth() + 1).padStart(2, '0');
+  return `${count} emails novos a ${dd}/${mon}/${when.getFullYear()}`;
+}
+
 // EUR formatter for month totals — parity with the currency style used
 // across /expenses so €€€ never rendered with mixed separators.
 const EUR = new Intl.NumberFormat('pt-PT', {
@@ -203,6 +237,19 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadDashboard().finally(() => setLoading(false));
+  }, []);
+
+  // 1-min wall-clock ticker so "há N min" on the Último sync card
+  // advances while the tab stays open. Without it, formatRelativePt
+  // only re-runs when loadDashboard refetches — a quiet tab can show
+  // "há 9 min" for an hour. `nowTick` is read inside the JSX below so
+  // every bump forces a re-render of the relative-time labels.
+  // Deliberately coarse (60 s): the minute-band text only flips once
+  // per minute anyway and a subminute tick wastes wake-ups.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setNowTick((n) => n + 1), 60_000);
+    return () => clearInterval(id);
   }, []);
 
   // ─── Undo-banner plumbing ───────────────────────────────────────
@@ -656,11 +703,11 @@ export default function DashboardPage() {
           value={formatRelativePt(
             syncStatus?.last_sync_at ?? stats?.last_sync_at,
           )}
-          sub={
-            stats?.emails_processed != null
-              ? `${stats.emails_processed.toLocaleString('pt-PT')} emails processados`
-              : (syncStatus?.last_sync_status ?? stats?.last_sync_status)
-          }
+          sub={formatLastSyncSub(
+            stats?.emails_processed,
+            syncStatus?.last_email_at,
+            syncStatus?.last_sync_status ?? stats?.last_sync_status,
+          )}
         />
           </>
         )}
