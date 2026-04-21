@@ -47,7 +47,7 @@ import {
 } from '@azure/msal-node';
 
 import { createCachePlugin } from './oauthCachePlugin.js';
-import { audit } from './audit.js';
+import { audit as realAudit } from './audit.js';
 
 const SCOPES_BY_PROVIDER = {
   microsoft: [
@@ -141,11 +141,15 @@ export function buildMsalApp(config, overrides = {}) {
  * @param {object} config CurveConfig document
  * @param {object} [overrides] Test-only. `{ app }` lets a caller
  *   inject a pre-built PCA stub, bypassing `buildMsalApp` entirely.
+ *   `{ audit }` replaces the real CurveLog writer so tests can assert
+ *   on the audit call without touching MongoDB — production always
+ *   uses `./audit.js` (fire-and-forget writer).
  * @returns {Promise<string>} The access token.
  * @throws {OAuthReAuthRequired} When the refresh token is expired,
  *   the cache is empty/corrupt, or consent was revoked.
  */
 export async function getOAuthToken(config, overrides = {}) {
+  const audit = overrides.audit || realAudit;
   if (!config?.oauth_provider) {
     throw new Error(
       'getOAuthToken called on a config without oauth_provider',

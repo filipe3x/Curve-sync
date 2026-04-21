@@ -2,14 +2,24 @@
 /**
  * Dev helper: reset \Seen flags on the configured IMAP folder.
  *
- * Connects to the IMAP server using the stored CurveConfig credentials,
- * opens the configured folder (e.g. "Curve Receipts"), finds all
- * messages currently flagged \Seen, and removes the flag — making them
- * UNSEEN again so the next `POST /sync` reprocesses them.
+ * Connects to the IMAP server using the stored CurveConfig credentials
+ * (OAuth2 **or** legacy App Password), opens the configured folder
+ * (e.g. "Curve Receipts"), finds all messages currently flagged \Seen,
+ * and removes the flag — making them UNSEEN again so the next
+ * `POST /sync` reprocesses them.
  *
  * This is the IMAP-side counterpart of `cleanup-sync.js`: run cleanup
  * first (to wipe Expenses + CurveLogs from Mongo), then reset-seen
  * (to unmark the emails), then sync again from scratch.
+ *
+ * Auth branches (mirrors `createImapReader` in src/services/imapReader.js):
+ *   - **OAuth (wizard path)**: `config.oauth_provider` is set. We ask
+ *     the MSAL cache plugin for a fresh access token via
+ *     `getOAuthToken(config)` and pass `{ user, accessToken }` to
+ *     imapflow, which speaks XOAUTH2 SASL.
+ *   - **Legacy App Password**: `config.oauth_provider` is null. We use
+ *     `{ user, pass }` from the config's `imap_password` field (which
+ *     the in-app AES-GCM decryption has already resolved).
  *
  * Safety:
  *   - Prints a summary of what it will do BEFORE acting
@@ -21,7 +31,13 @@
  *   cd server && node scripts/reset-seen.js
  *
  * Env:
- *   MONGODB_URI — same as the dev server (.env)
+ *   MONGODB_URI         — same as the dev server (.env)
+ *   IMAP_ENCRYPTION_KEY — required for OAuth configs (decrypts the
+ *                         MSAL token cache). Must match the value the
+ *                         wizard used when writing the config.
+ *   AZURE_CLIENT_ID,
+ *   AZURE_TENANT_ID     — required for OAuth configs (MSAL needs them
+ *                         to exchange the refresh token).
  */
 
 import mongoose from 'mongoose';
@@ -32,6 +48,10 @@ import dotenv from 'dotenv';
 import { ImapFlow } from 'imapflow';
 
 import CurveConfig from '../src/models/CurveConfig.js';
+import {
+  getOAuthToken,
+  OAuthReAuthRequired,
+} from '../src/services/oauthManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -66,17 +86,46 @@ async function main() {
 
   const folder = config.imap_folder || 'INBOX';
   const useTls = config.imap_tls !== false;
+  const authMode = config.oauth_provider
+    ? `OAuth (${config.oauth_provider})`
+    : 'App Password (legacy)';
   console.log(`  server:  ${config.imap_server}:${config.imap_port ?? (useTls ? 993 : 1993)}`);
   console.log(`  user:    ${config.imap_username}`);
   console.log(`  folder:  ${folder}`);
   console.log(`  TLS:     ${useTls}`);
+  console.log(`  auth:    ${authMode}`);
+
+  // Resolve the imapflow `auth` shape based on the config branch. OAuth
+  // configs go through MSAL's silent-refresh path (getOAuthToken) and
+  // hand imapflow `{ user, accessToken }` for XOAUTH2 SASL. Legacy
+  // configs keep the original `{ user, pass }` path.
+  let auth;
+  if (config.oauth_provider) {
+    try {
+      const accessToken = await getOAuthToken(config);
+      auth = { user: config.imap_username, accessToken };
+    } catch (e) {
+      if (e instanceof OAuthReAuthRequired) {
+        console.error(
+          '\nFATAL: OAuth re-auth required — abre a wizard em /curve/setup ' +
+            'e volta a autorizar a conta antes de correr este script.',
+        );
+        console.error(`  detail: ${e.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      throw e;
+    }
+  } else {
+    auth = { user: config.imap_username, pass: config.imap_password };
+  }
 
   // Connect to IMAP.
   const client = new ImapFlow({
     host: config.imap_server,
     port: config.imap_port ?? (useTls ? 993 : 1993),
     secure: useTls,
-    auth: { user: config.imap_username, pass: config.imap_password },
+    auth,
     logger: false,
   });
   client.on('error', () => {}); // prevent unhandled crash

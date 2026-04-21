@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import CurveConfig from '../models/CurveConfig.js';
 import CurveLog from '../models/CurveLog.js';
 import User from '../models/User.js';
@@ -19,6 +20,12 @@ import {
 } from '../services/scheduler.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { audit, clientIp } from '../services/audit.js';
+import {
+  cycleBoundsFor,
+  cycleBoundsForUser,
+  formatISODate,
+  normaliseCycleDay,
+} from '../services/cycle.js';
 import oauthRouter from './curveOAuth.js';
 
 const router = Router();
@@ -27,6 +34,38 @@ const router = Router();
 // inherits the `authenticate` middleware applied to /api/curve in
 // index.js. See server/src/routes/curveOAuth.js for the endpoint list.
 router.use('/oauth', oauthRouter);
+
+// Per-user sync limiter — tight half of the hybrid scheme. The loose
+// per-IP ceiling lives in server/src/index.js at /api/curve/sync and
+// catches shared-NAT / multi-account DDoS; this one catches the
+// individual-account variant (a single logged-in user hammering
+// "Sincronizar agora" or scripting against POST /api/curve/sync).
+// Because curveRouter is mounted AFTER `authenticate` in index.js,
+// req.userId is guaranteed to be populated by the time keyGenerator
+// runs. The IP fallback exists only as a defensive no-op in case
+// the middleware order ever changes — with the current wiring it is
+// unreachable. The `user:`/`ip:` prefixes namespace the two buckets
+// so a user id can never collide with someone's IP string.
+//
+// IPv6 note: the IP fallback funnels req.ip through `ipKeyGenerator`
+// (re-exported by express-rate-limit) instead of using the raw string.
+// Without it, express-rate-limit v8 throws ERR_ERL_KEY_GEN_IPV6 at
+// startup because a naive req.ip fallback would let an IPv6 client
+// rotate through every address in their /64 to bypass the bucket.
+// `ipKeyGenerator` collapses an IPv6 address to its /56 prefix and
+// passes IPv4 through unchanged, so a single host gets exactly one
+// bucket regardless of address family. This branch only fires if the
+// `authenticate` middleware ever stops running before the limiter,
+// but the helper is cheap and silences the validator unconditionally.
+const perUserSyncLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 3,              // 3 syncs per minute, per authenticated user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) =>
+    req.userId ? `user:${req.userId}` : `ip:${ipKeyGenerator(req.ip)}`,
+  message: { error: 'Demasiados pedidos de sync. Aguarda um momento.' },
+});
 
 /**
  * Return a plain-object copy of a CurveConfig with imap_password
@@ -74,17 +113,36 @@ router.put('/config', async (req, res) => {
     const {
       imap_server, imap_port, imap_username, imap_password, imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
-      imap_since, max_emails_per_run,
+      max_emails_per_run,
+      sync_cycle_day, weekly_budget,
       confirm_folder,
     } = req.body;
+    // `imap_since` is intentionally not accepted here — the SINCE
+    // filter is derived exclusively from `sync_cycle_day` in
+    // imapReader.js :: defaultSince. Any user-facing override would
+    // defeat the "current cycle only" invariant; if you need more
+    // control in the future, extend `sync_cycle_day` semantics rather
+    // than re-introducing a date field.
 
     const update = {
       imap_server, imap_port, imap_username,
       imap_password: imap_password ? encrypt(imap_password) : undefined,
       imap_tls,
       imap_folder, sync_enabled, sync_interval_minutes,
-      imap_since: imap_since ? new Date(imap_since) : null,
       max_emails_per_run: max_emails_per_run != null ? Number(max_emails_per_run) : undefined,
+      // Clamp on write so the DB never holds a value cycleBoundsFor
+      // would reject. Omit from the update when the caller didn't
+      // send the field, so partial PUTs (e.g. wizard's folder-only
+      // save) don't stomp on a previously-set cycle day.
+      sync_cycle_day:
+        sync_cycle_day != null ? normaliseCycleDay(sync_cycle_day) : undefined,
+      // Parse + clamp to a non-negative finite number. Mongoose's `min: 0`
+      // still runs on the update via runValidators, but parsing up-front
+      // keeps "73,75" strings and "Infinity" out of the DB entirely.
+      weekly_budget:
+        weekly_budget != null && Number.isFinite(Number(weekly_budget))
+          ? Math.max(0, Number(weekly_budget))
+          : undefined,
       user_id: req.userId,
     };
     if (confirm_folder === true) {
@@ -105,6 +163,17 @@ router.put('/config', async (req, res) => {
       detail,
     });
 
+    // Auto-start the scheduler when sync is enabled for the first time.
+    // The boot-time check in server/src/index.js only arms the cron if a
+    // sync_enabled=true config already existed — a fresh user completing
+    // the wizard would otherwise upsert sync_enabled=true into a DB
+    // where the scheduler is dormant, and the first sync would never
+    // run without a server restart. Guarded by getSchedulerStatus so we
+    // don't double-schedule when it's already armed from boot.
+    if (sync_enabled === true && !getSchedulerStatus().running) {
+      startScheduler();
+    }
+
     res.json({ data });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -120,7 +189,12 @@ router.put('/config', async (req, res) => {
 // Returns the orchestrator's summary contract verbatim, plus a top-level
 // `message` for the frontend toast. Concurrency: in-memory lock — a second
 // call while a sync is in progress returns 409 with SyncConflictError.
-router.post('/sync', async (req, res) => {
+//
+// Rate limits (hybrid, multi-user safe):
+//   - 10/min per IP  (server/src/index.js → syncLimiter, shared NAT cap)
+//   - 3/min per user (perUserSyncLimiter below, real abuse guard)
+// Both apply; whichever bucket empties first returns 429.
+router.post('/sync', perUserSyncLimiter, async (req, res) => {
   const dryRun = req.query.dry_run === '1' || req.query.dry_run === 'true';
   try {
     const config = await CurveConfig.findOne({ user_id: req.userId });
@@ -205,6 +279,9 @@ router.post('/sync', async (req, res) => {
 // GET /api/curve/sync/status — lightweight poll endpoint for the
 // "a sincronizar agora" badge in the UI. Returns the in-memory lock state
 // (authoritative) AND the config's `is_syncing` field (UI hint).
+// `sync_interval_minutes` + `sync_enabled` are included so the dashboard
+// can align its own refresh ticks to the user's scheduler cadence
+// instead of polling blindly every minute.
 router.get('/sync/status', async (req, res) => {
   try {
     const config = await CurveConfig.findOne({ user_id: req.userId }).lean();
@@ -214,6 +291,8 @@ router.get('/sync/status', async (req, res) => {
       last_sync_at: config?.last_sync_at ?? null,
       last_sync_status: config?.last_sync_status ?? null,
       last_email_at: config?.last_email_at ?? null,
+      sync_enabled: Boolean(config?.sync_enabled),
+      sync_interval_minutes: config?.sync_interval_minutes ?? null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -253,17 +332,28 @@ router.post('/test-connection', async (req, res) => {
 });
 
 // GET /api/curve/logs
-// Optional query: ?type=audit  → only audit/security events (action != null)
-//                 ?type=sync   → only sync events (action == null)
-//                 (omit)       → all entries
+// Optional query: ?type=audit          → only audit/security events (action != null)
+//                 ?type=sync           → only sync events (action == null)
+//                 ?uncategorised=true  → only ok sync rows with no tier match
+//                                        (docs/Categories.md §11.3 Fase 7). Hits
+//                                        the partial compound index on
+//                                        `{user_id, uncategorised, created_at}`
+//                                        so the count is O(matches), not
+//                                        O(user's logs).
+//                 (omit)               → all entries
 router.get('/logs', async (req, res) => {
   try {
-    const { page = 1, limit = 30, type } = req.query;
+    const { page = 1, limit = 30, type, uncategorised } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
     const logFilter = { user_id: req.userId };
     if (type === 'audit') logFilter.action = { $ne: null };
     else if (type === 'sync') logFilter.action = null;
+    // `?uncategorised=true` is an additive filter — it composes with
+    // `?type=sync` (the implied bucket for these rows) but the client
+    // can omit `type` and the server still restricts to sync rows
+    // because only sync rows ever carry the flag.
+    if (uncategorised === 'true') logFilter.uncategorised = true;
     const [data, total] = await Promise.all([
       CurveLog.find(logFilter)
         .sort('-created_at')
@@ -274,6 +364,36 @@ router.get('/logs', async (req, res) => {
     ]);
 
     res.json({ data, meta: { total, page: Number(page), limit: Number(limit) } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /api/curve/stats/uncategorised
+//
+// Lightweight count of "Sem categoria" sync rows for the caller within
+// the current day-22 cycle. Feeds the dashboard stat card that
+// deep-links to `/curve/logs?tab=uncategorised`. The `uncategorised`
+// flag is written by the orchestrator (see §10.5 of docs/Categories.md)
+// and the partial compound index on CurveLog keeps this query O(matches).
+//
+// Response shape mirrors the rest of the cycle-aware endpoints
+// (/api/categories/stats): `{ count, cycle: { start, end } }` where
+// start/end are YYYY-MM-DD labels of the cycle bounds.
+// ─────────────────────────────────────────────────────────────────────
+router.get('/stats/uncategorised', async (req, res) => {
+  try {
+    const { start, end } = await cycleBoundsForUser(req.userId);
+    const count = await CurveLog.countDocuments({
+      user_id: req.userId,
+      uncategorised: true,
+      created_at: { $gte: start, $lte: end },
+    });
+    res.json({
+      count,
+      cycle: { start: formatISODate(start), end: formatISODate(end) },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { login as apiLogin } from '../services/api';
 
@@ -73,6 +74,13 @@ export default function LoginPage() {
           <button type="submit" className="btn-primary w-full" disabled={loading}>
             {loading ? 'A entrar...' : 'Entrar'}
           </button>
+
+          <p className="mt-4 text-center text-xs text-sand-500">
+            Não tens conta?{' '}
+            <Link to="/register" className="text-curve-700 hover:underline">
+              Registar
+            </Link>
+          </p>
         </form>
       </div>
     </div>

@@ -39,10 +39,28 @@ export function getSchedulerStatus() {
   };
 }
 
+// ---------- Gate ----------
+
+// The cron tick fires every 5 min, but each config carries its own
+// `sync_interval_minutes` (5 / 15 / 30 / 60). Gate by wall-clock minute:
+// a config runs only when the current minute is divisible by its
+// interval — 15 → :00/:15/:30/:45, 30 → :00/:30, 60 → :00. Keeps the
+// scheduler single-cron while honouring per-user cadence.
+export function shouldRunAtTick(config, tickMinute) {
+  const raw = config?.sync_interval_minutes;
+  const parsed = Number(raw);
+  // 0 / negative values are rejected explicitly (can't do modulo by 0).
+  // NaN / undefined fall back to the 5-min default.
+  if (raw != null && Number.isFinite(parsed) && parsed <= 0) return false;
+  const interval = Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+  return tickMinute % interval === 0;
+}
+
 // ---------- Core loop ----------
 
 async function runAll() {
   lastRunAt = new Date();
+  const tickMinute = lastRunAt.getMinutes();
 
   let configs;
   try {
@@ -56,6 +74,7 @@ async function runAll() {
 
   for (const config of configs) {
     if (!config.user_id) continue;
+    if (!shouldRunAtTick(config, tickMinute)) continue;
     if (isSyncing(config._id)) continue;
 
     try {
