@@ -1,6 +1,6 @@
-export default function StatCard({ label, value, sub, accent = false }) {
+export default function StatCard({ label, value, sub, accent = false, title }) {
   return (
-    <div className="card animate-fade-in-up">
+    <div className="card animate-fade-in-up" title={title}>
       <p className="text-xs font-medium uppercase tracking-wide text-sand-400">
         {label}
       </p>

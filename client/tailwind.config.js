@@ -40,6 +40,12 @@ export default {
           'Roboto',
           'sans-serif',
         ],
+        handwritten: [
+          'Caveat',
+          'Segoe Script',
+          'Comic Sans MS',
+          'cursive',
+        ],
       },
       borderRadius: {
         '2xl': '1rem',
@@ -58,11 +64,35 @@ export default {
           '0%': { opacity: '0', transform: 'translateX(16px)' },
           '100%': { opacity: '1', transform: 'translateX(0)' },
         },
+        // Distribution bar segments (`/categories` §9.8 #5). Each
+        // segment starts at scaleX(0) with origin-left and animates
+        // to scaleX(1), producing a left-to-right grow cascade when
+        // combined with a per-segment `animationDelay`.
+        'grow-x': {
+          '0%': { transform: 'scaleX(0)' },
+          '100%': { transform: 'scaleX(1)' },
+        },
+        // Savings Score "perfect 10" celebration (ROADMAP §2.11). A
+        // slow horizontal shimmer across a metallic gradient clipped
+        // to the text. Kept intentionally subtle — a soft reward, not
+        // a party. Paired with `perfect-breathe` below for a matching
+        // scale pulse.
+        'perfect-shimmer': {
+          '0%': { 'background-position': '-100% 50%' },
+          '100%': { 'background-position': '200% 50%' },
+        },
+        'perfect-breathe': {
+          '0%, 100%': { transform: 'scale(1)' },
+          '50%': { transform: 'scale(1.03)' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.4s ease-out',
         'fade-in-up': 'fade-in-up 0.5s ease-out',
         'slide-in-right': 'slide-in-right 0.4s ease-out',
+        'grow-x': 'grow-x 0.5s ease-out forwards',
+        'perfect-shimmer': 'perfect-shimmer 2.8s linear infinite',
+        'perfect-breathe': 'perfect-breathe 2.8s ease-in-out infinite',
       },
     },
   },

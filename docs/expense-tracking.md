@@ -283,35 +283,136 @@ Este endpoint nao requer autenticacao (`skip_before_action`) para permitir a int
 
 ## Savings Score (Score de Poupanca)
 
-O sistema calcula um score semanal (0-10) baseado no orcamento mensal.
+O sistema calcula um score (0-10) baseado no orçamento semanal.
 
-### Logica
+### Janela temporal — **rolling 7 dias** no Curve Sync
 
-```ruby
-monthly_budget = 295.0  # EUR (hardcoded)
-weekly_budget  = 295.0 / 4.0  # ~73.75 EUR
+> ⚠️ **Divergência consciente face ao Embers.** No Embers a janela é
+> semana ISO (`Date.today.beginning_of_week .. end_of_week`, ou seja
+> Segunda 00:00 → Domingo 23:59). No Curve Sync a janela é **rolante
+> de 168 horas** — `weekStart = now − 7 × 24 h`, ver
+> `server/src/services/expenseStats.js:34,210`.
 
-# Se a pessoa gastou menos que o budget semanal:
-score = (log(weekly_savings + 1) / log(weekly_budget + 1)) * 10
+Motivo da mudança (ver também o JSDoc em `computeDashboardStats`):
 
-# Se gastou mais que o budget: score = 0
-# Se gastou exatamente o budget: score = 5
+1. **Sem reset artificial à Segunda.** Em ISO-week, €50 gastos
+   Domingo à noite desaparecem do score às 00:01 de Segunda mesmo sem
+   mudança de comportamento. Rolante mantém o gasto a pesar 7 dias.
+2. **Continuidade.** A janela desliza 1 s a cada segundo — sem saltos
+   discretos que tornem o score "cheio" aos Domingos e "vazio" às
+   Segundas.
+3. **Coerência com o ciclo mensal.** O mês do Curve Sync é ciclo
+   custom (dia 22, não calendar month — ver
+   [`CLAUDE.md` → Custom Monthly Cycle](../CLAUDE.md)). Combinar
+   semana ISO com mês custom seria incongruente.
+4. **Timezone-agnóstico.** `beginning_of_week` depende da locale do
+   server (Segunda em PT, Domingo em en-US). `now − 168 h` é
+   determinístico.
+5. **Sinal constante.** Cobre sempre exactamente 168 h — mesma
+   quantidade de dados independentemente da hora do pedido.
+
+### Lógica
+
+Fórmula herdada tal-e-qual do Embers:
+
+```js
+// server/src/services/expenseStats.js::computeSavingsScore
+weekly_budget  = config.weekly_budget  // default 73.75 (= 295/4)
+weekly_savings = weekly_budget − weekly_expenses
+
+if (weekly_savings <= 0) score = 0               // overspend
+else score = (log(weekly_savings + 1)
+            / log(weekly_budget + 1)) * 10
+score = clamp(score, 0, 10)                      // 1dp
 ```
 
-### Endpoint
+Pequenas divergências de arredondamento/edge-case face ao Embers
+(conscientes, não são bugs):
+
+| Situação | Embers | Curve Sync |
+|----------|--------|------------|
+| Gastou exactamente o budget (`weekly_savings == 0`) | score = 5 | score = 0 |
+| Arredondamento final | `score.round` (inteiro) | 1 decimal |
+
+### Endpoints
+
+- **Curve Sync**: alimentado dentro do `meta` de `GET /api/expenses`
+  (campos `savings_score`, `weekly_expenses`, `weekly_savings`,
+  `weekly_budget`) — não há endpoint dedicado.
+- **Embers (legacy)**: `GET /admin/expenses/get_user_savings_score` —
+  resposta `{ savings_score, week_expenses, remaining_this_week }`.
+
+---
+
+## Linha de orçamento no gráfico «Evolução por ciclo»
+
+O `CycleTrendCard` do dashboard (ROADMAP §2.8) desenha uma linha
+horizontal tracejada sobre as barras com o **equivalente mensal** do
+`weekly_budget` configurado pelo utilizador. Com o default
+`weekly_budget = €73,75` a linha aterra em **€321**, e um reader que
+abra o DevTools a primeira vez vai perguntar-se de onde sai esse valor
+— daí esta nota.
+
+### Fórmula
 
 ```
-GET /admin/expenses/get_user_savings_score
+monthly_budget = weekly_budget × (30.4375 / 7)
+               ≈ weekly_budget × 4.348
 ```
 
-**Resposta:**
-```json
-{
-  "savings_score": 7,
-  "week_expenses": 45.30,
-  "remaining_this_week": 28.45
-}
-```
+Fonte canónica: `server/src/services/expenseStats.js` → constante
+`WEEKS_PER_MONTH`, consumida em `computeCycleHistory`.
+
+### Exemplos práticos
+
+| `weekly_budget` | `monthly_budget` mostrado na linha |
+|-----------------|------------------------------------|
+| €73,75 (default, = €295 / 4)  | **€321** |
+| €50,00          | €217 |
+| €100,00         | €435 |
+| €200,00         | €870 |
+
+### Porque **não** é `× 4`
+
+O valor €295 do Embers está descrito como «4 semanas = 1 mês», mas um
+mês calendário **médio** tem 30,4375 dias (`365,25 / 12`), ou seja
+≈ 4,348 semanas — não 4. Um ciclo real tem 28 (Fevereiro) a 31 dias e a
+linha precisa de ser comparável ao gasto desses 28-31 dias. Se
+multiplicássemos por 4 a linha aterrava em €295, **abaixo** do gasto
+típico de um ciclo de 30-31 dias, e leria-se como overspend crónico
+quando na verdade é apenas o denominador errado.
+
+### Porque a linha é **horizontal** (e não por ciclo)
+
+A alternativa seria multiplicar `weekly_budget × cycle_days / 7` para
+cada ciclo individual, dando uma linha em «escada» (mais alta nos
+meses de 31 dias, mais baixa em Fevereiro). Descartado para a v1
+porque:
+
+1. O user pensa no orçamento como «quanto posso gastar por mês», um
+   número único — não uma função do calendário.
+2. Uma linha horizontal é mais fácil de ler como referência visual; a
+   escada adicionaria ruído para um ganho de fidelidade marginal (± 3 %).
+3. Manter a linha horizontal preserva a propriedade «barra cima da
+   linha = gastou mais do que o orçamento prometia», que se lê em
+   meio-segundo.
+
+Se este trade-off mudar (por exemplo, utilizadores com orçamentos
+semanais muito apertados onde ± 3 % importa), a mudança é trivial:
+expor `cycle_days` em cada row do `cycle_history` payload e trocar
+`ReferenceLine` por uma linha `Line` com dados por barra.
+
+### Onde aparece na UI
+
+| Elemento | Conteúdo |
+|----------|----------|
+| Linha horizontal tracejada no chart | `€{monthly_budget}` |
+| Label inline (topo-direita do chart) | `Orçamento €{monthly_budget}` |
+| Input em `/curve/config` | `weekly_budget` (editável, save-on-blur) |
+
+O valor é recalculado a cada `GET /api/expenses` — mudar o input da
+configuração faz a linha mover-se no próximo refresh da dashboard sem
+reload.
 
 ---
 

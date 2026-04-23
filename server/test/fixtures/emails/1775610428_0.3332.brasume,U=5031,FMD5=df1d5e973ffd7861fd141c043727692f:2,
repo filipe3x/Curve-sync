@@ -1,0 +1,1130 @@
+Received: from AM8P194MB1139.EURP194.PROD.OUTLOOK.COM (2603:10a6:20b:24d::20)
+ by AM0P194MB0578.EURP194.PROD.OUTLOOK.COM with HTTPS; Wed, 8 Apr 2026
+ 01:06:50 +0000
+Received: from AS4P251CA0005.EURP251.PROD.OUTLOOK.COM (2603:10a6:20b:5d2::10)
+ by AM8P194MB1139.EURP194.PROD.OUTLOOK.COM (2603:10a6:20b:24d::20) with
+ Microsoft SMTP Server (version=TLS1_2,
+ cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id 15.20.9769.18; Wed, 8 Apr
+ 2026 01:06:49 +0000
+Received: from AM4PEPF00027A68.eurprd04.prod.outlook.com
+ (2603:10a6:20b:5d2:cafe::11) by AS4P251CA0005.outlook.office365.com
+ (2603:10a6:20b:5d2::10) with Microsoft SMTP Server (version=TLS1_3,
+ cipher=TLS_AES_256_GCM_SHA384) id 15.20.9769.37 via Frontend Transport; Wed,
+ 8 Apr 2026 01:06:44 +0000
+Authentication-Results: spf=pass (sender IP is 54.240.6.143)
+ smtp.mailfrom=eu-west-1.amazonses.com; dkim=pass (signature was verified)
+ header.d=imaginecurve.com;dkim=pass (signature was verified)
+ header.d=amazonses.com;dmarc=pass action=none
+ header.from=imaginecurve.com;compauth=pass reason=100
+Received-SPF: Pass (protection.outlook.com: domain of eu-west-1.amazonses.com
+ designates 54.240.6.143 as permitted sender) receiver=protection.outlook.com;
+ client-ip=54.240.6.143; helo=a6-143.smtp-out.eu-west-1.amazonses.com; pr=C
+Received: from a6-143.smtp-out.eu-west-1.amazonses.com (54.240.6.143) by
+ AM4PEPF00027A68.mail.protection.outlook.com (10.167.16.85) with Microsoft
+ SMTP Server (version=TLS1_3, cipher=TLS_AES_256_GCM_SHA384) id 15.20.9769.17
+ via Frontend Transport; Wed, 8 Apr 2026 01:06:49 +0000
+X-IncomingTopHeaderMarker: OriginalChecksum:BEA000BE288E674A04A138C1BADA463244C169683917E7433FEC56355AE71F38;UpperCasedChecksum:0FD5FD6D81CDCB5FBA6437C0B48F2CFBBA45A9901B83DAE6FF7EF964308082D3;SizeAsReceived:1399;Count:11
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=pl3lqyitjxpgvitvgmc3bpsgedyzxan3; d=imaginecurve.com;
+	t=1775610409;
+	h=From:To:Subject:Message-ID:MIME-Version:Date:Content-Type;
+	bh=jbjnVTdy9a7tFmQEgian6ZyhBUu0NDjqMXGvAVDe/h0=;
+	b=yZYV/tZxy6HhXbWPJS/IUnIWmjO7erq/a/2/hDFuKWpV6HWdKlOOoT2yb8IRiEZU
+	r86MH4meGamHz5qbzMxRw3b9maemlClzzwwBpFep73M86y6QMpEly8Q9mID9UTQincf
+	kQ+S1YwxRdjE5O9XkKzxSkozjkFAL8Yed41MoPbs=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=shh3fegwg5fppqsuzphvschd53n6ihuv; d=amazonses.com; t=1775610409;
+	h=From:To:Subject:Message-ID:MIME-Version:Date:Content-Type:Feedback-ID;
+	bh=jbjnVTdy9a7tFmQEgian6ZyhBUu0NDjqMXGvAVDe/h0=;
+	b=1T5IcQDnTGWCPCzfUyZNuzhezQddtg6D276rQPpsOm4sC162oyYa+iPcWhqbKWWF
+	4BMm4YcasWUuk9Tz5AmSKYOyU1M1228ELsVfapYQfe1EblNOdKaTcirlanz8ceKciZq
+	aB4EIVGGKLfsKL8dsr4gve3wXTMs5WhXwUYBdAd4=
+From: support@imaginecurve.com
+To: filipe.marques.it@outlook.pt
+Subject: Updated Curve Receipt: Purchase at Continente Online on 06 April
+ 2026 for =?utf-8?Q?=E2=82=AC46=2E05?=
+Message-ID: <0102019d6aa0b15e-f1dddb44-6129-4df3-aa3e-6c9ddaa31b63-000000@eu-west-1.amazonses.com>
+Date: Wed, 8 Apr 2026 01:06:49 +0000
+Content-Type: multipart/alternative; boundary=o-eKFhmD
+Feedback-ID: ::1.eu-west-1.PrHMlXLI5wdhhpDXs1Wfwb3b3kvd6+dApDjrI3Doz3E=:AmazonSES
+X-SES-Outgoing: 2026.04.08-54.240.6.143
+X-IncomingHeaderCount: 11
+Return-Path: 0102019d6aa0b15e-f1dddb44-6129-4df3-aa3e-6c9ddaa31b63-000000@eu-west-1.amazonses.com
+X-MS-Exchange-Organization-ExpirationStartTime: 08 Apr 2026 01:06:49.8306
+ (UTC)
+X-MS-Exchange-Organization-ExpirationStartTimeReason: OriginalSubmit
+X-MS-Exchange-Organization-ExpirationInterval: 1:00:00:00.0000000
+X-MS-Exchange-Organization-ExpirationIntervalReason: OriginalSubmit
+X-MS-Exchange-Organization-Network-Message-Id: c8cf7453-5a2e-441e-5945-08de950b1d15
+X-EOPAttributedMessage: 0
+X-EOPTenantAttributedMessage: 84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa:0
+X-MS-Exchange-Organization-MessageDirectionality: Incoming
+X-MS-PublicTrafficType: Email
+X-MS-TrafficTypeDiagnostic: AM4PEPF00027A68:EE_|AM8P194MB1139:EE_|AM0P194MB0578:EE_
+X-MS-Exchange-Organization-AuthSource: AM4PEPF00027A68.eurprd04.prod.outlook.com
+X-MS-Exchange-Organization-AuthAs: Anonymous
+X-MS-UserLastLogonTime: 4/8/2026 1:05:04 AM
+X-MS-Office365-Filtering-Correlation-Id: c8cf7453-5a2e-441e-5945-08de950b1d15
+X-MS-Exchange-EOPDirect: true
+X-Sender-IP: 54.240.6.143
+X-SID-PRA: SUPPORT@IMAGINECURVE.COM
+X-SID-Result: PASS
+X-MS-Exchange-Organization-SCL: 1
+X-Microsoft-Antispam: BCL:4;ARA:1444111002|35120799006|6019299003|47200799024|23070799003|461199028|9129299003|9000799056|9109299003|5139299004|10300799038|36140799009|58200799021|9400799043|1680799066|1290799033|1122599022|4302099013|440099028|19202599019|3412199025|30041999003|22062799003|1380799030|1370799030|1360799030|1602099012;
+X-MS-Exchange-CrossTenant-OriginalArrivalTime: 08 Apr 2026 01:06:49.7435
+ (UTC)
+X-MS-Exchange-CrossTenant-Network-Message-Id: c8cf7453-5a2e-441e-5945-08de950b1d15
+X-MS-Exchange-CrossTenant-Id: 84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa
+X-MS-Exchange-CrossTenant-AuthSource: AM4PEPF00027A68.eurprd04.prod.outlook.com
+X-MS-Exchange-CrossTenant-AuthAs: Anonymous
+X-MS-Exchange-CrossTenant-FromEntityHeader: Internet
+X-MS-Exchange-CrossTenant-RMS-PersistedConsumerOrg: 00000000-0000-0000-0000-000000000000
+X-MS-Exchange-Transport-CrossTenantHeadersStamped: AM8P194MB1139
+X-MS-Exchange-Transport-EndToEndLatency: 00:00:00.8485428
+X-MS-Exchange-Processed-By-BccFoldering: 15.20.9769.018
+X-Microsoft-Antispam-Mailbox-Delivery:
+	ucf:1;jmr:0;ex:0;auth:1;dest:C;OFR:CustomRules;ENG:(5062000311)(920221119095)(90000117)(920221120095)(90012020)(91020020)(91040095)(9050020)(9100341)(944500132)(2008001181)(4810010)(4910033)(9575002)(10195002)(9320005)(120001);
+X-Message-Delivery: Vj0xLjE7dXM9MDtsPTA7YT0wO0Q9MTtHRD0xO1NDTD0z
+X-Microsoft-Antispam-Message-Info:
+	=?utf-8?B?alFDL3F6SExURmY2eUJleHZPMWVxTGo3eDZueGp6WjlUL0YxeTVldWQ0U3I5?=
+ =?utf-8?B?cGpwUkRVTXVFcXpkQ3hSTUlhL3dwSjhqbnJ3bkoza0ZKSGYyZzVHUkNFaU1O?=
+ =?utf-8?B?Z0Ira1NTczRWdnU0YWVSMjRua3dxbnRCRWZuOC8zSjlHcjRzYUIvcURXUWRG?=
+ =?utf-8?B?SDkxMCtXZ1g3bmk1aVg2MU5Lb1JxZW1MQTBtNGR1SDZBekV5cDlTaC9idWVp?=
+ =?utf-8?B?TU14RjdZM1VuSXRyV2tzanRMNzdMSTNubUpIcmp5anQwWHc2RER1R1MzbVpw?=
+ =?utf-8?B?K3VOdzdtOC9TNktibDd5TzJmcGsxVVJmTGxLbzg0dmQ2MTJHbzhiY1kzQ2NQ?=
+ =?utf-8?B?VWQvWDRlakJKUVZRcUFKdGdEUytHcm1aZ2grY0hNVHdRTVZ6MkpTRU1oRThz?=
+ =?utf-8?B?YzhhWnBRMHh4RXBEM3pYd2hrUktCQzRTSGlqL0FiLzZlOS83WVRsOGdrY2py?=
+ =?utf-8?B?ZnI2am9jRGU3NnFlcExnV2Yvajk4cUV5VURSY3N4TElEcGJMYzRsTUpJRm5W?=
+ =?utf-8?B?eFhNT3pLKzJRU0tubXNJSVBwTGMvREg0ck5ZckhiTStHZ2QzQXFMM1ExK1Uy?=
+ =?utf-8?B?L0Z1VHVES21xelB3ZnV2S0hSN0F4T0lkSTlDSWJQUTFOLytXSzBRU2E0KytR?=
+ =?utf-8?B?bDhlZUpTZVp5Q3FLRDZBeGhQN3VSMWt5WEg3Wkhlb1Q5bDhJMlVacmtYWlB2?=
+ =?utf-8?B?U25lVEtkR1MyZkhHQ0FxT1dZRkQyOUtUTTE0azFlZDFDNEs3SEwxTTM4WGJE?=
+ =?utf-8?B?N01uby9JN3pBSVBHNHFZNUl2V2E5ejJLa0ZJeXpDZ29YdDY5V1BaWE56VGRL?=
+ =?utf-8?B?SjRJTDVBU3hTQmN4ZzhKVHVPUmFsMW5YTGhFZnNHakhFWWJieFRFSUhtdnFo?=
+ =?utf-8?B?UDZtSnNXcWsyQ3BqeWhOSFd4eG1wMTZmSmUyaCs4YkFqSnp6bjhvMTl1RjhM?=
+ =?utf-8?B?Wmx0RExJZGZIRVVxMThoV3BURENGcm1tTjJ5SWlyRUxDS1l1U3EwcHE0VC9x?=
+ =?utf-8?B?Y3hLd0xhMkMxdGg0b2p4SnJtZjJ6ckVhcnFyWVYyYlY5ME1iQS9sRXpKMU5k?=
+ =?utf-8?B?ZjZQeTZvVkZ2V2xNeFYzRW1oVTZzc1Y4Z1cydHZkMVNuazB5Q2dTenU0RXFJ?=
+ =?utf-8?B?TEthU1k0dzRHTGVjMUZhSlI1dDhhWk1VdTNTbVFqK3BHMENOTDUxVnNtZDQx?=
+ =?utf-8?B?RHpvclpkTHBoV2t4cEJQLzVwby9Oa3hrT1lFNlc2ZUZyalVmeC8yL1llRkoz?=
+ =?utf-8?B?ZXZXUy9CamVVTVFXaEJSeTJhSzRQTGJpVE1yRVdOR2ZjMXJGWFc5dkx6RFhl?=
+ =?utf-8?B?TkVaeGtyRnNJOWNiMHZPRGtlNkVuVzZXVnNIbzE3cFdra3JxQllCTHdaOHJJ?=
+ =?utf-8?B?ZmpXMkJhS0VEMGNnLzQwRDhRNHZJekRoMzcxa2pHbG1WVmNkeXdBWlpTN2JY?=
+ =?utf-8?B?M3Z4LzdrcGxuenBHZXFEZGZzWUYrbG95TVhJempwRXNjMGtvSHdsem5ZWXlZ?=
+ =?utf-8?B?M1dZNDQzWGIyRGFwWVBCYU9oWWFOUUc3R200V2M5ZXh6dk82RExINWZPT3pp?=
+ =?utf-8?B?NDNDWnpWZWt1YnhRMUo1TVFYS0pzZ1pWWmFDUmFtMjUyY1pJVkNCYVJ6UkZV?=
+ =?utf-8?B?ZEcreFdrdDVmRFRxbEVaQ0dpTHNZbG40QVBBL3U0WnUwR1BvVk45aHp6bjcy?=
+ =?utf-8?B?Vk9KVDBGdzFYczA2NFVKK1p4M0hKT1ZRQm5xekFvNlVtYVRaN09xTFgyRmVU?=
+ =?utf-8?B?ZHFpa0xmT2xjMUNXemZ0OGhZV29IeXREOEIzQy9UY3FMUnVCOS9qOVJhZmF4?=
+ =?utf-8?B?SUxFWFRSMkpGSVluS1l5VU81QjlNdjhZTTZoM3daNE9pa09iZUdoaisyd0F4?=
+ =?utf-8?B?L0cxR1RLM1lEbTROZ3VwKzBTZDR6T2Fid1UveFV5dG1OY0FCZDk3VXRpNWR3?=
+ =?utf-8?B?SWhWWDllVFAwVmZsWnhGQlc3Z1QwcVZUNW9BQkFiRjkyVG1SYURHc0NLUnZ5?=
+ =?utf-8?B?S3Z3Sm53d2R5SFF0eUV6TTdkNnNGTVBkdGcwODdGWWVJVVV6NWY1NzUyVlhV?=
+ =?utf-8?B?V1FuWWU3TnRnZVZPeHM5Q3ZNS1ZJNVFybk1PNlBHTStjazlXRytNcmN4aDg2?=
+ =?utf-8?B?aVE2NGtoK204UytFanZVYUg5Y1lmbXBPazExQllJZlBxSmphV0FsOHdLYzRB?=
+ =?utf-8?B?M3p5QVBEZWRJNVZyUm1NU0xrNHdZYUw3WGFJK01od0hMTFBmOHBzdWJUWDRU?=
+ =?utf-8?B?ZmttNkRmc1hZbzZkTFJOcDQzcUdmVnZqUmp0UTJHZFhLZ1ZuY2lPOS9JeG9I?=
+ =?utf-8?B?cktOdTlXL2tLNzMzUXg4QTZOUjhPcVRwNEtlaHdYWjI3cENPNG1PZkNUUUgw?=
+ =?utf-8?B?OVRnc0tiQ0JaaFd3VzYxclBxRXlzKzF0N2JvcG5TRzcyOVBvVzdDajFDRUU3?=
+ =?utf-8?B?WFEyeGVYSFFQOEw5UFdtNDk2UER3K0hNVTM0aXpsaU9zZUZXMkJQZzJjb1Yz?=
+ =?utf-8?B?RFhqZ0owbVVwSDFaZWthLytLOFE0QytRR014cjBqNVdFSWFQM2hRZ05UbGZK?=
+ =?utf-8?B?Tmlxa2Z6UnI5N1pFVWdxT0JjdEY1Q1pVR05NV3JtdVBkVXJEZWp0S2cySDhq?=
+ =?utf-8?B?TkpYemc1YW01Nk81a1V4bDFpTWxWMTRHemJjdE0xa3VFTXo3TUxFMmM5RXgx?=
+ =?utf-8?B?RlJsYTlxdnNZZG0rakE4WllVcVBiekloZVRTQy9UQUVGYWlqd0YrdnJQOWpB?=
+ =?utf-8?B?THViYmhXeUtoaDVrNzBYSFNFZG1RNGJzWElLNXg2aE9kMmRuUGk2NThDNmdW?=
+ =?utf-8?B?YTBla1FWbGMxelRneFhQanZuTU5QeFJsR2tFUEpDajVYRXpxTS93Uk00Uyt3?=
+ =?utf-8?B?Y0xpZ0JXcW9ORmxuVmJmWUhTMlA1MU9QUS9LVUR2cWkxWnRmczgwQS8zdU52?=
+ =?utf-8?B?cytuZSthSWxydDhXWGU3SWc5OTJYMHY4TTJyNjE3cEFrcmwwLzcybHdVWmNr?=
+ =?utf-8?Q?80AI+um9AjQ5ROcVAWx4M7VwEPW62M5xbwI?=
+MIME-Version: 1.0
+
+--o-eKFhmD
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+
+
+
+
+ =20
+   =20
+     =20
+       =20
+         =20
+           =20
+   =
+          =20
+               =20
+                 =20
+                    =
+
+                     =20
+                       =20
+                    =
+ =20
+                   =20
+                 =20
+               =20
+       =
+      =20
+           =20
+           =20
+             =20
+                =
+
+                 =20
+                   =20
+                     =20
+   =
+                     Email Receipt
+                     =20
+             =
+      =20
+                   =20
+                     =20
+                 =
+         Hello Filipe,                       =20
+                        =
+
+                       =20
+                          There's been an upd=
+ate to your transaction, below are the new details.                        =
+
+                       =20
+                          You made a purchase=
+ at:                     =20
+                   =20
+                   =20
+=
+                     =20
+                       =20
+                       =
+  =20
+                           =20
+                              Continen=
+te Online
+                           =20
+                           =20
+ =
+                             =E2=82=AC46.05
+                            =
+
+                         =20
+                         =20
+              =
+             =20
+                              06 April 2026 12:43:27
+   =
+                        =20
+                           =20
+                =
+             =20
+                           =20
+                          =
+
+                       =20
+                     =20
+                    =
+
+                   =20
+                     =20
+                        =
+  On this card:                     =20
+                   =20
+            =
+       =20
+                     =20
+                       =20
+            =
+             =20
+                           =20
+                           =
+  =20
+                           =20
+                         =20
+         =
+                =20
+                           =20
+                        =
+                                      Filipe Marques=20
+                   =
+             NEXUS
+                                XXXX-8941
+          =
+                                               =20
+                        =
+ =20
+                       =20
+                     =20
+                  =
+ =20
+                   =20
+                     =20
+                      =
+    Receipt for the purchase (add it using the Curve App):                 =
+      =20
+                       =20
+                       =20
+           =
+          =20
+                   =20
+                   =20
+               =
+      =20
+                                                    This Transact=
+ion will appear on your bank statement as:=20
+                          CON=
+TINENTE ONLINE      Portugal      PRT
+                                   =
+          =20
+                   =20
+                 =20
+                =
+
+             =20
+           =20
+           =20
+             =20
+        =
+          Generated on 08 April 2026 01:06 UTC
+             =20
+         =
+  =20
+           =20
+             =20
+           =20
+           =20
+       =
+      =20
+               =20
+                 =20
+                   =20
+  =
+                   =20
+                       =20
+                     =20
+=
+                   =20
+                 =20
+                 =20
+          =
+         =20
+                     =20
+                       =20
+          =
+               =20
+                           =20
+                         =
+    =20
+                           =20
+                         =20
+       =
+                  =20
+                             =20
+                    =
+           =20
+                             =20
+                          =
+
+                       =20
+                     =20
+                    =
+
+                 =20
+               =20
+             =20
+           =20
+=
+           =20
+             =20
+                How to stop receiving Email=
+ Receipts
+               =20
+               =20
+                Something=
+ not correct? Contact Curve Support!
+             =20
+           =20
+    =
+       =20
+             =20
+               =20
+                  Curve oper=
+ates in the UK and the EEA. The Curve Card and the e-money related to these=
+ cards is issued in the UK by Curve UK Limited, authorised and regulated by=
+ the Financial Conduct Authority and in the EEA by Curve Europe UAB, author=
+ised and regulated by the Bank of Lithuania. The Curve Card and Samsung Pay=
++ are issued pursuant to license by Mastercard International Inc. Mastercar=
+d=C2=AE is a registered trademark of Mastercard International Incorporated.=
+
+               =20
+               =20
+               =20
+               =
+ Curve UK Limited is registered in England and Wales, United Kingdom (compa=
+ny reference number: 09523903) and located at 1-10 Praed Mews, London, W2 1=
+QY. Curve Europe UAB is registered in Lithuania (company reference number: =
+305626541) and located at Jogailos g. 9, LT-01116 Vilnius.
+              =
+ =20
+               =20
+                Curve=E2=80=99s products and servic=
+es are governed by the Terms of Service. Click here to access Curve UK Limi=
+ted=E2=80=99s full T&amp;Cs and here to access Curve Europe UAB=E2=80=99s T=
+&amp;Cs.
+             =20
+           =20
+         =20
+       =20
+      =
+
+   =20
+ =20
+
+
+
+--o-eKFhmD
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<!doctype html><html xmlns=3D"http://www.w3.org/1999/xhtml" xmlns:v=3D"urn:=
+schemas-microsoft-com:vml" xmlns:o=3D"urn:schemas-microsoft-com:office:offi=
+ce"><head><!--[if gte mso 15]>
+  <xml>
+      <o:OfficeDocumentSettings>
+          <o:AllowPNG/>
+          <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+  </xml>
+  <![endif]-->
+<meta http-equiv=3D"Content-Type" content=3D"text/html; charset=3Dutf-8">
+  <meta http-equiv=3D"X-UA-Compatible" content=3D"IE=3Dedge">
+  <meta name=3D"viewport" content=3D"width=3Ddevice-width, initial-scale=3D=
+1">
+
+  <style type=3D"text/css">
+    p{
+      margin:10px 0;
+      padding:0;
+    }
+
+    table{
+      border-collapse:collapse;
+    }
+
+    h1,h2,h3,h4,h5,h6{
+      display:block;
+      margin:0;
+      padding:0;
+    }
+
+    img {
+      border: 0;
+      height: auto;
+      line-height: 100%;
+      outline: none;
+      text-decoration: none;
+    }
+
+    body,#bodyTable,#bodyCell{
+      height:100%;
+      margin:0;
+      padding:0;
+      width:100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, H=
+elvetica, Arial, sans-serif;
+    }
+
+    #outlook a{
+      padding:0;
+    }
+
+    img{
+      -ms-interpolation-mode:bicubic;
+    }
+
+    table{
+      mso-table-lspace:0pt;
+      mso-table-rspace:0pt;
+    }
+
+    .ReadMsgBody{
+      width:100%;
+    }
+
+    .ExternalClass{
+      width:100%;
+    }
+
+    p,a,li,td,blockquote{
+      mso-line-height-rule:exactly;
+    }
+
+    a[href^=3Dtel],a[href^=3Dsms]{
+      color:inherit;
+      cursor:default;
+      text-decoration:none;
+    }
+
+    p,a,li,td,body,table,blockquote{
+      -ms-text-size-adjust:100%;
+      -webkit-text-size-adjust:100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, H=
+elvetica, Arial, sans-serif;
+      font-size: 15px;
+    }
+
+    .ExternalClass,.ExternalClass p,.ExternalClass td,.ExternalClass div,.E=
+xternalClass span,.ExternalClass font{
+      line-height:100%;
+    }
+
+    a[x-apple-data-detectors]{
+      color:inherit !important;
+      text-decoration:none !important;
+      font-size:inherit !important;
+      font-family:inherit !important;
+      font-weight:inherit !important;
+      line-height:inherit !important;
+    }
+
+    #bodyCell{
+        padding:20px;
+    }
+
+    #templateContainer {
+      width: 600px;
+    }
+
+    body,#bodyTable{
+      background-color:#FAFAFA;
+    }
+
+    #bodyCell{
+      border-top:0;
+    }
+
+    .templateContainer{
+      border:0;
+    }
+
+    h1 {
+      display: block;
+      font-size: 20px;
+      font-style: normal;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: normal;
+      margin-top: 0;
+      margin-right: 0;
+      margin-bottom: 0;
+      margin-left: 0;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      font-size: 18px;
+    }
+
+    a:link,
+    a:visited,
+    a.yshortcuts {
+      color: #000000;
+      font-weight: normal;
+      text-decoration: underline;
+    }
+
+    /* container styles */
+    #ReceiptContainer,
+    .NoteContainer {
+      border: 1px solid #CCCCCC;
+      padding-top: 32px;
+      padding-left: 32px;
+      padding-right: 32px;
+      padding-bottom: 32px;
+      background-color: #FFFFFF;
+    }
+
+    #ShareContainer {
+      padding-top: 96px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 96px;
+      background-image: url('https://res.cloudinary.com/dzatxn6bx/image/upl=
+oad/v1561119616/email/bank-notes.png');
+      background-repeat:no-repeat;
+      background-size:160px;
+      background-position: center right;
+    }
+
+    #NoteContainer {
+      padding-top: 96px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 96px;
+    }
+
+    .ShareHeader {
+      position: relative;
+    }
+
+    /* utility classes */
+    .u-border__top {
+      border-top: 1px solid #ccc;
+    }
+
+    .u-padding__topBottom {
+      padding-top: 32px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 32px;
+    }
+
+    .u-padding__topBottom--half {
+      padding-top: 16px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 16px;
+    }
+
+    .u-padding__topBottom--double {
+      padding-top: 64px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 64px;
+    }
+
+    .u-padding__top {
+      padding-top: 32px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 0;
+    }
+
+    .u-padding__top--half {
+      padding-top: 16px;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 0;
+    }
+
+    .u-padding__bottom {
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 32px;
+    }
+
+    .u-greySmaller {
+      color: #737373;
+      font-size: 13px !important;
+    }
+
+    .u-flowText {
+      line-height: 1.4;
+    }
+
+    .u-imgMaxWidth {
+      max-width: 100%;
+    }
+
+    .u-backgroundWhite {
+      background: #ffffff;
+    }
+
+    .u-button {
+      padding: 15px !important;
+      text-align: center;
+      text-decoration: none !important;
+      color: #FFFFFF !important;
+      display: inline-block;
+      background: #57CBF7;
+      border-radius: 2px;
+    }
+
+    .u-bold {
+      font-weight: bold;
+    }
+
+    @media only screen and (max-width: 440px) {
+      body,
+      table,
+      td,
+      p,
+      a,
+      li,
+      blockquote {
+        -webkit-text-size-adjust: none !important;
+        font-size: 14px !important;
+      }
+
+      h1 {
+        font-size: 17px;
+      }
+
+      #ReceiptContainer,
+      .NoteContainer {
+        padding-top: 20px !important;
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+        padding-bottom: 20px !important;
+      }
+
+      #ShareContainer {
+        padding-top: 72px !important;
+        padding-bottom: 72px !important;
+        background-size: 120px !important;
+      }
+
+      .u-padding__topBottom {
+        padding-top: 20px !important;
+        padding-bottom: 20px !important;
+      }
+
+      .u-padding__topBottom--half {
+        padding-top: 12px !important;
+        padding-bottom: 12px !important;
+      }
+
+      .u-padding__topBottom--double {
+        padding-top: 40px !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        padding-bottom: 40px !important;
+      }
+
+      .u-padding__top {
+        padding-top: 20px !important;
+      }
+
+      .u-padding__top--half {
+        padding-top: 12px !important;
+      }
+
+      .u-padding__bottom {
+        padding-bottom: 20px !important;
+      }
+
+      .u-greySmaller {
+        font-size: 12px !important;
+      }
+    }
+
+    @media only screen and (max-width: 632px) {
+      body,
+      table,
+      td,
+      p,
+      a,
+      li,
+      blockquote {
+        -webkit-text-size-adjust: none !important;
+        font-size: 14px !important;
+      }
+
+      body {
+        width: 100% !important;
+        min-width: 100% !important;
+      }
+
+      #bodyCell {
+        padding: 16px !important;
+      }
+
+      #templateContainer {
+        max-width: 600px !important;
+        width: 100% !important;
+      }
+      .HalfColumn {
+        display: block !important;
+        width: 100% !important;
+        padding-top: 16px !important;
+        text-align: center !important;
+      }
+    }
+  </style>
+</head>
+<body leftmargin=3D"0" marginwidth=3D"0" topmargin=3D"0" marginheight=3D"0"=
+ offset=3D"0" style=3D"height: 100%;margin: 0;padding: 0;width: 100%;font-f=
+amily: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Ar=
+ial, sans-serif;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;f=
+ont-size: 15px;background-color: #FAFAFA;">
+  <center>
+    <table align=3D"center" border=3D"0" cellpadding=3D"0" cellspacing=3D"0=
+" height=3D"100%" width=3D"100%" id=3D"bodyTable" style=3D"border-collapse:=
+ collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust:=
+ 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSy=
+stemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;=
+height: 100%;margin: 0;padding: 0;width: 100%;background-color: #FAFAFA;">
+      <tr>
+        <td align=3D"center" valign=3D"top" id=3D"bodyCell" style=3D"mso-li=
+ne-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust=
+: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, =
+Helvetica, Arial, sans-serif;font-size: 15px;height: 100%;margin: 0;padding=
+: 20px;width: 100%;border-top: 0;">
+          <table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" width=3D"=
+100%" id=3D"templateContainer" style=3D"border-collapse: collapse;mso-table=
+-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-=
+size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI=
+', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;width: 600px;">
+            <tr>
+              <td align=3D"center" valign=3D"top" style=3D"mso-line-height-=
+rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;fon=
+t-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,=
+ Arial, sans-serif;font-size: 15px;">
+                <table border=3D"0" cellpadding=3D"40" cellspacing=3D"0" wi=
+dth=3D"100%" style=3D"border-collapse: collapse;mso-table-lspace: 0pt;mso-t=
+able-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;=
+font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helveti=
+ca, Arial, sans-serif;font-size: 15px;">
+                  <tr>
+                    <td align=3D"center" valign=3D"top" class=3D"headerCont=
+ent" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-web=
+kit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, =
+'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;">
+                      <a href=3D"https://www.curve.app/?utm_source=3Demailr=
+eceipt&amp;utm_medium=3Demail&amp;utm_campaign=3Ddirect" style=3D"mso-line-=
+height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 1=
+00%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Hel=
+vetica, Arial, sans-serif;font-size: 15px;color: #000000;font-weight: norma=
+l;text-decoration: underline;">
+                        <img src=3D"https://res.cloudinary.com/dzatxn6bx/im=
+age/upload/v1561119616/email/curve-logo.png" style=3D"max-width: 160px;bord=
+er: 0;height: auto;line-height: 100%;outline: none;text-decoration: none;-m=
+s-interpolation-mode: bicubic;" id=3D"headerImage">
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align=3D"center" valign=3D"top" id=3D"ReceiptContainer" s=
+tyle=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-te=
+xt-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe=
+ UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;border: 1px soli=
+d #CCCCCC;padding-top: 32px;padding-left: 32px;padding-right: 32px;padding-=
+bottom: 32px;background-color: #FFFFFF;">
+                <table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" wid=
+th=3D"100%" style=3D"border-collapse: collapse;mso-table-lspace: 0pt;mso-ta=
+ble-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;f=
+ont-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetic=
+a, Arial, sans-serif;font-size: 15px;">
+                  <tbody>
+                    <tr>
+                      <td class=3D"u-padding__bottom" align=3D"center" vali=
+gn=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100=
+%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSystem=
+Font, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;padd=
+ing-left: 0;padding-right: 0;padding-bottom: 32px;">
+                        <h1 style=3D"display: block;margin: 0;padding: 0;fo=
+nt-size: 20px;font-style: normal;font-weight: 700;line-height: 1;letter-spa=
+cing: normal;margin-top: 0;margin-right: 0;margin-bottom: 0;margin-left: 0;=
+text-align: center;text-transform: uppercase;">Email Receipt</h1>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class=3D"u-padding__topBottom u-border__top" alig=
+n=3D"left" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-s=
+ize-adjust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system,=
+ BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-=
+size: 15px;border-top: 1px solid #ccc;padding-top: 32px;padding-left: 0;pad=
+ding-right: 0;padding-bottom: 32px;">
+                          Hello Filipe,                        <br>
+                        <br>
+                        <br>
+                          There's been an update to your transaction, below=
+ are the new details.                        <br>
+                        <br>
+                          You made a purchase at:                      </td=
+>
+                    </tr>
+                    <tr>
+                      <td class=3D"u-padding__topBottom--half u-border__top=
+" align=3D"left" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-=
+text-size-adjust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-s=
+ystem, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif=
+;font-size: 15px;border-top: 1px solid #ccc;padding-top: 16px;padding-left:=
+ 0;padding-right: 0;padding-bottom: 16px;">
+                        <table border=3D"0" cellpadding=3D"0" cellspacing=
+=3D"0" width=3D"100%" style=3D"border-collapse: collapse;mso-table-lspace: =
+0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adju=
+st: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto=
+, Helvetica, Arial, sans-serif;font-size: 15px;">
+                          <tr>
+                            <td class=3D"u-bold" align=3D"left" valign=3D"t=
+op" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webk=
+it-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, '=
+Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;font-weight=
+: bold;">
+                              Continente Online
+                            </td>
+                            <td class=3D"u-bold" align=3D"right" valign=3D"=
+top" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-web=
+kit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, =
+'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;font-weigh=
+t: bold;">
+                              =E2=82=AC46.05
+                            </td>
+                          </tr>
+                          <tr>
+                            <td class=3D"u-greySmaller u-padding__top--half=
+" align=3D"left" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-=
+text-size-adjust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-s=
+ystem, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif=
+;font-size: 13px !important;padding-top: 16px;padding-left: 0;padding-right=
+: 0;padding-bottom: 0;color: #737373;">
+                              06 April 2026 12:43:27
+                            </td>
+                            <td class=3D"u-greySmaller u-padding__top--half=
+" align=3D"right" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms=
+-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-=
+system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-seri=
+f;font-size: 13px !important;padding-top: 16px;padding-left: 0;padding-righ=
+t: 0;padding-bottom: 0;color: #737373;">
+                             =20
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class=3D"u-padding__top u-border__top" align=3D"l=
+eft" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-ad=
+just: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, Blink=
+MacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: =
+15px;border-top: 1px solid #ccc;padding-top: 32px;padding-left: 0;padding-r=
+ight: 0;padding-bottom: 0;">
+                          On this card:                      </td>
+                    </tr>
+                    <tr>
+                      <td class=3D"u-padding__topBottom" align=3D"left" val=
+ign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 10=
+0%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSyste=
+mFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;pad=
+ding-top: 32px;padding-left: 0;padding-right: 0;padding-bottom: 32px;">
+                        <table border=3D"0" cellpadding=3D"0" cellspacing=
+=3D"0" width=3D"100%" style=3D"border-collapse: collapse;mso-table-lspace: =
+0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adju=
+st: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto=
+, Helvetica, Arial, sans-serif;font-size: 15px;">
+                          <tr>
+                            <td align=3D"center" valign=3D"top" style=3D"ms=
+o-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-ad=
+just: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo=
+to, Helvetica, Arial, sans-serif;font-size: 15px;">
+                              <img src=3D"https://cardimages.imaginecurve.c=
+om/cards/530849_2.png" class=3D"columnImage" width=3D"200" style=3D"max-wid=
+th: 100%;border: 0;height: auto;line-height: 100%;outline: none;text-decora=
+tion: none;-ms-interpolation-mode: bicubic;">
+                            </td>
+                          </tr>
+                          <tr>
+                            <td class=3D"u-padding__top--half" align=3D"cen=
+ter" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-ad=
+just: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, Blink=
+MacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: =
+15px;padding-top: 16px;padding-left: 0;padding-right: 0;padding-bottom: 0;"=
+>
+                                                              Filipe Marque=
+s <br>
+                                NEXUS<br>
+                                XXXX-8941<br>
+                                                          </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class=3D"u-greySmaller u-padding__topBottom u-bor=
+der__top" align=3D"center" valign=3D"top" style=3D"mso-line-height-rule: ex=
+actly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;font-family=
+: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, =
+sans-serif;font-size: 13px !important;border-top: 1px solid #ccc;padding-to=
+p: 32px;padding-left: 0;padding-right: 0;padding-bottom: 32px;color: #73737=
+3;">
+                          Receipt for the purchase (add it using the Curve =
+App):                        <br>
+                        <br>
+                        <img src=3D"cid:receiptImage" style=3D"max-width: 3=
+20px;border: 0;height: auto;line-height: 100%;outline: none;text-decoration=
+: none;-ms-interpolation-mode: bicubic;">
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class=3D"u-greySmaller u-padding__top u-border__t=
+op" align=3D"center" valign=3D"top" style=3D"padding-bottom: 0;mso-line-hei=
+ght-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%=
+;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvet=
+ica, Arial, sans-serif;font-size: 13px !important;border-top: 1px solid #cc=
+c;padding-top: 32px;padding-left: 0;padding-right: 0;color: #737373;">
+                                                    This Transaction will a=
+ppear on your bank statement as: <br>
+                          CONTINENTE ONLINE      Portugal      PRT
+                                              </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td class=3D"u-greySmaller u-padding__top--half" align=3D"cen=
+ter" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-ad=
+just: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, Blink=
+MacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: =
+13px !important;padding-top: 16px;padding-left: 0;padding-right: 0;padding-=
+bottom: 0;color: #737373;">
+                  Generated on 08 April 2026 01:06 UTC
+              </td>
+            </tr>
+            <tr>
+              <td class=3D"u-padding__topBottom" align=3D"left" valign=3D"t=
+op" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webk=
+it-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, '=
+Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;padding-top=
+: 32px;padding-left: 0;padding-right: 0;padding-bottom: 32px;"></td>
+            </tr>
+            <tr>
+              <td class=3D"u-padding__topBottom" align=3D"center" valign=3D=
+"top" id=3D"AppContainer" style=3D"mso-line-height-rule: exactly;-ms-text-s=
+ize-adjust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system,=
+ BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-=
+size: 15px;padding-top: 32px;padding-left: 0;padding-right: 0;padding-botto=
+m: 32px;">
+                <table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" wid=
+th=3D"100%" style=3D"border-collapse: collapse;mso-table-lspace: 0pt;mso-ta=
+ble-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;f=
+ont-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetic=
+a, Arial, sans-serif;font-size: 15px;">
+                  <tr>
+                    <td align=3D"center" valign=3D"top" style=3D"mso-line-h=
+eight-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 10=
+0%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helv=
+etica, Arial, sans-serif;font-size: 15px;">
+                      <a href=3D"https://www.curve.app/?utm_source=3Demailr=
+eceipt&amp;utm_medium=3Demail&amp;utm_campaign=3Ddirect" style=3D"mso-line-=
+height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 1=
+00%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Hel=
+vetica, Arial, sans-serif;font-size: 15px;color: #000000;font-weight: norma=
+l;text-decoration: underline;">
+                        <img src=3D"https://res.cloudinary.com/dzatxn6bx/im=
+age/upload/v1561119616/email/curve-logo.png" style=3D"max-width: 200px;bord=
+er: 0;height: auto;line-height: 100%;outline: none;text-decoration: none;-m=
+s-interpolation-mode: bicubic;">
+                      </a>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class=3D"u-padding__topBottom--half" align=3D"cente=
+r" valign=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-adju=
+st: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMa=
+cSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15=
+px;padding-top: 16px;padding-left: 0;padding-right: 0;padding-bottom: 16px;=
+">
+                      <table border=3D"0" cellpadding=3D"5" cellspacing=3D"=
+0" width=3D"100%" style=3D"border-collapse: collapse;mso-table-lspace: 0pt;=
+mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: =
+100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, He=
+lvetica, Arial, sans-serif;font-size: 15px;">
+                        <tr>
+                          <td width=3D"50%" align=3D"right" valign=3D"top" =
+style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-t=
+ext-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Sego=
+e UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;">
+                            <a href=3D"https://imaginecurve.onelink.me/3972=
+912079/c5b9d717" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjus=
+t: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMac=
+SystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15p=
+x;color: #000000;font-weight: normal;text-decoration: underline;">
+                              <img src=3D"https://res.cloudinary.com/dzatxn=
+6bx/image/upload/v1561119616/email/icon-appstore.png" width=3D"140" style=
+=3D"max-width: 100%;border: 0;height: auto;line-height: 100%;outline: none;=
+text-decoration: none;-ms-interpolation-mode: bicubic;">
+                            </a>
+                          </td>
+                          <td width=3D"50%" align=3D"left" valign=3D"top" s=
+tyle=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-te=
+xt-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont, 'Segoe=
+ UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;">
+                              <a href=3D"https://imaginecurve.onelink.me/39=
+72912079/c5b9d717" style=3D"mso-line-height-rule: exactly;-ms-text-size-adj=
+ust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkM=
+acSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 1=
+5px;color: #000000;font-weight: normal;text-decoration: underline;">
+                                <img src=3D"https://res.cloudinary.com/dzat=
+xn6bx/image/upload/v1561119616/email/icon-playstore.png" width=3D"140" styl=
+e=3D"max-width: 100%;border: 0;height: auto;line-height: 100%;outline: none=
+;text-decoration: none;-ms-interpolation-mode: bicubic;">
+                              </a>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td class=3D"u-padding__topBottom" align=3D"center" valign=3D=
+"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-we=
+bkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSystemFont,=
+ 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px;padding-t=
+op: 32px;padding-left: 0;padding-right: 0;padding-bottom: 32px;">
+                <a href=3D"https://help.curve.com/en_us/can-i-have-my-recei=
+pts-emailed-to-me-BJm5H_2L_" style=3D"mso-line-height-rule: exactly;-ms-tex=
+t-size-adjust: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-syst=
+em, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;fo=
+nt-size: 15px;color: #000000;font-weight: normal;text-decoration: underline=
+;">How to stop receiving Email Receipts</a>
+                <br>
+                <br>
+                <a href=3D"mailto:support@imaginecurve.com?subject=3DReceip=
+t Help: Curve Receipt: Purchase at Continente Online on 06 April 2026 for =
+=E2=82=AC46.05" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust=
+: 100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacS=
+ystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 15px=
+;color: #000000;font-weight: normal;text-decoration: underline;">Something =
+not correct? Contact Curve Support!</a>
+              </td>
+            </tr>
+            <tr>
+              <td class=3D"u-greySmaller u-padding__top" align=3D"center" v=
+align=3D"top" style=3D"mso-line-height-rule: exactly;-ms-text-size-adjust: =
+100%;-webkit-text-size-adjust: 100%;font-family: -apple-system, BlinkMacSys=
+temFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;font-size: 12px;p=
+adding-top: 32px;padding-left: 0;padding-right: 0;padding-bottom: 0;color: =
+#737373;">
+                <em>
+                  Curve operates in the UK and the EEA. The Curve Card and =
+the e-money related to these cards is issued in the UK by Curve UK Limited,=
+ authorised and regulated by the Financial Conduct Authority and in the EEA=
+ by Curve Europe UAB, authorised and regulated by the Bank of Lithuania. Th=
+e Curve Card and Samsung Pay+ are issued pursuant to license by Mastercard =
+International Inc. Mastercard=C2=AE is a registered trademark of Mastercard=
+ International Incorporated.
+                </em>
+                <br>
+                <br>
+                Curve UK Limited is registered in England and Wales, United=
+ Kingdom (company reference number: 09523903) and located at 1-10 Praed Mew=
+s, London, W2 1QY. Curve Europe UAB is registered in Lithuania (company ref=
+erence number: 305626541) and located at Jogailos g. 9, LT-01116 Vilnius.
+                <br>
+                <br>
+                Curve=E2=80=99s products and services are governed by the T=
+erms of Service. Click <a href=3D"https://www.curve.com/en-gb/legal/terms/"=
+>here</a> to access Curve UK Limited=E2=80=99s full T&amp;Cs and <a href=3D=
+"https://www.curve.com/en-gb/legal/eea-terms/">here</a> to access Curve Eur=
+ope UAB=E2=80=99s T&amp;Cs.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </center>
+</body>
+
+</html>=
+
+--o-eKFhmD--

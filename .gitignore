@@ -3,3 +3,6 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Local deploy overrides (per-developer / per-VPS, contains hostnames)
+scripts/deploy.config.local.sh
