@@ -77,6 +77,7 @@ import CurveConfig from '../src/models/CurveConfig.js';
 import Expense from '../src/models/Expense.js';
 import { createImapReader } from '../src/services/imapReader.js';
 import { parseEmail, ParseError } from '../src/services/emailParser.js';
+import { parseExpenseDateOrNull } from '../src/services/expenseDate.js';
 
 dotenv.config({ path: new URL('../.env', import.meta.url) });
 
@@ -96,6 +97,17 @@ const CONFIRMED = args.has('yes');
 const USER_ID = args.get('user-id') ?? null;
 const ENTITY_LIKE = args.get('entity-like') ?? null;
 const MAX_EMAILS = Number(args.get('max-emails') ?? 10000);
+// Updated-receipt guard: Curve re-emits receipts hours/days after the
+// original transaction (subject prefixed "Updated Curve Receipt: …")
+// and the MIME Date on the re-emission is *not* the transaction
+// moment — it's when the update was sent. We detect this by
+// comparing the envelope to the body's own date string (parsed as
+// numerals-in-UTC): any |diff| greater than --update-threshold-h
+// hours is treated as an updated receipt and skipped. Default 12 h
+// covers every real-world body TZ (max observed is PDT UTC-7) while
+// flagging clear re-emissions (usually > 24 h).
+const UPDATE_THRESHOLD_MS =
+  Number(args.get('update-threshold-h') ?? 12) * 3_600_000;
 
 function fmtDelta(ms) {
   const sign = ms >= 0 ? '+' : '-';
@@ -156,9 +168,11 @@ async function processConfig(config) {
     parse_error: 0,
     no_expense: 0,
     already_correct: 0,
+    updated_receipt_skipped: 0,
     needs_update: 0,
   };
   const updates = [];
+  const skippedUpdates = [];
   const deltaHist = new Map();
 
   for (const { uid, source, envelopeDate } of entries) {
@@ -186,6 +200,28 @@ async function processConfig(config) {
       { _id: 1, entity: 1, amount: 1, date: 1 },
     ).lean();
     if (!expense) { stats.no_expense++; continue; }
+
+    // Updated-receipt guard: compare envelope to body-date parsed as
+    // numerals-in-UTC. If they differ by more than the threshold, the
+    // envelope is from a re-emitted receipt and we must NOT overwrite
+    // the original transaction moment with it.
+    const bodyAsUtcMs = parseExpenseDateOrNull(parsed.date)?.getTime?.() ?? null;
+    if (
+      bodyAsUtcMs != null &&
+      Math.abs(envelopeDate.getTime() - bodyAsUtcMs) > UPDATE_THRESHOLD_MS
+    ) {
+      stats.updated_receipt_skipped++;
+      skippedUpdates.push({
+        _id: expense._id,
+        entity: expense.entity,
+        amount: expense.amount,
+        storedDate: expense.date,
+        envelopeDate,
+        bodyDateStr: parsed.date,
+        gapMs: envelopeDate.getTime() - bodyAsUtcMs,
+      });
+      continue;
+    }
     const currentMs = expense.date instanceof Date ? expense.date.getTime() : null;
     const envelopeMs = envelopeDate.getTime();
     if (currentMs === envelopeMs) {
@@ -240,6 +276,25 @@ async function processConfig(config) {
     console.log('\n  Delta histogram (hours):');
     for (const [h, c] of [...deltaHist.entries()].sort((a, b) => a[0] - b[0])) {
       console.log(`    ${h >= 0 ? '+' : ''}${h}h  ${c}`);
+    }
+  }
+
+  if (skippedUpdates.length > 0) {
+    console.log(`\n  Updated-receipt skips (envelope-body gap > ${UPDATE_THRESHOLD_MS / 3_600_000}h — re-emitted receipts where the envelope is not the transaction moment):`);
+    console.log(
+      '    ' +
+        pad('entity', 26) + pad('amount', 10) +
+        pad('stored (kept as-is)', 26) + pad('envelope (ignored)', 26) + 'gap',
+    );
+    for (const u of skippedUpdates) {
+      console.log(
+        '    ' +
+          pad((u.entity || '').slice(0, 24), 26) +
+          pad(`€${Number(u.amount).toFixed(2)}`, 10) +
+          pad(u.storedDate?.toISOString?.() ?? '?', 26) +
+          pad(u.envelopeDate.toISOString(), 26) +
+          fmtDelta(u.gapMs),
+      );
     }
   }
 
