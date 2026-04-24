@@ -56,19 +56,22 @@ O sistema de tracking de despesas do Embers permite registar, categorizar e anal
 **Callbacks:**
 - `before_create :assign_category` - atribui automaticamente uma categoria com base na entidade
 
-**Timezone em `date`** — o email do Curve traz a hora da transacao
-como wall clock Europe/Lisbon sem marcador de timezone ("24 April
-2026 15:40:02"), confirmado contra o rodape "Generated on ... UTC".
-`services/expenseDate.js :: parseExpenseDate` converte os numerais
-para o **instante UTC verdadeiro** via `lisbonWallClockToUtc(...)`,
-um helper `Intl` de dois passos que subtrai o offset de Lisboa
-correcto (WEST = -1h, WET = 0h) — independente da TZ do host. O
-frontend renderiza na TZ do browser do visitante, logo em Portugal
-ve 15:40, em Madrid ve 16:40, em NY ve 10:40. Rows antigas (storage
-pre-fix onde `Date.parse` interpretava o body como hora local do
-server) sao corrigidas por `server/scripts/migrate-expense-date-tz.js`
-— corre primeiro em modo dry-run para validar os deltas antes de
-fazer `--apply --yes`.
+**Timezone em `date`** — a fonte autoritativa e o header MIME `Date:`
+do email (`envelope.date` do imapflow), nao o body. O Curve emite no
+body uma hora formatada em wall clock mas a TZ desse wall clock
+varia por merchant (Celeiro em Europe/Lisbon, Continente e Vodafone
+em CEST, Apple em US Eastern, Aliexpress em UTC+2) — por isso nao da
+para confiar num so fuso. O header MIME e sempre `+0000` e com
+precisao ao segundo, e e isso que alimenta `expense.date` no INSERT.
+O body continua a alimentar o `digest`, `entity`, `amount` e `card`.
+O frontend renderiza com os getters standard na TZ do browser,
+portanto quem abrir em Portugal ve 15:40, em Madrid ve 16:40, em NY
+ve 10:40 para a mesma transacao. Rows antigas (guardadas antes deste
+fix, com o body interpretado como local do server) sao corrigidas
+por `server/scripts/migrate-expense-date-from-imap.js` — liga-se ao
+IMAP, le o envelope de cada receipt, compara com o que esta em Mongo
+por `digest`, propoe UPDATEs num dry-run e so escreve com
+`--apply --yes`.
 
 **Logica de atribuicao de categoria:**
 1. Procura uma `Category` cuja lista `entities` contenha o nome da entidade

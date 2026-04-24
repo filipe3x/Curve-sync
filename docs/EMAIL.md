@@ -194,17 +194,18 @@ Implemented at `server/src/services/emailParser.js`. Key design decisions:
   - `date`: `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
     regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
   - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
-- **Timezone invariant**: Curve embeds the transaction time in the
-  user's Europe/Lisbon wall clock ("24 April 2026 15:40:02") with no
-  timezone marker — verified against the footer "Generated on ... UTC"
-  line (delta matches WEST/WET offset exactly). `services/expenseDate.js
-  :: parseExpenseDate` passes the numerals through `lisbonWallClockToUtc`,
-  a two-pass `Intl` helper that converts them to the **true UTC
-  instant** regardless of host TZ. The frontend renders with plain
-  `getHours()/getMinutes()/…` so display follows the viewer's browser
-  TZ — a Lisbon viewer sees 15:40, a Madrid viewer sees 16:40, a NY
-  viewer sees 10:40. See `CLAUDE.md → Expense Date Timezone Invariant`
-  for the full contract and the matching migration script.
+- **Timezone source**: the body `date` field is NOT the source of
+  truth for `Expense.date`. The Curve body is a locale-formatted wall
+  clock whose timezone varies per merchant (Celeiro → Europe/Lisbon,
+  Continente / Vodafone → CEST, Apple → US Eastern, Aliexpress →
+  UTC+2). Only the MIME `Date:` header is consistently UTC.
+  `imapReader.fetchUnseen` yields `envelopeDate` alongside `source`,
+  and the orchestrator writes it directly into `expense.date`. The
+  body string still feeds the digest + entity + amount + card, just
+  never the stored Date. Frontend uses the standard browser-TZ
+  getters. See `CLAUDE.md → Expense Date Timezone Invariant` for the
+  full contract and `server/scripts/migrate-expense-date-from-imap.js`
+  for the one-shot correction of rows stored before this fix.
 - **Amount parsing** (`parseAmount`): tolerates `€X.XX`, `X,XX€`, `EUR X`,
   European thousands `1.234,56`, US thousands `1,234.56`, negatives for
   refunds. Returns a `Number`.

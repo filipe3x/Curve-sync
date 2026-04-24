@@ -118,20 +118,21 @@ ExpenseSchema.index({ digest: 1 }, { unique: true });
 **Campos que o standalone escreve:**
 - `entity` — nome do estabelecimento (parsed do email)
 - `amount` — valor em EUR (parsed do email)
-- `date` — data da transacao (parsed do email). BSON `Date` em
-  **UTC verdadeiro**. O Curve mete a hora da transacao no wall clock
-  Europe/Lisbon **sem marcador de timezone** ("24 April 2026
-  15:40:02"), confirmado ao cruzar com o rodape "Generated on ... UTC"
-  de cada receipt. `services/expenseDate.js :: parseExpenseDate` passa
-  os numerais por `lisbonWallClockToUtc(...)` — um helper `Intl` de
-  dois passos que subtrai o offset de Lisboa ao wall clock (WEST =
-  -1h, WET = 0h). O resultado nao depende da TZ do host (LA/PDT ou
-  UTC → mesma saida). O frontend ve o ISO em UTC e formata na TZ do
-  browser, logo quem abrir a app em Madrid ve +1h em relacao a
-  Lisboa, quem abrir em NY ve -5h, etc. Rows historicas guardadas
-  antes deste fix (`Date.parse` body interpretado como local) sao
-  corrigidas por `server/scripts/migrate-expense-date-tz.js` (dry-run
-  obrigatorio antes do `--apply`).
+- `date` — data da transacao. BSON `Date` em **UTC verdadeiro**, com
+  precisao ao segundo. A fonte autoritativa e o **header MIME `Date:`**
+  do email (`envelope.date` do imapflow), NAO o body. O body tem
+  sempre uma hora formatada em wall clock mas a TZ desse wall clock
+  varia por merchant (Celeiro emite Europe/Lisbon, Continente e
+  Vodafone emitem CEST, Apple emite US Eastern, Aliexpress emite
+  UTC+2). O header MIME e sempre `+0000`, logo e o que alimenta
+  `expense.date` no INSERT. O body continua a alimentar o `digest`
+  (compat bit-a-bit com o `curve.py`) + `entity` + `amount` + `card`.
+  Frontend usa os getters standard (`getHours()` etc.), logo quem
+  abrir a app em Madrid ve +1h em relacao a Lisboa, quem abrir em NY
+  ve -5h, etc. Rows historicas guardadas antes deste fix sao
+  corrigidas por `server/scripts/migrate-expense-date-from-imap.js`
+  (re-le os envelopes do IMAP e faz UPDATE por `digest`; dry-run
+  obrigatorio antes do `--apply --yes`).
 - `card` — cartao usado (parsed do email)
 - `digest` — SHA-256 de `entity + amount + date + card` (dedup; a
   digest hasheia a STRING original do email, nao o `Date` tipado —

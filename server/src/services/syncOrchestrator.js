@@ -224,7 +224,17 @@ export class FixtureReader {
     for (let i = 0; i < this.files.length; i++) {
       const filePath = path.join(this.dir, this.files[i]);
       const buf = await fs.promises.readFile(filePath);
-      yield { uid: i, source: buf.toString('latin1') };
+      const source = buf.toString('latin1');
+      // Best-effort parse of the MIME `Date:` header so fixtures carry
+      // the same `envelopeDate` contract as ImapReader. Regex is
+      // deliberately permissive — RFC 2822 accepts a few variants and
+      // we only need the first matching `Date:` line at the top of the
+      // message headers. Failure just yields `null`, matching the
+      // reader's fallback for malformed emails.
+      const m = source.match(/^Date:\s*([^\r\n]+)/im);
+      const ms = m ? Date.parse(m[1]) : NaN;
+      const envelopeDate = Number.isNaN(ms) ? null : new Date(ms);
+      yield { uid: i, source, envelopeDate };
     }
   }
 
@@ -360,7 +370,7 @@ export async function syncEmails({ config, reader, dryRun = false }) {
   try {
     await reader.connect();
 
-    for await (const { uid, source } of reader.fetchUnseen()) {
+    for await (const { uid, source, envelopeDate } of reader.fetchUnseen()) {
       summary.total += 1;
 
       // ---- 1. Parse ----
@@ -532,11 +542,21 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       }
 
       // ---- 4. Real insert path ----
-      // `parsed.date` is the raw email string ("06 April 2026 08:53:31").
-      // The digest in `parsed.digest` was hashed from that string for
-      // bit-for-bit parity with curve.py — do NOT re-derive it from
-      // `typedDate` or dedup against Embers-era rows breaks.
-      const typedDate = parseExpenseDateOrNull(parsed.date);
+      // `parsed.date` is the raw body string ("06 April 2026 08:53:31")
+      // which still feeds the digest (bit-for-bit parity with curve.py
+      // — do NOT re-derive `parsed.digest` from anything else or dedup
+      // against Embers-era rows breaks). The stored `expense.date`
+      // field comes from the MIME `Date:` header (`envelopeDate`):
+      // it's always UTC, seconds precision, and independent of the
+      // per-merchant TZ variance in the body. See CLAUDE.md → Expense
+      // Date Timezone Invariant for why the body cannot be trusted as
+      // the source of truth (Celeiro emits Lisbon, Continente emits
+      // CEST, Apple emits US Eastern…).
+      //
+      // Fallback to body parsing only when the envelope header is
+      // missing — should never happen on real Curve emails, but keeps
+      // the old path alive for any legacy fixture without a MIME Date.
+      const typedDate = envelopeDate ?? parseExpenseDateOrNull(parsed.date);
       let expenseDoc = null;
       try {
         expenseDoc = await Expense.create({
