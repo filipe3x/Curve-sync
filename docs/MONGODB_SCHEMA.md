@@ -118,9 +118,20 @@ ExpenseSchema.index({ digest: 1 }, { unique: true });
 **Campos que o standalone escreve:**
 - `entity` — nome do estabelecimento (parsed do email)
 - `amount` — valor em EUR (parsed do email)
-- `date` — data da transacao (parsed do email)
+- `date` — data da transacao (parsed do email). BSON `Date`, com uma
+  convencao especifica: o Curve mete a hora da transacao no wall
+  clock Europe/Lisbon **sem marcador de timezone** ("06 April 2026
+  08:53:31"). `services/expenseDate.js` empacota esses numerais nos
+  **componentes UTC** via `Date.UTC(...)`, logo o instante guardado e
+  independente da TZ do servidor e `getUTC*()` no frontend recupera
+  a hora exacta que vinha no email. Invariante partilhada pelos dois
+  lados: `expense.date` UTC components == Lisbon wall clock. Vale
+  tambem para as 1302 linhas legadas do Embers (Mongoid corre sobre
+  hosts UTC → o mesmo encoding).
 - `card` — cartao usado (parsed do email)
-- `digest` — SHA-256 de `entity + amount + date + card` (dedup)
+- `digest` — SHA-256 de `entity + amount + date + card` (dedup; a
+  digest hasheia a STRING original do email, nao o `Date` tipado —
+  mantem paridade bit-a-bit com o `curve.py` do Embers)
 - `user_id` — ObjectId do user (vem da CurveConfig)
 - `category_id` — ObjectId da categoria (auto-assigned)
 - `created_at`, `updated_at` — geridos pelo Mongoose timestamps

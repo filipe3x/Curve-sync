@@ -194,6 +194,17 @@ Implemented at `server/src/services/emailParser.js`. Key design decisions:
   - `date`: `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
     regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
   - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
+- **Timezone invariant**: Curve embeds the transaction time in the
+  user's local wall clock ("06 April 2026 08:53:31") with no timezone
+  marker. `services/expenseDate.js :: parseExpenseDate` packs those
+  numerals into a Date's **UTC components** via `Date.UTC(...)` so the
+  stored moment is server-TZ-independent (a Lisbon-DST prod host and a
+  UTC CI box produce identical values). The frontend
+  (`client/src/utils/relativeDate.js`) reads them back with
+  `getUTC*()` so rendering is browser-TZ-independent — users hitting
+  the app from outside Portugal still see the email wall clock. The
+  two sides share a single invariant: **`expense.date` UTC components
+  == email wall clock (Europe/Lisbon)**.
 - **Amount parsing** (`parseAmount`): tolerates `€X.XX`, `X,XX€`, `EUR X`,
   European thousands `1.234,56`, US thousands `1,234.56`, negatives for
   refunds. Returns a `Number`.
@@ -523,13 +534,14 @@ the scheduler is mid-run can't accidentally open a second IMAP session.
 
 #### Deliberately deferred
 
-- **`Expense.date` is a `String`, not a `Date`** — bit-for-bit
-  compatibility with `curve.py`, which never parsed the date. This
-  means lexicographic ordering over `"22 Mar 2026 14:03:21"` does NOT
-  produce chronological order (Apr < Mar alphabetically). The
-  orchestrator does not solve this; the dashboard will need its own
-  parser once it does month-by-month rendering. **Do NOT change the
-  schema** — Embers' parallel ingestion inserts with the same format.
+- **`Expense.date` schema** — ~~stored as `String`~~ RESOLVED. The
+  schema now declares `date: { type: Date, required: true }`
+  (`server/src/models/Expense.js`) and the orchestrator types the
+  string via `parseExpenseDateOrNull` before insert. The digest still
+  hashes the original string form so dedup with Embers' parallel
+  curve.py ingestion is unaffected. Wall-clock numerals are packed
+  into UTC components — see the "Timezone invariant" bullet in
+  Phase 1 above.
 - **Multi-process sync lock** — deferred to Phase 5. In-memory flag
   is enough while Curve Sync runs as a single Node process.
 - **Canary enforcement beyond dashboard colouring** — the Phase 3

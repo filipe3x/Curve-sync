@@ -75,6 +75,16 @@ Weekly budget = EUR 295/4. Score formula: `score = (log(weekly_savings + 1) / lo
 
 The original `curve.py` (in `docs/embers-reference/`) extracts fields from Curve Card HTML emails using CSS selectors: `entity` from `td.u-bold`, `amount` (EUR) from second `td.u-bold`, `date` from `td.u-greySmaller.u-padding__top--half`, `card` from penultimate `td.u-padding__top--half`. The standalone version should port this to cheerio with fallback selectors for resilience.
 
+### Expense Date Timezone Invariant
+
+Curve receipts embed the transaction time in the user's Europe/Lisbon wall clock (`"06 April 2026 08:53:31"`) with **no timezone marker**. To keep storage server-TZ-independent and display browser-TZ-independent, both sides agree on a single invariant: **`expense.date` UTC components == email wall clock**. The numerals you see in the email are the numerals `getUTC*()` returns — nothing gets reinterpreted in anyone's local TZ.
+
+- Server (`server/src/services/expenseDate.js`): `parseExpenseDate` tries the "DD Month YYYY HH:MM:SS" regex first and packs numerals via `Date.UTC(...)`. `Date.parse` fallback only runs for shapes that carry their own TZ (ISO with `Z`, RFC 2822).
+- Frontend (`client/src/utils/relativeDate.js`): `formatExpenseDateFull`, `formatExpenseDate`, and `formatAbsoluteDate` read wall-clock via `getUTCHours()/getUTCMinutes()/…`. `formatExpenseDate` fabricates "now" as a Date whose UTC components are the current Europe/Lisbon wall clock (`Intl.DateTimeFormat` with `timeZone: 'Europe/Lisbon'`), so relative diffs live in the same space as the expense.
+- Back-compat: the 1302 rows in the dev dump (Embers/Mongoid + older Curve Sync inserts on UTC hosts) land in the same shape because Ruby's `DateTime.parse` on a UTC host produces the same wall-clock-as-UTC encoding. No migration needed.
+
+Never switch `expense.date` to "true UTC" without a migration pass — Embers-era rows would shift by the Lisbon offset and every historical view (dashboard, `/expenses`, `/categories` recent-expense lists) would render 1 h off during WEST.
+
 ### Email Authentication (OAuth2 — no proxies)
 
 The V1 implementation used Simon Robinson's `email-oauth2-proxy` (Python) as a localhost bridge that translated plain IMAP LOGIN into XOAUTH2 against Microsoft. That entire path has been retired — the proxy, its systemd unit, its INI-style `emailproxy.config`, and the `EMAIL_AUTH_V1_PROXY.md` design doc are all gone. `imapflow` now speaks XOAUTH2 directly against `outlook.office365.com:993`, and `@azure/msal-node` owns the full token lifecycle.
