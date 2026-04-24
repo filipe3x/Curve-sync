@@ -118,16 +118,20 @@ ExpenseSchema.index({ digest: 1 }, { unique: true });
 **Campos que o standalone escreve:**
 - `entity` — nome do estabelecimento (parsed do email)
 - `amount` — valor em EUR (parsed do email)
-- `date` — data da transacao (parsed do email). BSON `Date`, com uma
-  convencao especifica: o Curve mete a hora da transacao no wall
-  clock Europe/Lisbon **sem marcador de timezone** ("06 April 2026
-  08:53:31"). `services/expenseDate.js` empacota esses numerais nos
-  **componentes UTC** via `Date.UTC(...)`, logo o instante guardado e
-  independente da TZ do servidor e `getUTC*()` no frontend recupera
-  a hora exacta que vinha no email. Invariante partilhada pelos dois
-  lados: `expense.date` UTC components == Lisbon wall clock. Vale
-  tambem para as 1302 linhas legadas do Embers (Mongoid corre sobre
-  hosts UTC → o mesmo encoding).
+- `date` — data da transacao (parsed do email). BSON `Date` em
+  **UTC verdadeiro**. O Curve mete a hora da transacao no wall clock
+  Europe/Lisbon **sem marcador de timezone** ("24 April 2026
+  15:40:02"), confirmado ao cruzar com o rodape "Generated on ... UTC"
+  de cada receipt. `services/expenseDate.js :: parseExpenseDate` passa
+  os numerais por `lisbonWallClockToUtc(...)` — um helper `Intl` de
+  dois passos que subtrai o offset de Lisboa ao wall clock (WEST =
+  -1h, WET = 0h). O resultado nao depende da TZ do host (LA/PDT ou
+  UTC → mesma saida). O frontend ve o ISO em UTC e formata na TZ do
+  browser, logo quem abrir a app em Madrid ve +1h em relacao a
+  Lisboa, quem abrir em NY ve -5h, etc. Rows historicas guardadas
+  antes deste fix (`Date.parse` body interpretado como local) sao
+  corrigidas por `server/scripts/migrate-expense-date-tz.js` (dry-run
+  obrigatorio antes do `--apply`).
 - `card` — cartao usado (parsed do email)
 - `digest` — SHA-256 de `entity + amount + date + card` (dedup; a
   digest hasheia a STRING original do email, nao o `Date` tipado —

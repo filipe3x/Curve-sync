@@ -77,13 +77,13 @@ The original `curve.py` (in `docs/embers-reference/`) extracts fields from Curve
 
 ### Expense Date Timezone Invariant
 
-Curve receipts embed the transaction time in the user's Europe/Lisbon wall clock (`"06 April 2026 08:53:31"`) with **no timezone marker**. To keep storage server-TZ-independent and display browser-TZ-independent, both sides agree on a single invariant: **`expense.date` UTC components == email wall clock**. The numerals you see in the email are the numerals `getUTC*()` returns — nothing gets reinterpreted in anyone's local TZ.
+Curve receipts embed the transaction time in the user's Europe/Lisbon wall clock (`"24 April 2026 15:40:02"`) with **no timezone marker** — confirmed by comparing the body field with the footer line "Generated on ... UTC" (delta matches Lisbon's offset exactly, WEST or WET). The app stores the **true UTC instant** and renders in the **viewer's browser TZ**, so a Lisbon viewer sees 15:40, a Madrid viewer sees 16:40, a NY viewer sees 10:40 — all for the same transaction.
 
-- Server (`server/src/services/expenseDate.js`): `parseExpenseDate` tries the "DD Month YYYY HH:MM:SS" regex first and packs numerals via `Date.UTC(...)`. `Date.parse` fallback only runs for shapes that carry their own TZ (ISO with `Z`, RFC 2822).
-- Frontend (`client/src/utils/relativeDate.js`): `formatExpenseDateFull`, `formatExpenseDate`, and `formatAbsoluteDate` read wall-clock via `getUTCHours()/getUTCMinutes()/…`. `formatExpenseDate` fabricates "now" as a Date whose UTC components are the current Europe/Lisbon wall clock (`Intl.DateTimeFormat` with `timeZone: 'Europe/Lisbon'`), so relative diffs live in the same space as the expense.
-- Back-compat: the 1302 rows in the dev dump (Embers/Mongoid + older Curve Sync inserts on UTC hosts) land in the same shape because Ruby's `DateTime.parse` on a UTC host produces the same wall-clock-as-UTC encoding. No migration needed.
+- Server (`server/src/services/expenseDate.js`): `parseExpenseDate` runs the "DD Month YYYY HH:MM:SS" regex and feeds the numerals to `lisbonWallClockToUtc(…)`, a two-pass `Intl` helper that subtracts the Lisbon offset at that wall clock (WEST → −1 h, WET → −0 h). Host-TZ-independent — the LA/PDT prod box and a UTC CI box produce identical Dates. `Date.parse` fallback only runs for shapes that carry their own TZ (ISO with `Z`, RFC 2822).
+- Frontend (`client/src/utils/relativeDate.js`): `formatExpenseDateFull`, `formatExpenseDate`, and `formatAbsoluteDate` use the standard `getHours()/getMinutes()/…` getters — no TZ pinning, no wall-clock tricks. Relative comparisons use `Date.now()` directly.
+- Migration (`server/scripts/migrate-expense-date-tz.js`): corrects rows stored by the buggy `Date.parse(body)` path. Reverses the shift using the server's TZ offset at each row's `created_at` (UTC before the `--cutoff-date`, `--server-tz` after), then re-interprets the recovered body numerals as Lisbon. Always dry-runs first; requires `--apply --yes` to write. Use `--since=ISO` to scope to a date range.
 
-Never switch `expense.date` to "true UTC" without a migration pass — Embers-era rows would shift by the Lisbon offset and every historical view (dashboard, `/expenses`, `/categories` recent-expense lists) would render 1 h off during WEST.
+Never switch back to the "wall-clock stored as UTC" convention without a migration pass in the other direction — every browser outside Lisbon would drift by their offset.
 
 ### Email Authentication (OAuth2 — no proxies)
 

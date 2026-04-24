@@ -56,17 +56,19 @@ O sistema de tracking de despesas do Embers permite registar, categorizar e anal
 **Callbacks:**
 - `before_create :assign_category` - atribui automaticamente uma categoria com base na entidade
 
-**Timezone em `date`** — o email do Curve traz a hora da transacao no
-wall clock Europe/Lisbon sem marcador de timezone ("06 April 2026
-08:53:31"). Tanto o `curve.py` do Embers (sob Mongoid/Ruby em host
-UTC) como o `services/expenseDate.js` do Curve Sync guardam os
-numerais directamente nos **componentes UTC** do `Date` — o instante
-BSON resultante nao depende da TZ do servidor. No frontend,
-`client/src/utils/relativeDate.js` usa `getUTC*()` para ler esses
-numerais, garantindo que quem abre a app de fora de Portugal ve a
-mesma hora que veio no email. Invariante: `expense.date` UTC
-components == Lisbon wall clock — ver `CLAUDE.md → Expense Date
-Timezone Invariant` para o detalhe.
+**Timezone em `date`** — o email do Curve traz a hora da transacao
+como wall clock Europe/Lisbon sem marcador de timezone ("24 April
+2026 15:40:02"), confirmado contra o rodape "Generated on ... UTC".
+`services/expenseDate.js :: parseExpenseDate` converte os numerais
+para o **instante UTC verdadeiro** via `lisbonWallClockToUtc(...)`,
+um helper `Intl` de dois passos que subtrai o offset de Lisboa
+correcto (WEST = -1h, WET = 0h) — independente da TZ do host. O
+frontend renderiza na TZ do browser do visitante, logo em Portugal
+ve 15:40, em Madrid ve 16:40, em NY ve 10:40. Rows antigas (storage
+pre-fix onde `Date.parse` interpretava o body como hora local do
+server) sao corrigidas por `server/scripts/migrate-expense-date-tz.js`
+— corre primeiro em modo dry-run para validar os deltas antes de
+fazer `--apply --yes`.
 
 **Logica de atribuicao de categoria:**
 1. Procura uma `Category` cuja lista `entities` contenha o nome da entidade

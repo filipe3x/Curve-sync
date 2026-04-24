@@ -19,25 +19,27 @@
  * reason string if they care (the backfill does; the INSERT paths
  * don't — they just write `date: null` and move on).
  *
- * Handles the three shapes observed in the shared `expenses`
- * collection (see scripts/analyze-expense-dates.js for the dev-dump
- * survey):
+ * Timezone contract
+ * -----------------
+ * Curve emails embed the transaction time as a Europe/Lisbon wall
+ * clock ("24 April 2026 15:40:02") with no timezone marker — we
+ * confirmed against the footer line "Generated on ... UTC" in real
+ * receipts that the body delta matches exactly the Lisbon offset at
+ * that date (WEST in summer, WET in winter). This parser interprets
+ * the numerals AS Lisbon and returns the true UTC moment, so
+ * `Expense.date` is always a real instant (not "wall clock stored as
+ * UTC"). Frontend then renders in the viewer's browser TZ via the
+ * standard Date getters — a Lisbon viewer sees 15:40, a Madrid viewer
+ * sees 16:40, a NY viewer sees 10:40.
  *
- *   1. already a Date (BSON Date, typically from Embers' Mongoid
- *      write path which declares `field :date, type: DateTime`) →
- *      pass through
- *   2. string in the canonical Curve format ("06 April 2026
- *      08:53:31") or anything `Date.parse` can handle → normalised
- *      to a Date via `new Date(Date.parse(...))`
- *   3. string that Date.parse rejects but matches the explicit
- *      "DD Month YYYY HH:MM(:SS)?" regex → parsed manually, used as
- *      a safety net for Node builds with minimal ICU where Date.parse
- *      disagrees with V8 mainline
- *
- * Everything else (null, empty string, weird numbers, unparseable
- * strings) returns `{ date: null, reason: <descriptor> }`.
+ * Historical rows stored before this fix (Date.parse interpreting the
+ * body as server-local time) are shifted forward by
+ * `server_offset + lisbon_offset` hours. Use
+ * scripts/migrate-expense-date-tz.js to correct them.
  */
 
+// MONTHS stays exported-shape agnostic — used only by the regex branch
+// that tokenises English month names out of the Curve body.
 const MONTHS = {
   jan: 0, january: 0,
   feb: 1, february: 1,
@@ -52,6 +54,63 @@ const MONTHS = {
   nov: 10, november: 10,
   dec: 11, december: 11,
 };
+
+// Hardcoded to Europe/Lisbon — the Curve body's TZ for Portuguese
+// users. Exposed as a constant (not inlined) so the migration script
+// can reuse the exact same conversion primitive.
+export const CURVE_BODY_TIMEZONE = 'Europe/Lisbon';
+
+// Cached to avoid allocating a formatter per parse. `en-CA` gives
+// ISO-shaped numerals that are stable to read.
+const LISBON_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: CURVE_BODY_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+/**
+ * Convert a set of Y/M/D/h/m/s numerals interpreted in
+ * `Europe/Lisbon` to the true UTC moment they represent.
+ *
+ * Uses the two-pass Intl trick: pack the wall clock into a Date as if
+ * it were UTC, ask Intl what that instant reads as in Lisbon, and the
+ * delta is the offset we have to subtract. Handles WEST/WET switches
+ * correctly without bundling a TZ database.
+ *
+ * @param {number} year     e.g. 2026
+ * @param {number} month    0-indexed (0 = January)
+ * @param {number} day      1-31
+ * @param {number} hour     0-23
+ * @param {number} minute   0-59
+ * @param {number} second   0-59
+ * @returns {Date} the UTC instant equivalent to the given Lisbon wall clock
+ */
+export function lisbonWallClockToUtc(year, month, day, hour, minute, second) {
+  // First pass: pretend the numerals are UTC so we have a concrete
+  // instant to interrogate.
+  const guessMs = Date.UTC(year, month, day, hour, minute, second);
+  // What does that instant actually read as in Lisbon?
+  const parts = LISBON_FMT.formatToParts(new Date(guessMs));
+  const get = (type) => Number(parts.find((p) => p.type === type).value);
+  const lH = get('hour');
+  const lisbonAsUtcMs = Date.UTC(
+    get('year'),
+    get('month') - 1,
+    get('day'),
+    // Intl emits "24" for midnight in some runtimes — collapse to 0.
+    lH === 24 ? 0 : lH,
+    get('minute'),
+    get('second'),
+  );
+  // Offset (signed, ms): positive means Lisbon is ahead of UTC.
+  const offsetMs = lisbonAsUtcMs - guessMs;
+  return new Date(guessMs - offsetMs);
+}
 
 export function parseExpenseDate(value) {
   if (value == null) return { date: null, reason: 'null_or_undefined' };
@@ -70,16 +129,12 @@ export function parseExpenseDate(value) {
   const trimmed = value.trim();
   if (trimmed === '') return { date: null, reason: 'empty_string' };
 
-  // Path 1 — explicit "DD Month YYYY HH:MM(:SS)?" regex, parsed with
-  // Date.UTC so the result is server-TZ-independent. Curve emails
-  // carry the transaction time in the user's local wall clock with
-  // no timezone marker ("24 April 2026 15:40:33"); punting that to
-  // Date.parse made the stored moment drift by the host offset (an
-  // Lisbon-DST prod server vs. UTC CI box produced Dates 1 h apart).
-  // Packing the wall-clock numerals into UTC components keeps the
-  // "getUTC*() recovers the email wall clock" invariant that the
-  // frontend relies on — see client/src/utils/relativeDate.js.
-  // Time portion is optional (`25 Dec 2025, 14:30` form).
+  // Path 1 — Curve body format "DD Month YYYY HH:MM(:SS)?". Numerals
+  // are the user's Europe/Lisbon wall clock; we convert to the true
+  // UTC instant explicitly (not via Date.parse, which would re-read
+  // them in whatever TZ the host is configured for — the bug that
+  // caused an 8 h drift on the LA/PDT prod server). Time portion is
+  // optional (`25 Dec 2025, 14:30` form).
   const m = trimmed.match(
     /^(\d{1,2})\s+([A-Za-z]+)(?:,)?\s+(\d{4})(?:[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
   );
@@ -91,7 +146,7 @@ export function parseExpenseDate(value) {
     const minute = Number(m[5] ?? 0);
     const second = Number(m[6] ?? 0);
     if (month != null) {
-      const d = new Date(Date.UTC(year, month, day, hour, minute, second));
+      const d = lisbonWallClockToUtc(year, month, day, hour, minute, second);
       if (!Number.isNaN(d.getTime())) {
         return { date: d, reason: 'regex_ok' };
       }

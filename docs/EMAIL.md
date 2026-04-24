@@ -195,16 +195,16 @@ Implemented at `server/src/services/emailParser.js`. Key design decisions:
     regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
   - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
 - **Timezone invariant**: Curve embeds the transaction time in the
-  user's local wall clock ("06 April 2026 08:53:31") with no timezone
-  marker. `services/expenseDate.js :: parseExpenseDate` packs those
-  numerals into a Date's **UTC components** via `Date.UTC(...)` so the
-  stored moment is server-TZ-independent (a Lisbon-DST prod host and a
-  UTC CI box produce identical values). The frontend
-  (`client/src/utils/relativeDate.js`) reads them back with
-  `getUTC*()` so rendering is browser-TZ-independent — users hitting
-  the app from outside Portugal still see the email wall clock. The
-  two sides share a single invariant: **`expense.date` UTC components
-  == email wall clock (Europe/Lisbon)**.
+  user's Europe/Lisbon wall clock ("24 April 2026 15:40:02") with no
+  timezone marker — verified against the footer "Generated on ... UTC"
+  line (delta matches WEST/WET offset exactly). `services/expenseDate.js
+  :: parseExpenseDate` passes the numerals through `lisbonWallClockToUtc`,
+  a two-pass `Intl` helper that converts them to the **true UTC
+  instant** regardless of host TZ. The frontend renders with plain
+  `getHours()/getMinutes()/…` so display follows the viewer's browser
+  TZ — a Lisbon viewer sees 15:40, a Madrid viewer sees 16:40, a NY
+  viewer sees 10:40. See `CLAUDE.md → Expense Date Timezone Invariant`
+  for the full contract and the matching migration script.
 - **Amount parsing** (`parseAmount`): tolerates `€X.XX`, `X,XX€`, `EUR X`,
   European thousands `1.234,56`, US thousands `1,234.56`, negatives for
   refunds. Returns a `Number`.
