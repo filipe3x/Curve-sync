@@ -18,13 +18,65 @@
 // 23:00 read this morning at 08:00 should say "ontem", not "há 9 h".
 // Users think in days, not in 24-hour wheels.
 //
-// Parsing is defensive: Expense.date is free-form (kept compatible
-// with curve.py — see CLAUDE.md → Deliberately deferred) and V8's
-// Date.parse is what the backend also uses. Anything unparseable
-// falls through to the raw input so the row never renders blank.
+// Timezone contract: Curve receipt emails carry the transaction time
+// in the user's local wall clock ("24 April 2026 15:40:33") with no
+// timezone marker. The backend parses those numerals as UTC (see
+// server/src/services/expenseDate.js) so the stored Date's UTC
+// components *are* the Europe/Lisbon wall clock. This module reads
+// those UTC components back directly — rendering is therefore
+// independent of the browser's timezone, which matters for users
+// hitting the app from elsewhere (mobile roaming, laptop away from
+// home). For relative comparisons we fabricate "now" as a Date whose
+// UTC components are the current Lisbon wall clock, so the diff is in
+// the same space as the expense.
 
-function startOfLocalDay(d) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+// Europe/Lisbon is hardcoded: this is a Portugal-focused app and the
+// Curve receipts are emitted in the user's Lisbon-tied Curve account
+// timezone (see CLAUDE.md → Stack / MVP scope).
+const APP_TZ = 'Europe/Lisbon';
+
+const WALL_CLOCK_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: APP_TZ,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+// Return a Date whose UTC components equal the current Europe/Lisbon
+// wall clock. Used only for relative comparisons against expense
+// Dates (which also store the wall clock in UTC components).
+function nowAsWallClockUtc() {
+  const parts = WALL_CLOCK_FMT.formatToParts(new Date());
+  const get = (type) => Number(parts.find((p) => p.type === type).value);
+  // Intl emits "24" for midnight in some engines — normalise.
+  const h = get('hour');
+  return new Date(Date.UTC(
+    get('year'),
+    get('month') - 1,
+    get('day'),
+    h === 24 ? 0 : h,
+    get('minute'),
+    get('second'),
+  ));
+}
+
+function startOfUtcDay(d) {
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+// Accept either an already-serialised Date/ISO string or the legacy
+// "06 April 2026 08:53:31" body string. Either way, interpret the
+// calendar components as Europe/Lisbon wall clock and return them
+// packed into a Date's UTC components (so getUTC* reads them back).
+function parseInput(input) {
+  if (input == null || input === '') return null;
+  const t = Date.parse(input);
+  if (Number.isNaN(t)) return null;
+  return new Date(t);
 }
 
 // Build a single formatter once and reuse — constructing
@@ -34,13 +86,13 @@ const ABSOLUTE_FMT = new Intl.DateTimeFormat('pt-PT', {
   day: '2-digit',
   month: 'short',
   year: 'numeric',
+  timeZone: 'UTC',
 });
 
 export function formatAbsoluteDate(input) {
-  if (input == null || input === '') return '—';
-  const parsed = Date.parse(input);
-  if (Number.isNaN(parsed)) return String(input);
-  return ABSOLUTE_FMT.format(new Date(parsed));
+  const d = parseInput(input);
+  if (!d) return input == null || input === '' ? '—' : String(input);
+  return ABSOLUTE_FMT.format(d);
 }
 
 // Composed manually to avoid the verbose "10 de abr. de 2026, 11:58"
@@ -51,15 +103,13 @@ const MONTHS_PT_SHORT = [
 ];
 
 export function formatExpenseDateFull(input) {
-  if (input == null || input === '') return '—';
-  const parsed = Date.parse(input);
-  if (Number.isNaN(parsed)) return String(input);
-  const d = new Date(parsed);
-  const day = String(d.getDate()).padStart(2, '0');
-  const mon = MONTHS_PT_SHORT[d.getMonth()];
-  const year = d.getFullYear();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
+  const d = parseInput(input);
+  if (!d) return input == null || input === '' ? '—' : String(input);
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const mon = MONTHS_PT_SHORT[d.getUTCMonth()];
+  const year = d.getUTCFullYear();
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
   return `${day} ${mon} ${year}, ${hh}:${mm}`;
 }
 
@@ -72,15 +122,18 @@ export function formatExpenseDateFull(input) {
  * @returns {string}
  */
 export function formatExpenseDate(input, now) {
-  if (input == null || input === '') return '—';
-  const parsed = Date.parse(input);
-  if (Number.isNaN(parsed)) return String(input);
+  const then = parseInput(input);
+  if (!then) return input == null || input === '' ? '—' : String(input);
 
-  const then = new Date(parsed);
+  // `nowAsWallClockUtc()` puts the current Europe/Lisbon wall clock
+  // into a Date's UTC components — the same space the expense Date
+  // lives in — so subtracting the two yields a real elapsed duration.
   const nowDate =
     now instanceof Date
       ? now
-      : new Date(typeof now === 'number' ? now : Date.now());
+      : typeof now === 'number'
+        ? new Date(now)
+        : nowAsWallClockUtc();
   const diffMs = nowDate.getTime() - then.getTime();
 
   // Future timestamps (clock skew, bad data) fall straight through
@@ -88,7 +141,7 @@ export function formatExpenseDate(input, now) {
   if (diffMs < 0) return ABSOLUTE_FMT.format(then);
 
   const dayDiff = Math.round(
-    (startOfLocalDay(nowDate) - startOfLocalDay(then)) / 86_400_000,
+    (startOfUtcDay(nowDate) - startOfUtcDay(then)) / 86_400_000,
   );
 
   if (dayDiff === 0) {

@@ -70,15 +70,16 @@ export function parseExpenseDate(value) {
   const trimmed = value.trim();
   if (trimmed === '') return { date: null, reason: 'empty_string' };
 
-  // Path 1 — V8 Date.parse. Handles the canonical Curve string, ISO,
-  // RFC 2822, and most reasonable variants.
-  const t = Date.parse(trimmed);
-  if (!Number.isNaN(t)) return { date: new Date(t), reason: 'parse_ok' };
-
-  // Path 2 — explicit DD Month YYYY HH:MM(:SS)? regex. Parses the
-  // numbers manually so we don't depend on Date.parse handling
-  // English month names in whatever locale the host is configured
-  // for. Time portion is optional (`25 Dec 2025, 14:30` form).
+  // Path 1 — explicit "DD Month YYYY HH:MM(:SS)?" regex, parsed with
+  // Date.UTC so the result is server-TZ-independent. Curve emails
+  // carry the transaction time in the user's local wall clock with
+  // no timezone marker ("24 April 2026 15:40:33"); punting that to
+  // Date.parse made the stored moment drift by the host offset (an
+  // Lisbon-DST prod server vs. UTC CI box produced Dates 1 h apart).
+  // Packing the wall-clock numerals into UTC components keeps the
+  // "getUTC*() recovers the email wall clock" invariant that the
+  // frontend relies on — see client/src/utils/relativeDate.js.
+  // Time portion is optional (`25 Dec 2025, 14:30` form).
   const m = trimmed.match(
     /^(\d{1,2})\s+([A-Za-z]+)(?:,)?\s+(\d{4})(?:[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
   );
@@ -96,6 +97,12 @@ export function parseExpenseDate(value) {
       }
     }
   }
+
+  // Path 2 — V8 Date.parse for everything else (ISO with explicit TZ,
+  // RFC 2822). Inputs reaching this branch carry their own timezone,
+  // so Date.parse produces the correct moment regardless of host TZ.
+  const t = Date.parse(trimmed);
+  if (!Number.isNaN(t)) return { date: new Date(t), reason: 'parse_ok' };
 
   return { date: null, reason: 'unparseable' };
 }
