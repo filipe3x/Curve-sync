@@ -51,22 +51,34 @@ function formatRelativePt(iso) {
   return `há ${days} d`;
 }
 
-// Subtitle for the "Último sync" card. The card's main value is anchored
-// to `last_sync_at` — the timestamp of the *most recent* sync run —
-// while `emails_processed_total` is cumulative and only bumped on real
-// inserts (see syncOrchestrator.js:671). Pairing the two directly reads
-// as "N emails processed 9 min ago", which is wrong when the last run
-// brought zero new receipts: the 12 in the total came in at some
-// earlier moment. To stop that mismatch we anchor the count to
-// `last_email_at` instead — the stamp of the last real insert — and
-// label accordingly: today → "às HH:MM", otherwise "a DD/MM/YYYY".
-function formatLastSyncSub(emailsProcessed, lastEmailAt, lastSyncStatus) {
-  if (!emailsProcessed) {
-    // No inserts yet: fall back to the sync status (ok / error) so the
-    // card still has something meaningful instead of "0 emails novos".
+// Subtitle for the "Último sync" card. Reports the size and timing
+// of the **last batch** the orchestrator inserted — NOT a running
+// total. The number is `summary.ok` from the most recent sync run
+// that produced ≥ 1 new expense (`CurveConfig.last_emails_synced`),
+// paired with the timestamp of that batch (`last_email_at`).
+//
+// "Sticky on the last meaningful event" is the design point: a quiet
+// poll that finds nothing leaves both fields untouched, so the card
+// keeps showing "5 emails novos às 12:20" until the next non-empty
+// run replaces it. Resetting to "0 emails novos" the moment a sync
+// returns empty would be noise — the user wants to know what
+// arrived, not that the last poll happened to be quiet.
+//
+// Label format: today → "às HH:MM", otherwise → "a DD/MM/YYYY".
+//
+// History: this used to read `emails_processed_total`, the all-time
+// cumulative counter. That number is uninformative on a long-running
+// account and conflated "inserts ever" with "inserts this batch".
+// Cumulative still lives on the model for the `first_sync_completed`
+// audit log, just not for the dashboard.
+function formatLastSyncSub(lastEmailsSynced, lastEmailAt, lastSyncStatus) {
+  const n = Number(lastEmailsSynced);
+  if (!Number.isFinite(n) || n <= 0) {
+    // No successful batch yet (fresh config or every run so far has
+    // been empty / errored). Fall back to the run status so the card
+    // still says something useful instead of "0 emails novos".
     return lastSyncStatus ?? null;
   }
-  const n = Number(emailsProcessed);
   const count = n.toLocaleString('pt-PT');
   const noun = n === 1 ? 'email novo' : 'emails novos';
   if (!lastEmailAt) return `${count} ${noun}`;
@@ -796,7 +808,11 @@ export default function DashboardPage() {
             syncStatus?.last_sync_at ?? stats?.last_sync_at,
           )}
           sub={formatLastSyncSub(
-            stats?.emails_processed,
+            // Prefer the lightweight /sync/status payload (polled on
+            // the scheduler cadence) so the card refreshes without
+            // waiting for the heavier dashboard re-fetch. Fall back
+            // to dashboard stats on first paint.
+            syncStatus?.last_emails_synced ?? stats?.last_emails_synced,
             syncStatus?.last_email_at,
             syncStatus?.last_sync_status ?? stats?.last_sync_status,
           )}

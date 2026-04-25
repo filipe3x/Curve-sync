@@ -56,6 +56,23 @@ O sistema de tracking de despesas do Embers permite registar, categorizar e anal
 **Callbacks:**
 - `before_create :assign_category` - atribui automaticamente uma categoria com base na entidade
 
+**Timezone em `date`** — a fonte autoritativa e o header MIME `Date:`
+do email (`envelope.date` do imapflow), nao o body. O Curve emite no
+body uma hora formatada em wall clock mas a TZ desse wall clock
+varia por merchant (Celeiro em Europe/Lisbon, Continente e Vodafone
+em CEST, Apple em US Eastern, Aliexpress em UTC+2) — por isso nao da
+para confiar num so fuso. O header MIME e sempre `+0000` e com
+precisao ao segundo, e e isso que alimenta `expense.date` no INSERT.
+O body continua a alimentar o `digest`, `entity`, `amount` e `card`.
+O frontend renderiza com os getters standard na TZ do browser,
+portanto quem abrir em Portugal ve 15:40, em Madrid ve 16:40, em NY
+ve 10:40 para a mesma transacao. Rows antigas (guardadas antes deste
+fix, com o body interpretado como local do server) sao corrigidas
+por `server/scripts/migrate-expense-date-from-imap.js` — liga-se ao
+IMAP, le o envelope de cada receipt, compara com o que esta em Mongo
+por `digest`, propoe UPDATEs num dry-run e so escreve com
+`--apply --yes`.
+
 **Logica de atribuicao de categoria:**
 1. Procura uma `Category` cuja lista `entities` contenha o nome da entidade
 2. Se nao encontrar, cria/usa a categoria "General"
@@ -175,7 +192,13 @@ O Curve e um cartao agregador que encaminha pagamentos para outros cartoes. Cada
 3. **Parsing HTML**: usa BeautifulSoup para extrair dados do email:
    - `entity` - nome do estabelecimento (tag `td.u-bold`)
    - `amount` - valor em EUR (segundo `td.u-bold`, remove simbolo `€`)
-   - `date` - data da transacao (tag `td.u-greySmaller.u-padding__top--half`)
+   - `date` - string da hora (tag `td.u-greySmaller.u-padding__top--half`).
+     **Nota:** no Curve Sync moderno este campo so alimenta o digest;
+     o `Expense.date` BSON e gravado a partir do header MIME `Date:`
+     do email (`envelope.date`), porque a TZ do body varia por
+     merchant e nao e fiavel — ver `CLAUDE.md → Expense Date Timezone
+     Invariant` e a seccao **Modelo de Dados → Timezone em date**
+     acima.
    - `card` - nome e cartao usado (penultimo `td.u-padding__top--half`)
 4. **Digest**: gera hash SHA-256 da concatenacao dos campos extraidos
 5. **POST para API**: envia os dados como JSON para `/admin/expenses/add_expense`

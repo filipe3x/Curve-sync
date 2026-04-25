@@ -1,8 +1,7 @@
 // pt-PT relative date formatter for the expenses tables (ROADMAP §2.9).
 //
-// The goal is simple: turn a server-serialised date string ("06 April
-// 2026 08:53:31", or an ISO) into something a human reads at a glance.
-// Seven bands:
+// The goal is simple: turn a server-serialised ISO timestamp into
+// something a human reads at a glance. Seven bands:
 //
 //   diff (local civil)     →  text
 //   --------------------      ----------------------
@@ -18,10 +17,13 @@
 // 23:00 read this morning at 08:00 should say "ontem", not "há 9 h".
 // Users think in days, not in 24-hour wheels.
 //
-// Parsing is defensive: Expense.date is free-form (kept compatible
-// with curve.py — see CLAUDE.md → Deliberately deferred) and V8's
-// Date.parse is what the backend also uses. Anything unparseable
-// falls through to the raw input so the row never renders blank.
+// Timezone contract: `Expense.date` is the true UTC moment of the
+// transaction (the backend interprets the Curve body wall clock as
+// Europe/Lisbon before storing — see server/src/services/expenseDate.js).
+// The formatters here render in the *browser's* local timezone via the
+// standard Date getters, so a viewer in Portugal sees 15:40 for a
+// 15:40 Lisbon transaction, a viewer in Spain sees 16:40, a viewer in
+// New York sees 10:40. No wall-clock tricks, no timezone pinning.
 
 function startOfLocalDay(d) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();

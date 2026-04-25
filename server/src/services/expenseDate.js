@@ -1,41 +1,41 @@
 /**
- * Expense date parser — shared between the sync orchestrator, the
- * manual POST /api/expenses handler, and the one-shot backfill in
- * scripts/analyze-expense-dates.js.
+ * Legacy expense-date string parser.
  *
- * Sits alongside `expenseStats.js::parseExpenseDate` which is a
- * simpler Date.parse-only helper used by the dashboard aggregation.
- * The two are kept separate for now because this one is the
- * "canonical" typed-Date producer (writes go through here) and the
- * stats one is "best-effort for reads" — unifying them is a follow-up
- * once the migration is done and nobody reads the string `date`
- * anymore.
+ * HISTORICAL NOTE
+ * ---------------
+ * `expense.date` is now sourced from the MIME `Date:` header
+ * (`envelope.date` from imapflow, yielded by
+ * services/imapReader.js::fetchUnseen and consumed by the sync
+ * orchestrator). That header is always UTC with seconds precision and
+ * independent of the per-merchant TZ variance in the Curve email body
+ * — see CLAUDE.md → Expense Date Timezone Invariant for the full
+ * contract.
+ *
+ * This helper therefore exists only for **fallback** and **legacy
+ * conversion** scenarios:
+ *
+ *   - Orchestrator fallback when `envelopeDate` is unexpectedly null
+ *     (malformed email without a Date header). Logs a parse_error
+ *     upstream.
+ *   - `POST /api/expenses` manual create (unused from the UI today,
+ *     but the route is live).
+ *   - `scripts/analyze-expense-dates.js` cleanup of Embers-era rows
+ *     that landed in Mongo as BSON `String` instead of `Date`.
  *
  * Contract
  * --------
  *   parseExpenseDate(value) → { date: Date|null, reason: string }
  *
  * Never throws. Always returns an object so call-sites can log the
- * reason string if they care (the backfill does; the INSERT paths
- * don't — they just write `date: null` and move on).
+ * reason string if they care.
  *
- * Handles the three shapes observed in the shared `expenses`
- * collection (see scripts/analyze-expense-dates.js for the dev-dump
- * survey):
- *
- *   1. already a Date (BSON Date, typically from Embers' Mongoid
- *      write path which declares `field :date, type: DateTime`) →
- *      pass through
- *   2. string in the canonical Curve format ("06 April 2026
- *      08:53:31") or anything `Date.parse` can handle → normalised
- *      to a Date via `new Date(Date.parse(...))`
- *   3. string that Date.parse rejects but matches the explicit
- *      "DD Month YYYY HH:MM(:SS)?" regex → parsed manually, used as
- *      a safety net for Node builds with minimal ICU where Date.parse
- *      disagrees with V8 mainline
- *
- * Everything else (null, empty string, weird numbers, unparseable
- * strings) returns `{ date: null, reason: <descriptor> }`.
+ * For string inputs matching the canonical Curve body format
+ * ("DD Month YYYY HH:MM:SS") the numerals are packed into a Date's
+ * UTC components via `Date.UTC(...)`. This is **not** the
+ * authoritative transaction moment (body TZ varies per email) — it's
+ * just a deterministic host-TZ-independent coercion so legacy
+ * callers get stable Date objects. Real ingestion bypasses this by
+ * using `envelopeDate` directly.
  */
 
 const MONTHS = {
@@ -70,15 +70,9 @@ export function parseExpenseDate(value) {
   const trimmed = value.trim();
   if (trimmed === '') return { date: null, reason: 'empty_string' };
 
-  // Path 1 — V8 Date.parse. Handles the canonical Curve string, ISO,
-  // RFC 2822, and most reasonable variants.
-  const t = Date.parse(trimmed);
-  if (!Number.isNaN(t)) return { date: new Date(t), reason: 'parse_ok' };
-
-  // Path 2 — explicit DD Month YYYY HH:MM(:SS)? regex. Parses the
-  // numbers manually so we don't depend on Date.parse handling
-  // English month names in whatever locale the host is configured
-  // for. Time portion is optional (`25 Dec 2025, 14:30` form).
+  // Path 1 — Curve body format. Numerals packed into UTC components
+  // via Date.UTC so the result is server-TZ-independent. Only used as
+  // a fallback today; see the module docstring.
   const m = trimmed.match(
     /^(\d{1,2})\s+([A-Za-z]+)(?:,)?\s+(\d{4})(?:[\s,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
   );
@@ -96,6 +90,11 @@ export function parseExpenseDate(value) {
       }
     }
   }
+
+  // Path 2 — V8 Date.parse for ISO / RFC 2822 shapes that carry their
+  // own timezone. Produces the correct UTC moment regardless of host.
+  const t = Date.parse(trimmed);
+  if (!Number.isNaN(t)) return { date: new Date(t), reason: 'parse_ok' };
 
   return { date: null, reason: 'unparseable' };
 }

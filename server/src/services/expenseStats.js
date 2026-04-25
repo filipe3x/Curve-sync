@@ -179,6 +179,7 @@ export function computeSavingsScore(weeklySavings, weeklyBudget) {
  *   weekly_budget: number,
  *   savings_score: number,
  *   emails_processed: number,
+ *   last_emails_synced: number,
  *   last_sync_at: string|null,
  *   last_sync_status: string|null,
  *   cycle: { start: string, end: string, day: number },
@@ -196,6 +197,7 @@ export async function computeDashboardStats({ userId }, overrides = {}) {
             sync_cycle_day: 1,
             weekly_budget: 1,
             emails_processed_total: 1,
+            last_emails_synced: 1,
             last_sync_at: 1,
             last_sync_status: 1,
           },
@@ -257,6 +259,7 @@ export async function computeDashboardStats({ userId }, overrides = {}) {
     weekly_budget: Math.round(weeklyBudget * 100) / 100,
     savings_score: savingsScore,
     emails_processed: Number(config?.emails_processed_total ?? 0),
+    last_emails_synced: Number(config?.last_emails_synced ?? 0),
     last_sync_at: config?.last_sync_at ? config.last_sync_at.toISOString() : null,
     last_sync_status: config?.last_sync_status ?? null,
     cycle: {

@@ -118,9 +118,25 @@ ExpenseSchema.index({ digest: 1 }, { unique: true });
 **Campos que o standalone escreve:**
 - `entity` — nome do estabelecimento (parsed do email)
 - `amount` — valor em EUR (parsed do email)
-- `date` — data da transacao (parsed do email)
+- `date` — data da transacao. BSON `Date` em **UTC verdadeiro**, com
+  precisao ao segundo. A fonte autoritativa e o **header MIME `Date:`**
+  do email (`envelope.date` do imapflow), NAO o body. O body tem
+  sempre uma hora formatada em wall clock mas a TZ desse wall clock
+  varia por merchant (Celeiro emite Europe/Lisbon, Continente e
+  Vodafone emitem CEST, Apple emite US Eastern, Aliexpress emite
+  UTC+2). O header MIME e sempre `+0000`, logo e o que alimenta
+  `expense.date` no INSERT. O body continua a alimentar o `digest`
+  (compat bit-a-bit com o `curve.py`) + `entity` + `amount` + `card`.
+  Frontend usa os getters standard (`getHours()` etc.), logo quem
+  abrir a app em Madrid ve +1h em relacao a Lisboa, quem abrir em NY
+  ve -5h, etc. Rows historicas guardadas antes deste fix sao
+  corrigidas por `server/scripts/migrate-expense-date-from-imap.js`
+  (re-le os envelopes do IMAP e faz UPDATE por `digest`; dry-run
+  obrigatorio antes do `--apply --yes`).
 - `card` — cartao usado (parsed do email)
-- `digest` — SHA-256 de `entity + amount + date + card` (dedup)
+- `digest` — SHA-256 de `entity + amount + date + card` (dedup; a
+  digest hasheia a STRING original do email, nao o `Date` tipado —
+  mantem paridade bit-a-bit com o `curve.py` do Embers)
 - `user_id` — ObjectId do user (vem da CurveConfig)
 - `category_id` — ObjectId da categoria (auto-assigned)
 - `created_at`, `updated_at` — geridos pelo Mongoose timestamps

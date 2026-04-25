@@ -57,7 +57,7 @@ decoded_email_utf8 = decoded_email_iso.decode('utf-8')
 |-------|----------|-------|
 | **entity** | `td.u-bold` | First `<td>` with class `u-bold` |
 | **amount** | `td.u-bold` (next sibling) | `entity_tag.find_next_sibling('td', class_='u-bold')`, then strip `€` |
-| **date** | `td.u-greySmaller.u-padding__top--half` | First match of both classes |
+| **date** | `td.u-greySmaller.u-padding__top--half` | First match of both classes — **string only**, feeds the digest. NOT the authoritative timestamp (body TZ varies per merchant — see CLAUDE.md → Expense Date Timezone Invariant). The stored `Expense.date` comes from the MIME `Date:` header (`envelope.date`). |
 | **card** | `td.u-padding__top--half` | **Penultimate** element: `find_all(...)[-2]`, then join stripped strings |
 
 ### Digest Formula
@@ -185,15 +185,30 @@ Implemented at `server/src/services/emailParser.js`. Key design decisions:
 - **Required vs optional fields** (matches `Expense` mongoose schema):
   - REQUIRED: `entity`, `amount`, `date` — missing any → `ParseError`,
     orchestrator logs as `parse_error`, email left UNSEEN for retry.
+    NOTE: the body `date` string is required because it feeds the
+    digest, NOT because it sources the stored `Expense.date` — see the
+    "Timezone source" bullet below.
   - OPTIONAL: `card` — missing → warning, expense still inserted (digest
     computed with empty card, so dedup is weaker for that row only).
 - **Layered fallbacks** (future-proof against template changes):
   - `entity`: `td.u-bold` → `.u-bold` (any tag)
   - `amount`: `entity.nextSibling(td.u-bold)` → 2nd global `td.u-bold` →
     regex `/€\s*-?\d[\d.,]*/` on raw HTML
-  - `date`: `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
+  - `date` (body string for digest only): `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
     regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
   - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
+- **Timezone source**: the body `date` field is NOT the source of
+  truth for `Expense.date`. The Curve body is a locale-formatted wall
+  clock whose timezone varies per merchant (Celeiro → Europe/Lisbon,
+  Continente / Vodafone → CEST, Apple → US Eastern, Aliexpress →
+  UTC+2). Only the MIME `Date:` header is consistently UTC.
+  `imapReader.fetchUnseen` yields `envelopeDate` alongside `source`,
+  and the orchestrator writes it directly into `expense.date`. The
+  body string still feeds the digest + entity + amount + card, just
+  never the stored Date. Frontend uses the standard browser-TZ
+  getters. See `CLAUDE.md → Expense Date Timezone Invariant` for the
+  full contract and `server/scripts/migrate-expense-date-from-imap.js`
+  for the one-shot correction of rows stored before this fix.
 - **Amount parsing** (`parseAmount`): tolerates `€X.XX`, `X,XX€`, `EUR X`,
   European thousands `1.234,56`, US thousands `1,234.56`, negatives for
   refunds. Returns a `Number`.
@@ -523,13 +538,15 @@ the scheduler is mid-run can't accidentally open a second IMAP session.
 
 #### Deliberately deferred
 
-- **`Expense.date` is a `String`, not a `Date`** — bit-for-bit
-  compatibility with `curve.py`, which never parsed the date. This
-  means lexicographic ordering over `"22 Mar 2026 14:03:21"` does NOT
-  produce chronological order (Apr < Mar alphabetically). The
-  orchestrator does not solve this; the dashboard will need its own
-  parser once it does month-by-month rendering. **Do NOT change the
-  schema** — Embers' parallel ingestion inserts with the same format.
+- **`Expense.date` schema** — ~~stored as `String`~~ RESOLVED. The
+  schema now declares `date: { type: Date, required: true }`
+  (`server/src/models/Expense.js`) and the orchestrator stores the
+  MIME `Date:` header (`envelopeDate` from imapflow) directly — the
+  body's locale-formatted timestamp is not used as the date source
+  because its timezone varies per merchant (see the "Timezone source"
+  bullet in Phase 1 above and `CLAUDE.md → Expense Date Timezone
+  Invariant`). The digest still hashes the original body string so
+  dedup with Embers' parallel curve.py ingestion is unaffected.
 - **Multi-process sync lock** — deferred to Phase 5. In-memory flag
   is enough while Curve Sync runs as a single Node process.
 - **Canary enforcement beyond dashboard colouring** — the Phase 3

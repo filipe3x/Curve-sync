@@ -52,6 +52,16 @@ const curveConfigSchema = new mongoose.Schema(
     last_sync_at: { type: Date },
     last_sync_status: { type: String, enum: ['ok', 'error', null], default: null },
     emails_processed_total: { type: Number, default: 0 },
+    // `summary.ok` of the most recent sync run that inserted at least
+    // one new expense — sticky on the last meaningful batch. Stays at
+    // its previous value across runs that produced 0 ok, so the
+    // dashboard's "Último sync" subtitle keeps showing the last
+    // useful event ("5 emails novos às 12:20") instead of resetting
+    // to 0 the moment a quiet poll comes back empty. Updated in the
+    // same orchestrator block as `last_email_at`. Defaults to 0 so
+    // the dashboard formatter can fall back to `last_sync_status`
+    // before any successful insert exists.
+    last_emails_synced: { type: Number, default: 0 },
     // Silent-failure canary. Updated only when a sync inserts a genuine
     // new expense (CurveLog status='ok') — duplicates do NOT bump it.
     // The dashboard paints this red if older than 3 days while

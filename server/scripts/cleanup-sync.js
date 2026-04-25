@@ -171,6 +171,7 @@ async function main() {
         last_sync_status: null,
         last_email_at: null,
         emails_processed_total: 0,
+        last_emails_synced: 0,
         is_syncing: false,
       },
     },

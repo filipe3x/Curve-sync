@@ -61,7 +61,7 @@ These rules are critical to avoid breaking the shared database:
 
 ### Expense Deduplication
 
-Expenses use a SHA-256 digest of `entity + amount + date + card` as a unique index. This prevents duplicate inserts when reprocessing the same emails. The same logic exists in the original `curve.py` and must be replicated exactly.
+Expenses use a SHA-256 digest of `entity + amount + date + card` as a unique index. This prevents duplicate inserts when reprocessing the same emails. The same logic exists in the original `curve.py` and must be replicated exactly. Note: the `date` in this concatenation is the **body string** (the locale-formatted wall clock printed inside the email HTML), NOT the typed `Expense.date` BSON field — see *Expense Date Timezone Invariant* below for why those are different and why this one cannot change.
 
 ### Custom Monthly Cycle
 
@@ -74,6 +74,20 @@ Weekly budget = EUR 295/4. Score formula: `score = (log(weekly_savings + 1) / lo
 ### Email Parsing Pipeline
 
 The original `curve.py` (in `docs/embers-reference/`) extracts fields from Curve Card HTML emails using CSS selectors: `entity` from `td.u-bold`, `amount` (EUR) from second `td.u-bold`, `date` from `td.u-greySmaller.u-padding__top--half`, `card` from penultimate `td.u-padding__top--half`. The standalone version should port this to cheerio with fallback selectors for resilience.
+
+### Expense Date Timezone Invariant
+
+`Expense.date` is sourced from the email's **MIME `Date:` header** (`envelope.date` in imapflow), NOT from the body string. The header is always `+0000` UTC with seconds precision; the body is a locale-formatted wall clock whose timezone **varies by merchant** — Celeiro emits Europe/Lisbon, Continente and Vodafone emit CEST, Apple emits US Eastern, Aliexpress emits UTC+2. Any single-TZ interpretation of the body would be wrong for some fraction of receipts. The footer line "Generated on ... UTC" in the body confirms the same UTC value as the MIME Date (minute precision), and cross-checking body vs footer on a live receipt is the cleanest way to verify a merchant's body TZ without trusting it.
+
+The app stores the **true UTC instant** from the envelope and renders in the **viewer's browser TZ**, so a Lisbon viewer sees 15:40, a Madrid viewer sees 16:40, a NY viewer sees 10:40 — all for the same transaction.
+
+- Reader (`server/src/services/imapReader.js`): `fetchUnseen()` yields `{ uid, source, envelopeDate }`. `envelopeDate` is a JS Date built from `msg.envelope.date` (null only on pathologically malformed emails).
+- Orchestrator (`server/src/services/syncOrchestrator.js`): writes `envelopeDate` into `expense.date` directly. The body string still feeds `parsed.digest` (bit-for-bit parity with `curve.py` dedup key) and `parsed.entity/amount/card`, but never the stored Date. If `envelopeDate` is unexpectedly null, the orchestrator falls back to `parseExpenseDateOrNull(parsed.date)` — a deterministic but semantically wrong coercion preserved only as a safety net.
+- Legacy helper (`server/src/services/expenseDate.js`): `parseExpenseDate` still exists for string→Date coercion in scripts and the manual `POST /api/expenses` route. It packs body numerals into UTC components via `Date.UTC(...)` — host-TZ-independent but NOT timezone-aware. Not the canonical path anymore.
+- Frontend (`client/src/utils/relativeDate.js`): `formatExpenseDateFull`, `formatExpenseDate`, and `formatAbsoluteDate` use the standard `getHours()/getMinutes()/…` getters. `Date.now()` for relative diffs.
+- Migration (`server/scripts/migrate-expense-date-from-imap.js`): connects to IMAP via the existing OAuth stack, fetches ALL receipts in the configured folder, matches each to Mongo by `digest`, and updates `expense.date` to the envelope value. Dry-runs by default; `--apply --yes` to write.
+
+Never switch back to "body-string as source of truth" — it was the single root cause of every timezone bug in this codebase history (wall-clock-as-UTC, Lisbon misassumption, per-merchant CEST/US-Eastern variance).
 
 ### Email Authentication (OAuth2 — no proxies)
 

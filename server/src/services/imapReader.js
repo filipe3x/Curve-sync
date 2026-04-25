@@ -360,11 +360,18 @@ export class ImapReader {
    *
    * Each yielded value has the full raw email source (headers + MIME
    * body) so `emailParser.js` can handle MIME decoding and HTML parsing
-   * itself. The parser and this reader share no state besides the
-   * `{uid, source}` contract — swapping out imapflow later would not
-   * touch the parser.
+   * itself, plus the MIME `Date:` header (`envelopeDate`) — the true
+   * UTC moment of the transaction. Curve's body timestamp is a
+   * per-email locale-formatted wall clock in a timezone that varies
+   * between merchants (Celeiro emits Europe/Lisbon, Continente and
+   * Vodafone emit CEST, Apple emits US Eastern, Aliexpress emits
+   * UTC+2…), so it cannot be used as the authoritative moment. The
+   * envelope Date is always `+0000` — we use it as `expense.date` and
+   * let the body string feed the digest only (bit-for-bit compat with
+   * curve.py's dedup key). See CLAUDE.md → Expense Date Timezone
+   * Invariant for the full contract.
    *
-   * @yields {{ uid: number, source: string }}
+   * @yields {{ uid: number, source: string, envelopeDate: Date|null }}
    */
   async *fetchUnseen() {
     await this.openFolder();
@@ -383,7 +390,10 @@ export class ImapReader {
     try {
       for await (const msg of this.client.fetch(
         criteria,
-        { uid: true, source: true },
+        // `envelope: true` gives us the parsed MIME headers including
+        // the `Date:` line as a Date object. imapflow surfaces it as
+        // `msg.envelope.date`; we pull it out and pass it downstream.
+        { uid: true, source: true, envelope: true },
       )) {
         if (!msg.source) continue;
         yield {
@@ -395,6 +405,14 @@ export class ImapReader {
           source: Buffer.isBuffer(msg.source)
             ? msg.source.toString('latin1')
             : String(msg.source),
+          // `envelope.date` is already a JS Date when the MIME Date
+          // header parsed cleanly. If the email is malformed or lacks
+          // the header (shouldn't happen for Curve receipts, but
+          // defence-in-depth), we yield `null` and let the orchestrator
+          // log a parse_error rather than crash.
+          envelopeDate: msg.envelope?.date instanceof Date
+            ? msg.envelope.date
+            : null,
         };
         fetched += 1;
         if (fetched >= maxPerRun) {

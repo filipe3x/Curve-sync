@@ -11,7 +11,75 @@ sees the full context before the deploy gate.
 
 ---
 
+## release: `Expense.date` sourced from MIME `Date:` envelope (was: body string)
+
+**What changed**
+
+- `imapReader.fetchUnseen()` now requests `envelope: true` and yields
+  `{ uid, source, envelopeDate }`. The orchestrator writes
+  `envelopeDate` straight into `expense.date` — the body string still
+  feeds the digest, entity, amount, and card, but never the stored
+  Date.
+- Frontend (`client/src/utils/relativeDate.js`) renders with the
+  standard browser-TZ getters (`getHours()`, `getMinutes()`, …). A
+  Lisbon viewer sees 15:40 for a 15:40 Lisbon transaction, a Madrid
+  viewer sees 16:40, a NY viewer sees 10:40.
+- `services/expenseDate.js` keeps `parseExpenseDate()` for the manual
+  `POST /api/expenses` route and the legacy
+  `analyze-expense-dates.js` script, but it is no longer the
+  authoritative producer for sync inserts.
+- New script `server/scripts/migrate-expense-date-from-imap.js`
+  corrects rows ingested under the old contract by re-fetching their
+  envelope from IMAP. Dry-runs by default; `--apply --yes` to write;
+  `--last-cycles=N` / `--since=ISO` to scope by transaction date.
+
+**Why the change**
+
+The Curve email body's date string is a locale-formatted wall clock
+whose timezone **varies per merchant** — verified live: Celeiro
+emits Europe/Lisbon, Continente and Vodafone emit CEST, Apple emits
+US Eastern, Aliexpress emits UTC+2. Any single-TZ interpretation of
+the body is wrong for some fraction of receipts. The MIME `Date:`
+header is consistently `+0000` UTC and is the only field we can
+trust as the transaction moment. The previous "body as wall clock"
+convention also broke the moment the production VPS moved to
+America/Los_Angeles — `Date.parse(body)` started reading the
+numerals as PDT-local and storing them 7-8 h ahead of UTC.
+
+**Operator action**
+
+1. Standard deploy (`pm2 restart curvsync`). New ingest is correct
+   from the moment the orchestrator picks up the new code.
+2. Run the migration to backfill recent rows. Recommended scope:
+   ```
+   node server/scripts/migrate-expense-date-from-imap.js --last-cycles=2
+   node server/scripts/migrate-expense-date-from-imap.js --last-cycles=2 --apply --yes
+   ```
+   Older rows (out_of_range) keep their existing wall-clock-as-UTC
+   values — the cosmetic 1-2 h drift in WEST never caused a complaint
+   and the cycle aggregations are day-level so the drift doesn't
+   move them.
+3. Updated Curve Receipts (subject prefixed "Updated Curve Receipt: …")
+   are auto-skipped by the migration via the `--update-threshold-h=12`
+   guard — the envelope on a re-emission is the resend time, not the
+   transaction moment.
+
+See `CLAUDE.md → Expense Date Timezone Invariant` for the full
+contract.
+
+---
+
 ## release: `Expense.date` typed as BSON `Date` (drop `date_at`)
+
+> **Superseded for the sync path** by the later "envelope.date as
+> source of truth" change. `Expense.date` is still BSON `Date`, but
+> `parseExpenseDate()` is no longer the authoritative producer for
+> sync inserts — the orchestrator writes `envelope.date` from the
+> MIME header directly. `parseExpenseDate()` survives as a fallback
+> and as the producer for the manual `POST /api/expenses` route. See
+> `CLAUDE.md → Expense Date Timezone Invariant` for the current
+> contract and `server/scripts/migrate-expense-date-from-imap.js` for
+> the migration that re-sources historical rows from the envelope.
 
 **What changed**
 
