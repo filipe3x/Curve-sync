@@ -192,7 +192,13 @@ O Curve e um cartao agregador que encaminha pagamentos para outros cartoes. Cada
 3. **Parsing HTML**: usa BeautifulSoup para extrair dados do email:
    - `entity` - nome do estabelecimento (tag `td.u-bold`)
    - `amount` - valor em EUR (segundo `td.u-bold`, remove simbolo `€`)
-   - `date` - data da transacao (tag `td.u-greySmaller.u-padding__top--half`)
+   - `date` - string da hora (tag `td.u-greySmaller.u-padding__top--half`).
+     **Nota:** no Curve Sync moderno este campo so alimenta o digest;
+     o `Expense.date` BSON e gravado a partir do header MIME `Date:`
+     do email (`envelope.date`), porque a TZ do body varia por
+     merchant e nao e fiavel — ver `CLAUDE.md → Expense Date Timezone
+     Invariant` e a seccao **Modelo de Dados → Timezone em date**
+     acima.
    - `card` - nome e cartao usado (penultimo `td.u-padding__top--half`)
 4. **Digest**: gera hash SHA-256 da concatenacao dos campos extraidos
 5. **POST para API**: envia os dados como JSON para `/admin/expenses/add_expense`

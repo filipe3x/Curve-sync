@@ -61,7 +61,7 @@ These rules are critical to avoid breaking the shared database:
 
 ### Expense Deduplication
 
-Expenses use a SHA-256 digest of `entity + amount + date + card` as a unique index. This prevents duplicate inserts when reprocessing the same emails. The same logic exists in the original `curve.py` and must be replicated exactly.
+Expenses use a SHA-256 digest of `entity + amount + date + card` as a unique index. This prevents duplicate inserts when reprocessing the same emails. The same logic exists in the original `curve.py` and must be replicated exactly. Note: the `date` in this concatenation is the **body string** (the locale-formatted wall clock printed inside the email HTML), NOT the typed `Expense.date` BSON field — see *Expense Date Timezone Invariant* below for why those are different and why this one cannot change.
 
 ### Custom Monthly Cycle
 

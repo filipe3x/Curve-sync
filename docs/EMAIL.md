@@ -57,7 +57,7 @@ decoded_email_utf8 = decoded_email_iso.decode('utf-8')
 |-------|----------|-------|
 | **entity** | `td.u-bold` | First `<td>` with class `u-bold` |
 | **amount** | `td.u-bold` (next sibling) | `entity_tag.find_next_sibling('td', class_='u-bold')`, then strip `€` |
-| **date** | `td.u-greySmaller.u-padding__top--half` | First match of both classes |
+| **date** | `td.u-greySmaller.u-padding__top--half` | First match of both classes — **string only**, feeds the digest. NOT the authoritative timestamp (body TZ varies per merchant — see CLAUDE.md → Expense Date Timezone Invariant). The stored `Expense.date` comes from the MIME `Date:` header (`envelope.date`). |
 | **card** | `td.u-padding__top--half` | **Penultimate** element: `find_all(...)[-2]`, then join stripped strings |
 
 ### Digest Formula
@@ -185,13 +185,16 @@ Implemented at `server/src/services/emailParser.js`. Key design decisions:
 - **Required vs optional fields** (matches `Expense` mongoose schema):
   - REQUIRED: `entity`, `amount`, `date` — missing any → `ParseError`,
     orchestrator logs as `parse_error`, email left UNSEEN for retry.
+    NOTE: the body `date` string is required because it feeds the
+    digest, NOT because it sources the stored `Expense.date` — see the
+    "Timezone source" bullet below.
   - OPTIONAL: `card` — missing → warning, expense still inserted (digest
     computed with empty card, so dedup is weaker for that row only).
 - **Layered fallbacks** (future-proof against template changes):
   - `entity`: `td.u-bold` → `.u-bold` (any tag)
   - `amount`: `entity.nextSibling(td.u-bold)` → 2nd global `td.u-bold` →
     regex `/€\s*-?\d[\d.,]*/` on raw HTML
-  - `date`: `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
+  - `date` (body string for digest only): `td.u-greySmaller.u-padding__top--half` → `td.u-greySmaller` →
     regex `/\d{1,2}\s+[A-Za-z]+\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}/`
   - `card`: penultimate `td.u-padding__top--half` (no fallback — optional)
 - **Timezone source**: the body `date` field is NOT the source of
@@ -537,12 +540,13 @@ the scheduler is mid-run can't accidentally open a second IMAP session.
 
 - **`Expense.date` schema** — ~~stored as `String`~~ RESOLVED. The
   schema now declares `date: { type: Date, required: true }`
-  (`server/src/models/Expense.js`) and the orchestrator types the
-  string via `parseExpenseDateOrNull` before insert. The digest still
-  hashes the original string form so dedup with Embers' parallel
-  curve.py ingestion is unaffected. Wall-clock numerals are packed
-  into UTC components — see the "Timezone invariant" bullet in
-  Phase 1 above.
+  (`server/src/models/Expense.js`) and the orchestrator stores the
+  MIME `Date:` header (`envelopeDate` from imapflow) directly — the
+  body's locale-formatted timestamp is not used as the date source
+  because its timezone varies per merchant (see the "Timezone source"
+  bullet in Phase 1 above and `CLAUDE.md → Expense Date Timezone
+  Invariant`). The digest still hashes the original body string so
+  dedup with Embers' parallel curve.py ingestion is unaffected.
 - **Multi-process sync lock** — deferred to Phase 5. In-memory flag
   is enough while Curve Sync runs as a single Node process.
 - **Canary enforcement beyond dashboard colouring** — the Phase 3
