@@ -56,14 +56,30 @@
  *                        entity contains substr (case-insensitive).
  *                        Reading still pulls the whole folder.
  *
+ *   --since=ISO          Only update expenses whose existing
+ *                        `date` is >= ISO. Older rows are silently
+ *                        skipped (out_of_range stat). Useful to
+ *                        limit blast radius — historical rows are
+ *                        usually within 1-2 h of correct already.
+ *
+ *   --last-cycles=N      Same as `--since=<start of N-th cycle back>`,
+ *                        using the custom day-22 cycle helper. e.g.
+ *                        `--last-cycles=1` from today is the start
+ *                        of the current cycle; `--last-cycles=2` is
+ *                        the start of the previous cycle.
+ *
+ *   --cycle-day=D        Override the cycle-day used by
+ *                        --last-cycles (default 22).
+ *
  *   --max-emails=N       Cap on emails fetched per config (default
  *                        10000). Safety net for huge mailboxes.
  *
  * Usage
  * -----
- *   node server/scripts/migrate-expense-date-from-imap.js
+ *   node server/scripts/migrate-expense-date-from-imap.js --last-cycles=2
+ *   node server/scripts/migrate-expense-date-from-imap.js --since=2026-02-22
  *   node server/scripts/migrate-expense-date-from-imap.js --entity-like=Celeiro
- *   node server/scripts/migrate-expense-date-from-imap.js --apply --yes
+ *   node server/scripts/migrate-expense-date-from-imap.js --last-cycles=2 --apply --yes
  *
  * Environment: loads `server/.env` (MONGODB_URI, AZURE_CLIENT_ID,
  * IMAP_ENCRYPTION_KEY …) via dotenv. Requires the user to have a
@@ -78,6 +94,7 @@ import Expense from '../src/models/Expense.js';
 import { createImapReader } from '../src/services/imapReader.js';
 import { parseEmail, ParseError } from '../src/services/emailParser.js';
 import { parseExpenseDateOrNull } from '../src/services/expenseDate.js';
+import { cycleBoundsFor, normaliseCycleDay } from '../src/services/cycle.js';
 
 dotenv.config({ path: new URL('../.env', import.meta.url) });
 
@@ -97,6 +114,44 @@ const CONFIRMED = args.has('yes');
 const USER_ID = args.get('user-id') ?? null;
 const ENTITY_LIKE = args.get('entity-like') ?? null;
 const MAX_EMAILS = Number(args.get('max-emails') ?? 10000);
+
+// Scope updates by transaction date (the row's existing
+// `expense.date`). `--last-cycles=N` walks N custom cycles back from
+// today and uses that cycle's start as the lower bound;
+// `--since=ISO` is the explicit override. Both filter at the Mongo
+// lookup so older rows skip silently — no IMAP reduction (we still
+// need to fetch every email so digests can match the most recent
+// emails even when their stored row is OLD).
+const SINCE_ISO = args.get('since') ?? null;
+const LAST_CYCLES = args.has('last-cycles')
+  ? Number(args.get('last-cycles'))
+  : null;
+let SINCE = null;
+if (SINCE_ISO) {
+  const t = new Date(SINCE_ISO);
+  if (Number.isNaN(t.getTime())) {
+    console.error(`invalid --since: ${SINCE_ISO}`);
+    process.exit(2);
+  }
+  SINCE = t;
+} else if (LAST_CYCLES != null) {
+  if (!Number.isFinite(LAST_CYCLES) || LAST_CYCLES < 1) {
+    console.error(`invalid --last-cycles: ${args.get('last-cycles')}`);
+    process.exit(2);
+  }
+  // Walk back N cycle boundaries from today. Cycle day defaults to
+  // 22; per-config override is read inside processConfig() and
+  // overrides this default if present.
+  const cycleDay = normaliseCycleDay(args.get('cycle-day') ?? 22);
+  let { start } = cycleBoundsFor(new Date(), cycleDay);
+  for (let i = 1; i < LAST_CYCLES; i++) {
+    // Step back one day before the current cycle's start, then ask
+    // for that anchor's cycle bounds — gives the previous cycle.
+    const anchor = new Date(start.getTime() - 86_400_000);
+    start = cycleBoundsFor(anchor, cycleDay).start;
+  }
+  SINCE = start;
+}
 // Updated-receipt guard: Curve re-emits receipts hours/days after the
 // original transaction (subject prefixed "Updated Curve Receipt: …")
 // and the MIME Date on the re-emission is *not* the transaction
@@ -128,6 +183,7 @@ function pad(v, n) {
 async function processConfig(config) {
   const header = `config _id=${config._id} user=${config.user_id} folder="${config.imap_folder || 'INBOX'}"`;
   console.log(`\n=== ${header} ===`);
+  if (SINCE) console.log(`  scope: only rows with expense.date >= ${SINCE.toISOString()}`);
 
   const reader = await createImapReader(config);
   await reader.connect();
@@ -168,6 +224,7 @@ async function processConfig(config) {
     parse_error: 0,
     no_expense: 0,
     already_correct: 0,
+    out_of_range: 0,
     updated_receipt_skipped: 0,
     needs_update: 0,
   };
@@ -200,6 +257,16 @@ async function processConfig(config) {
       { _id: 1, entity: 1, amount: 1, date: 1 },
     ).lean();
     if (!expense) { stats.no_expense++; continue; }
+
+    // Out-of-range guard: --since / --last-cycles scope updates by
+    // the row's existing `date`. Older rows are silently skipped to
+    // limit blast radius (current convention is wall-clock-as-UTC,
+    // off by 1-2 h during WEST but never noticed; not worth touching
+    // 700+ historical rows).
+    if (SINCE && expense.date instanceof Date && expense.date < SINCE) {
+      stats.out_of_range++;
+      continue;
+    }
 
     // Updated-receipt guard: compare envelope to body-date parsed as
     // numerals-in-UTC. If they differ by more than the threshold, the
