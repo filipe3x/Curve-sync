@@ -291,6 +291,7 @@ router.get('/sync/status', async (req, res) => {
       last_sync_at: config?.last_sync_at ?? null,
       last_sync_status: config?.last_sync_status ?? null,
       last_email_at: config?.last_email_at ?? null,
+      last_emails_synced: Number(config?.last_emails_synced ?? 0),
       sync_enabled: Boolean(config?.sync_enabled),
       sync_interval_minutes: config?.sync_interval_minutes ?? null,
     });

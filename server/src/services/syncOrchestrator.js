@@ -689,6 +689,15 @@ export async function syncEmails({ config, reader, dryRun = false }) {
       };
       if (summary.ok > 0) {
         update.$inc = { emails_processed_total: summary.ok };
+        // Last-batch sticky for the dashboard subtitle. Set (not
+        // increment) so each successful run *replaces* the previous
+        // value: the user sees "N emails novos" reflecting THIS run,
+        // not a running total. Quiet runs (summary.ok === 0) leave
+        // the field untouched so the card stays anchored on the last
+        // meaningful event instead of resetting to 0. Paired with
+        // `last_email_at` (set in the next branch), which carries the
+        // matching timestamp.
+        update.$set.last_emails_synced = summary.ok;
       }
       // Silent-failure canary: only tick forward on a REAL insert
       // from a REAL ImapReader run. Duplicates don't count, dry runs
